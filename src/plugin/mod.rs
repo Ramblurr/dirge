@@ -69,6 +69,42 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().contains("loaded with test"));
     }
+
+    #[test]
+    fn test_auto_discover_hooks() {
+        let mut mgr = PluginManager::new();
+        let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins")
+            .join("test_plugin.janet");
+        mgr.load_file(&fixtures).unwrap();
+
+        // Simulate auto-discovery: check each hook and register if found.
+        // The {stem}-{hook} naming convention means a plugin file named
+        // "workflow.janet" exports functions like "workflow-on-init".
+        // Here we test a file where functions are just "on-init" (no prefix).
+        let hook_names = [
+            "on-init", "on-prompt", "on-response",
+            "on-tool-start", "on-tool-end", "on-error", "on-complete",
+        ];
+        let mut found = 0;
+        for hook in &hook_names {
+            // Try to eval the function name directly
+            if mgr.eval(hook).is_ok() {
+                mgr.register(hook, hook);
+                found += 1;
+            }
+        }
+        assert_eq!(found, 1, "should find exactly on-init function");
+
+        let result = mgr.dispatch("on-init", "@{:model \"test\"}");
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("loaded with test"));
+
+        // Verify unknown hooks gracefully return empty
+        let result = mgr.dispatch("on-prompt", "@{:prompt \"hello\"}");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
 }
 
 use std::collections::HashMap;
