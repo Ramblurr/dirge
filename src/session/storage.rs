@@ -13,7 +13,7 @@ fn home_fallback() -> PathBuf {
 }
 
 fn dirs_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("ZS_DATA_DIR") {
+    if let Some(dir) = std::env::var_os("DIRGE_DATA_DIR") {
         return PathBuf::from(dir);
     }
     let base = dirs::data_dir().unwrap_or_else(home_fallback);
@@ -21,11 +21,11 @@ fn dirs_path() -> PathBuf {
 }
 
 pub(crate) fn config_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("ZS_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("DIRGE_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
-    let base = dirs::config_dir().unwrap_or_else(|| home_fallback().join(".config"));
-    base.join("dirge")
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config").join("dirge")
 }
 
 pub fn save_session(session: &Session) -> anyhow::Result<()> {

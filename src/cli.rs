@@ -21,10 +21,10 @@ pub struct Cli {
     #[arg(long = "no-session", help = "Ephemeral mode, do not save")]
     pub no_session: bool,
 
-    #[arg(long = "provider", env = "ZS_PROVIDER", help = "API provider")]
+    #[arg(long = "provider", env = "DIRGE_PROVIDER", help = "API provider")]
     pub provider: Option<String>,
 
-    #[arg(long = "model", env = "ZS_MODEL", help = "Model name")]
+    #[arg(long = "model", env = "DIRGE_MODEL", help = "Model name")]
     pub model: Option<String>,
 
     #[arg(
