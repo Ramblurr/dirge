@@ -128,6 +128,10 @@ pub async fn run_interactive(
     input.set_monochrome(cli.no_color);
     let mut is_running = false;
     let mut agent_rx: Option<mpsc::Receiver<AgentEvent>> = None;
+    // Handle to the background agent task. Held alongside `agent_rx` so the
+    // UI can abort in-flight work on Ctrl+C/D/Esc — otherwise tools keep
+    // running and permission prompts arrive after the user has interrupted.
+    let mut agent_abort: Option<tokio::task::JoinHandle<()>> = None;
     let mut agent_line_started = false;
     let mut response_buf = String::new();
     let mut response_start_line: Option<usize> = None;
@@ -321,6 +325,7 @@ pub async fn run_interactive(
                             }
                             if is_running {
                                 is_running = false;
+                                if let Some(h) = agent_abort.take() { h.abort(); }
                                 agent_rx = None;
                                 #[cfg(feature = "loop")]
                                 if let Some(ref mut ls) = loop_state {
@@ -450,6 +455,7 @@ pub async fn run_interactive(
 
                         if key.code == KeyCode::Esc && is_running {
                             is_running = false;
+                            if let Some(h) = agent_abort.take() { h.abort(); }
                             agent_rx = None;
                             #[cfg(feature = "loop")]
                             if let Some(ref mut ls) = loop_state {
@@ -637,6 +643,7 @@ pub async fn run_interactive(
                                                 session.add_message(MessageRole::User, &msg);
                                                 let runner = agent.clone().spawn_runner(msg, history);
                                                 agent_rx = Some(runner.event_rx);
+                                                agent_abort = Some(runner.task);
                                                 is_running = true;
                                             }
                                             Err(e) => {
@@ -728,6 +735,7 @@ pub async fn run_interactive(
                                             session.add_message(MessageRole::User, &prompt);
                                             let runner = agent.clone().spawn_runner(prompt, history);
                                             agent_rx = Some(runner.event_rx);
+                                                agent_abort = Some(runner.task);
                                             is_running = true;
                                             wt_return_path = Some(main_path);
                                         }
@@ -784,6 +792,7 @@ pub async fn run_interactive(
                                             let prompt = ls.build_prompt();
                                             let runner = agent.clone().spawn_runner(prompt, Vec::new());
                                             agent_rx = Some(runner.event_rx);
+                                                agent_abort = Some(runner.task);
                                             is_running = true;
                                             loop_label = Some(ls.iteration_label());
                                         }
@@ -850,6 +859,7 @@ pub async fn run_interactive(
 
                                 let runner = agent.clone().spawn_runner(prompt, history);
                                 agent_rx = Some(runner.event_rx);
+                                                agent_abort = Some(runner.task);
                                 is_running = true;
 
                                 session.add_message(MessageRole::User, &text);
@@ -1131,6 +1141,7 @@ pub async fn run_interactive(
                             )?;
                         }
                         is_running = false;
+                        if let Some(h) = agent_abort.take() { h.abort(); }
                         agent_rx = None;
 
                         #[cfg(feature = "plugin")]
@@ -1160,6 +1171,7 @@ pub async fn run_interactive(
                                     crate::agent::runner::convert_history(session),
                                 );
                                 agent_rx = Some(runner.event_rx);
+                                                agent_abort = Some(runner.task);
                                 is_running = true;
                             }
                             crate::plugin::PostDoneAction::LoopStop => {
@@ -1185,6 +1197,7 @@ pub async fn run_interactive(
                                     let prompt = ls.build_prompt();
                                     let runner = agent.clone().spawn_runner(prompt, Vec::new());
                                     agent_rx = Some(runner.event_rx);
+                                                agent_abort = Some(runner.task);
                                     is_running = true;
                                     loop_label = Some(ls.iteration_label());
                                     renderer.write_line(
@@ -1253,6 +1266,7 @@ pub async fn run_interactive(
                         }
 
                         is_running = false;
+                        if let Some(h) = agent_abort.take() { h.abort(); }
                         agent_rx = None;
                         agent_line_started = false;
                         response_buf.clear();

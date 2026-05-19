@@ -5,6 +5,7 @@ use rig::completion::{CompletionModel, Message};
 use rig::message::ToolResultContent;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::agent::recovery::{self, ErrorKind, RecoveryPolicy};
 use crate::agent::tools::ToolCache;
@@ -13,6 +14,11 @@ use crate::session::{MessageRole, Session};
 
 pub struct AgentRunner {
     pub event_rx: mpsc::Receiver<AgentEvent>,
+    /// Handle to the spawned tokio task. The UI calls `abort()` on interrupt
+    /// so in-flight LLM calls and tool execution actually stop, rather than
+    /// running to completion in the background and emitting permission
+    /// prompts after the user thought they cancelled.
+    pub task: JoinHandle<()>,
 }
 
 pub fn convert_history(session: &Session) -> Vec<Message> {
@@ -37,66 +43,61 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
     messages
 }
 
+/// Outcome of a streaming pass — used by the retry loop to decide whether
+/// it's safe to re-issue the request. We never buffer events themselves;
+/// they're sent to the UI as they arrive so the user sees progress in real
+/// time.
 #[derive(Default)]
-struct StreamBuffer {
-    events: Vec<AgentEvent>,
+struct StreamOutcome {
     had_tool_calls: bool,
-}
-
-impl StreamBuffer {
-    fn push(&mut self, event: AgentEvent) {
-        if matches!(
-            event,
-            AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
-        ) {
-            self.had_tool_calls = true;
-        }
-        self.events.push(event);
-    }
-
-    fn flush(&self, tx: &mpsc::Sender<AgentEvent>) {
-        for event in &self.events {
-            let _ = tx.try_send(event.clone());
-        }
-    }
+    error: Option<String>,
 }
 
 async fn run_stream<M, P>(
     agent: &Agent<M, P>,
     prompt: &str,
     history: Vec<Message>,
-) -> (StreamBuffer, Result<(), String>)
+    event_tx: &mpsc::Sender<AgentEvent>,
+) -> StreamOutcome
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
     P: rig::agent::PromptHook<M> + 'static,
 {
-    let mut buf = StreamBuffer::default();
+    let mut outcome = StreamOutcome::default();
     let mut stream = agent.stream_chat(prompt.to_string(), history).await;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
-                buf.push(AgentEvent::Token(CompactString::from(text.text)));
+                let _ = event_tx
+                    .send(AgentEvent::Token(CompactString::from(text.text)))
+                    .await;
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
                 r,
             ))) => {
-                buf.push(AgentEvent::Reasoning(CompactString::new(r.display_text())));
+                let _ = event_tx
+                    .send(AgentEvent::Reasoning(CompactString::new(r.display_text())))
+                    .await;
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
                 tool_call,
                 ..
             })) => {
-                buf.push(AgentEvent::ToolCall {
-                    name: CompactString::from(tool_call.function.name),
-                    args: tool_call.function.arguments,
-                });
+                outcome.had_tool_calls = true;
+                let _ = event_tx
+                    .send(AgentEvent::ToolCall {
+                        name: CompactString::from(tool_call.function.name),
+                        args: tool_call.function.arguments,
+                    })
+                    .await;
             }
             Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,
                 ..
             })) => {
+                outcome.had_tool_calls = true;
                 let mut output = String::new();
                 for c in tool_result.content.iter() {
                     if let ToolResultContent::Text(t) = c {
@@ -106,27 +107,32 @@ where
                         output.push_str(&t.text);
                     }
                 }
-                buf.push(AgentEvent::ToolResult {
-                    output: CompactString::from(output),
-                });
+                let _ = event_tx
+                    .send(AgentEvent::ToolResult {
+                        output: CompactString::from(output),
+                    })
+                    .await;
             }
             Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                 let response_text = res.response();
                 let estimated_tokens = Session::estimate_tokens(response_text);
-                buf.push(AgentEvent::Done {
-                    response: CompactString::from(response_text),
-                    tokens: estimated_tokens,
-                    cost: 0.0,
-                });
-                return (buf, Ok(()));
+                let _ = event_tx
+                    .send(AgentEvent::Done {
+                        response: CompactString::from(response_text),
+                        tokens: estimated_tokens,
+                        cost: 0.0,
+                    })
+                    .await;
+                return outcome;
             }
             Err(e) => {
-                return (buf, Err(e.to_string()));
+                outcome.error = Some(e.to_string());
+                return outcome;
             }
             _ => {}
         }
     }
-    (buf, Ok(()))
+    outcome
 }
 
 pub fn spawn_agent<M, P>(
@@ -143,85 +149,79 @@ where
     cache.clear();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let policy = RecoveryPolicy::default();
         let mut attempts = 0;
 
         loop {
-            let (buf, result) = run_stream(&agent, &prompt, history.clone()).await;
+            let outcome = run_stream(&agent, &prompt, history.clone(), &event_tx).await;
 
-            match result {
-                Ok(()) => {
-                    buf.flush(&event_tx);
-                    break;
-                }
-                Err(msg) => {
-                    let kind = recovery::classify_error(&msg);
+            let msg = match outcome.error {
+                None => break,
+                Some(m) => m,
+            };
 
-                    // Auth and unknown errors surface immediately
-                    if kind == ErrorKind::Auth || kind == ErrorKind::Other {
-                        buf.flush(&event_tx);
-                        let _ = event_tx
-                            .send(AgentEvent::Error(CompactString::new(msg)))
-                            .await;
-                        break;
-                    }
+            let kind = recovery::classify_error(&msg);
 
-                    // Context-length errors: not retryable without compaction
-                    // Surface a helpful error hinting at /compress
-                    if kind == ErrorKind::ContextLength {
-                        buf.flush(&event_tx);
-                        let hint = format!(
-                            "{} — try /compress to compact the conversation, then retry",
-                            msg
-                        );
-                        let _ = event_tx
-                            .send(AgentEvent::Error(CompactString::new(hint)))
-                            .await;
-                        break;
-                    }
-
-                    // If any tool calls were dispatched, their side effects already
-                    // executed. Retrying would re-run them. Flush the partial
-                    // buffer and surface the error instead.
-                    if buf.had_tool_calls {
-                        buf.flush(&event_tx);
-                        let err =
-                            format!("{} (tool side effects already applied, not retrying)", msg);
-                        let _ = event_tx
-                            .send(AgentEvent::Error(CompactString::new(err)))
-                            .await;
-                        break;
-                    }
-
-                    if !policy.should_retry(attempts, kind) {
-                        let retry_msg = format!("{} (retries exhausted)", msg);
-                        let _ = event_tx
-                            .send(AgentEvent::Error(CompactString::new(retry_msg)))
-                            .await;
-                        break;
-                    }
-
-                    // Emit retry notification as reasoning
-                    let retry_msg = format!(
-                        "retrying ({kind:?} error, attempt {attempt}/{max})...",
-                        kind = kind,
-                        attempt = attempts + 1,
-                        max = policy.max_retries(),
-                    );
-                    let _ = event_tx
-                        .send(AgentEvent::Reasoning(CompactString::new(retry_msg)))
-                        .await;
-
-                    let delay = policy.backoff_duration(attempts);
-                    tokio::time::sleep(delay).await;
-                    attempts += 1;
-                }
+            // Auth and unknown errors surface immediately
+            if kind == ErrorKind::Auth || kind == ErrorKind::Other {
+                let _ = event_tx
+                    .send(AgentEvent::Error(CompactString::new(msg)))
+                    .await;
+                break;
             }
+
+            // Context-length errors: not retryable without compaction
+            // Surface a helpful error hinting at /compress
+            if kind == ErrorKind::ContextLength {
+                let hint = format!(
+                    "{} — try /compress to compact the conversation, then retry",
+                    msg
+                );
+                let _ = event_tx
+                    .send(AgentEvent::Error(CompactString::new(hint)))
+                    .await;
+                break;
+            }
+
+            // If any tool calls were dispatched, their side effects already
+            // executed. Retrying would re-run them. Surface the error
+            // without retrying — events already streamed live, so the user
+            // sees what got done.
+            if outcome.had_tool_calls {
+                let err = format!("{} (tool side effects already applied, not retrying)", msg);
+                let _ = event_tx
+                    .send(AgentEvent::Error(CompactString::new(err)))
+                    .await;
+                break;
+            }
+
+            if !policy.should_retry(attempts, kind) {
+                let retry_msg = format!("{} (retries exhausted)", msg);
+                let _ = event_tx
+                    .send(AgentEvent::Error(CompactString::new(retry_msg)))
+                    .await;
+                break;
+            }
+
+            // Emit retry notification as reasoning
+            let retry_msg = format!(
+                "retrying ({kind:?} error, attempt {attempt}/{max})...",
+                kind = kind,
+                attempt = attempts + 1,
+                max = policy.max_retries(),
+            );
+            let _ = event_tx
+                .send(AgentEvent::Reasoning(CompactString::new(retry_msg)))
+                .await;
+
+            let delay = policy.backoff_duration(attempts);
+            tokio::time::sleep(delay).await;
+            attempts += 1;
         }
     });
 
-    AgentRunner { event_rx }
+    AgentRunner { event_rx, task }
 }
 
 pub async fn run_print<M, P>(
