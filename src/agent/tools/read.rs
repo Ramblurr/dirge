@@ -1,16 +1,35 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, PermCheck, ReadArgs, ToolError, check_perm_path};
 
 pub struct ReadTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
+    pub cache: Option<ToolCache>,
 }
 
 impl ReadTool {
+    #[allow(dead_code)]
     pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        ReadTool { permission, ask_tx }
+        ReadTool {
+            permission,
+            ask_tx,
+            cache: None,
+        }
+    }
+
+    pub fn with_cache(
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+        cache: ToolCache,
+    ) -> Self {
+        ReadTool {
+            permission,
+            ask_tx,
+            cache: Some(cache),
+        }
     }
 }
 
@@ -39,6 +58,19 @@ impl Tool for ReadTool {
 
     async fn call(&self, args: ReadArgs) -> Result<String, ToolError> {
         check_perm_path(&self.permission, &self.ask_tx, "read", &args.path).await?;
+
+        let cache_key = format!(
+            "read:{}:{}:{}",
+            args.path,
+            args.offset.unwrap_or(1),
+            args.limit.unwrap_or(2000),
+        );
+
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached);
+            }
+        }
 
         let metadata = tokio::fs::metadata(&args.path).await?;
         let file_size = metadata.len();
@@ -69,6 +101,11 @@ impl Tool for ReadTool {
             end,
             excerpt
         );
+
+        if let Some(ref cache) = self.cache {
+            cache.set(&cache_key, info.clone());
+        }
+
         Ok(info)
     }
 }

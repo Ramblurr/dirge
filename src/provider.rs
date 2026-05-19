@@ -9,6 +9,7 @@ use rig::streaming::StreamingChat;
 use crate::agent::builder;
 use crate::agent::prompt;
 use crate::agent::runner::{self, AgentRunner};
+use crate::agent::tools::ToolCache;
 use crate::cli::Cli;
 use crate::config::{Config, CustomProviderConfig};
 use crate::context::ContextFiles;
@@ -282,7 +283,13 @@ impl AnyModel {
 }
 
 #[derive(Clone)]
-pub enum AnyAgent {
+pub struct AnyAgent {
+    inner: AnyAgentInner,
+    cache: ToolCache,
+}
+
+#[derive(Clone)]
+pub(crate) enum AnyAgentInner {
     OpenRouter(Agent<openrouter::completion::CompletionModel>),
     OpenAI(Agent<openai::completion::CompletionModel>),
     Anthropic(Agent<anthropic::completion::CompletionModel>),
@@ -294,29 +301,34 @@ pub enum AnyAgent {
 }
 
 impl AnyAgent {
+    pub fn new(inner: AnyAgentInner, cache: ToolCache) -> Self {
+        AnyAgent { inner, cache }
+    }
+
     pub async fn run_print(&self, prompt: &str, max_turns: usize) -> anyhow::Result<String> {
-        match self {
-            AnyAgent::OpenRouter(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::OpenAI(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::Anthropic(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::Gemini(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::DeepSeek(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::Glm(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::Ollama(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgent::Custom(a) => runner::run_print(a, prompt, max_turns).await,
+        match &self.inner {
+            AnyAgentInner::OpenRouter(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::OpenAI(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::Anthropic(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::Gemini(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::DeepSeek(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::Glm(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::Ollama(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::Custom(a) => runner::run_print(a, prompt, max_turns).await,
         }
     }
 
     pub fn spawn_runner(self, prompt: String, history: Vec<Message>) -> AgentRunner {
-        match self {
-            AnyAgent::OpenRouter(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::OpenAI(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::Gemini(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::DeepSeek(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::Glm(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::Ollama(a) => runner::spawn_agent(a, prompt, history),
-            AnyAgent::Custom(a) => runner::spawn_agent(a, prompt, history),
+        self.cache.clear();
+        match self.inner {
+            AnyAgentInner::OpenRouter(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::OpenAI(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::Anthropic(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::Gemini(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::DeepSeek(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::Glm(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::Ollama(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::Custom(a) => runner::spawn_agent(a, prompt, history, self.cache),
         }
     }
 }
@@ -428,142 +440,35 @@ pub async fn build_agent(
 ) -> AnyAgent {
     let parent_model = model.clone();
 
+    macro_rules! build_inner {
+        ($m:expr, $variant:ident) => {{
+            let (agent, cache) = builder::build_agent_inner(
+                $m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                sandbox.clone(),
+                Some(parent_model.clone()),
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+                #[cfg(feature = "semantic")]
+                semantic_manager,
+            )
+            .await;
+            AnyAgent::new(AnyAgentInner::$variant(agent), cache)
+        }};
+    }
+
     match model {
-        AnyModel::OpenRouter(m) => AnyAgent::OpenRouter(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::OpenAI(m) => AnyAgent::OpenAI(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::Anthropic(m) => AnyAgent::Anthropic(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::Gemini(m) => AnyAgent::Gemini(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::DeepSeek(m) => AnyAgent::DeepSeek(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::Glm(m) => AnyAgent::Glm(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::Ollama(m) => AnyAgent::Ollama(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox,
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
-        AnyModel::Custom(m) => AnyAgent::Custom(
-            builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                Some(parent_model.clone()),
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-            )
-            .await,
-        ),
+        AnyModel::OpenRouter(m) => build_inner!(m, OpenRouter),
+        AnyModel::OpenAI(m) => build_inner!(m, OpenAI),
+        AnyModel::Anthropic(m) => build_inner!(m, Anthropic),
+        AnyModel::Gemini(m) => build_inner!(m, Gemini),
+        AnyModel::DeepSeek(m) => build_inner!(m, DeepSeek),
+        AnyModel::Glm(m) => build_inner!(m, Glm),
+        AnyModel::Ollama(m) => build_inner!(m, Ollama),
+        AnyModel::Custom(m) => build_inner!(m, Custom),
     }
 }

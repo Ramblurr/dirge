@@ -6,6 +6,7 @@ use rig::message::ToolResultContent;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use tokio::sync::mpsc;
 
+use crate::agent::tools::ToolCache;
 use crate::event::AgentEvent;
 use crate::session::{MessageRole, Session};
 
@@ -35,12 +36,18 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
     messages
 }
 
-pub fn spawn_agent<M, P>(agent: Agent<M, P>, prompt: String, history: Vec<Message>) -> AgentRunner
+pub fn spawn_agent<M, P>(
+    agent: Agent<M, P>,
+    prompt: String,
+    history: Vec<Message>,
+    cache: ToolCache,
+) -> AgentRunner
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
     P: rig::agent::PromptHook<M> + 'static,
 {
+    cache.clear();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
 
     tokio::spawn(async move {

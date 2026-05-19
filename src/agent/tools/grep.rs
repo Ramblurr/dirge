@@ -3,6 +3,7 @@ use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
     AskSender, GrepArgs, MAX_GREP_RESULTS, PermCheck, ToolError, check_perm, is_skip_dir,
 };
@@ -10,11 +11,29 @@ use crate::agent::tools::{
 pub struct GrepTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
+    pub cache: Option<ToolCache>,
 }
 
 impl GrepTool {
+    #[allow(dead_code)]
     pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        GrepTool { permission, ask_tx }
+        GrepTool {
+            permission,
+            ask_tx,
+            cache: None,
+        }
+    }
+
+    pub fn with_cache(
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+        cache: ToolCache,
+    ) -> Self {
+        GrepTool {
+            permission,
+            ask_tx,
+            cache: Some(cache),
+        }
     }
 
     fn glob_to_regex(glob: &str) -> String {
@@ -76,6 +95,20 @@ impl Tool for GrepTool {
 
     async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
         check_perm(&self.permission, &self.ask_tx, "grep", &args.pattern).await?;
+
+        let cache_key = format!(
+            "grep:{}:{}:{}:{}",
+            args.pattern,
+            args.path.as_deref().unwrap_or("."),
+            args.include.as_deref().unwrap_or(""),
+            args.context_lines.unwrap_or(0),
+        );
+
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached);
+            }
+        }
 
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex pattern: {}", e)))?;
@@ -197,27 +230,33 @@ impl Tool for GrepTool {
             }
         }
 
-        if all_results.is_empty() {
-            return Ok("No matches found.".to_string());
+        let result = if all_results.is_empty() {
+            "No matches found.".to_string()
+        } else {
+            let total = all_results.len();
+            if total >= MAX_GREP_RESULTS {
+                format!(
+                    "{} results (showing first {}, searched {} files):\n{}\n\n... and {} more matches",
+                    total,
+                    MAX_GREP_RESULTS,
+                    file_count,
+                    all_results.join("\n"),
+                    total - MAX_GREP_RESULTS
+                )
+            } else {
+                format!(
+                    "{} results (searched {} files):\n{}",
+                    total,
+                    file_count,
+                    all_results.join("\n")
+                )
+            }
+        };
+
+        if let Some(ref cache) = self.cache {
+            cache.set(&cache_key, result.clone());
         }
 
-        let total = all_results.len();
-        if total >= MAX_GREP_RESULTS {
-            Ok(format!(
-                "{} results (showing first {}, searched {} files):\n{}\n\n... and {} more matches",
-                total,
-                MAX_GREP_RESULTS,
-                file_count,
-                all_results.join("\n"),
-                total - MAX_GREP_RESULTS
-            ))
-        } else {
-            Ok(format!(
-                "{} results (searched {} files):\n{}",
-                total,
-                file_count,
-                all_results.join("\n")
-            ))
-        }
+        Ok(result)
     }
 }

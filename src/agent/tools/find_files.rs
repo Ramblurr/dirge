@@ -3,6 +3,7 @@ use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
     AskSender, FindFilesArgs, MAX_FIND_RESULTS, PermCheck, ToolError, check_perm, is_skip_dir,
 };
@@ -10,11 +11,29 @@ use crate::agent::tools::{
 pub struct FindFilesTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
+    pub cache: Option<ToolCache>,
 }
 
 impl FindFilesTool {
+    #[allow(dead_code)]
     pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        FindFilesTool { permission, ask_tx }
+        FindFilesTool {
+            permission,
+            ask_tx,
+            cache: None,
+        }
+    }
+
+    pub fn with_cache(
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+        cache: ToolCache,
+    ) -> Self {
+        FindFilesTool {
+            permission,
+            ask_tx,
+            cache: Some(cache),
+        }
     }
 }
 
@@ -48,6 +67,18 @@ impl Tool for FindFilesTool {
 
     async fn call(&self, args: FindFilesArgs) -> Result<String, ToolError> {
         check_perm(&self.permission, &self.ask_tx, "find_files", &args.pattern).await?;
+
+        let cache_key = format!(
+            "find_files:{}:{}",
+            args.pattern,
+            args.path.as_deref().unwrap_or("."),
+        );
+
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached);
+            }
+        }
 
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex: {}", e)))?;
@@ -84,23 +115,28 @@ impl Tool for FindFilesTool {
             }
         }
 
-        if results.is_empty() {
-            return Ok("No files found matching the pattern.".to_string());
-        }
-
-        results.sort();
-
-        let total = results.len();
-        if total >= MAX_FIND_RESULTS {
-            Ok(format!(
-                "{} files found (showing first {}):\n{}\n\n... and {} more",
-                total,
-                MAX_FIND_RESULTS,
-                results[..MAX_FIND_RESULTS].join("\n"),
-                total - MAX_FIND_RESULTS
-            ))
+        let result = if results.is_empty() {
+            "No files found matching the pattern.".to_string()
         } else {
-            Ok(format!("{} files found:\n{}", total, results.join("\n")))
+            results.sort();
+            let total = results.len();
+            if total >= MAX_FIND_RESULTS {
+                format!(
+                    "{} files found (showing first {}):\n{}\n\n... and {} more",
+                    total,
+                    MAX_FIND_RESULTS,
+                    results[..MAX_FIND_RESULTS].join("\n"),
+                    total - MAX_FIND_RESULTS
+                )
+            } else {
+                format!("{} files found:\n{}", total, results.join("\n"))
+            }
+        };
+
+        if let Some(ref cache) = self.cache {
+            cache.set(&cache_key, result.clone());
         }
+
+        Ok(result)
     }
 }

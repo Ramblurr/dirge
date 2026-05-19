@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
 use crate::agent::tools;
+use crate::agent::tools::ToolCache;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
@@ -34,7 +35,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     parent_model: Option<AnyModel>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
     #[cfg(feature = "semantic")] semantic_manager: Option<&SemanticManager>,
-) -> Agent<M> {
+) -> (Agent<M>, ToolCache) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let skills: Arc<[Skill]> = Arc::from(
         tokio::task::spawn_blocking(move || skill::discover_skills(&cwd))
@@ -84,31 +85,49 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     }
 
     if cli.resolve_no_tools(cfg) {
-        builder.build()
+        (builder.build(), ToolCache::new())
     } else {
+        let cache = ToolCache::new();
+
         let base_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
-            Box::new(tools::ReadTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::WriteTool::new(
+            Box::new(tools::ReadTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+            )),
+            Box::new(tools::WriteTool::with_cache(
                 permission.clone(),
                 ask_tx.clone(),
                 plan_file.clone(),
+                cache.clone(),
             )),
-            Box::new(tools::EditTool::new(
+            Box::new(tools::EditTool::with_cache(
                 permission.clone(),
                 ask_tx.clone(),
                 plan_file.clone(),
+                cache.clone(),
             )),
-            Box::new(tools::BashTool::new(
+            Box::new(tools::BashTool::with_cache(
                 permission.clone(),
                 ask_tx.clone(),
                 sandbox.clone(),
+                cache.clone(),
             )),
-            Box::new(tools::GrepTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::FindFilesTool::new(
+            Box::new(tools::GrepTool::with_cache(
                 permission.clone(),
                 ask_tx.clone(),
+                cache.clone(),
             )),
-            Box::new(tools::ListDirTool::new(permission.clone(), ask_tx.clone())),
+            Box::new(tools::FindFilesTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+            )),
+            Box::new(tools::ListDirTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+            )),
             Box::new(tools::WriteTodoList::new(
                 permission.clone(),
                 ask_tx.clone(),
@@ -151,7 +170,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             }
         }
 
-        builder.build()
+        (builder.build(), cache)
     }
 }
 

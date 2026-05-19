@@ -1,4 +1,5 @@
 mod bash;
+pub(crate) mod cache;
 pub(crate) mod edit;
 mod find_files;
 mod grep;
@@ -13,6 +14,7 @@ mod todo;
 mod write;
 
 pub use bash::BashTool;
+pub use cache::ToolCache;
 pub use edit::EditTool;
 pub use find_files::FindFilesTool;
 pub use grep::GrepTool;

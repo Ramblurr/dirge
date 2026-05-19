@@ -32,6 +32,10 @@ _dirge_ is one of the smallest and most performant coding agents on the market.
 - Binary size: 12MB
 - RAM footprint: ~8MB on an empty session, ~12MB when working (vs ~300MB for opencode or other JS-based coding agents)
 
+### Tool result caching
+
+Read-only tool calls (`read`, `grep`, `find_files`, `list_dir`) are cached per agent turn. Repeated calls with identical arguments within the same turn return cached results, avoiding redundant filesystem I/O. The cache clears automatically before each new prompt.
+
 ## Installation
 
 ```bash

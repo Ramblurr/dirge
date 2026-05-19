@@ -4,6 +4,7 @@ use ignore::WalkBuilder;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
     AskSender, ListDirArgs, PermCheck, ToolError, check_perm_path, is_skip_dir,
 };
@@ -32,11 +33,29 @@ fn count_dir_entries(path: &Path) -> u64 {
 pub struct ListDirTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
+    pub cache: Option<ToolCache>,
 }
 
 impl ListDirTool {
+    #[allow(dead_code)]
     pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        ListDirTool { permission, ask_tx }
+        ListDirTool {
+            permission,
+            ask_tx,
+            cache: None,
+        }
+    }
+
+    pub fn with_cache(
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+        cache: ToolCache,
+    ) -> Self {
+        ListDirTool {
+            permission,
+            ask_tx,
+            cache: Some(cache),
+        }
     }
 }
 
@@ -67,6 +86,14 @@ impl Tool for ListDirTool {
     async fn call(&self, args: ListDirArgs) -> Result<String, ToolError> {
         let path = args.path.as_deref().unwrap_or(".");
         check_perm_path(&self.permission, &self.ask_tx, "list_dir", path).await?;
+
+        let cache_key = format!("list_dir:{}", path);
+
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached);
+            }
+        }
 
         let walker = WalkBuilder::new(path)
             .git_ignore(true)
@@ -146,6 +173,11 @@ impl Tool for ListDirTool {
             };
             result.push_str(&format!("  [{}]  {}{}\n", kind, padded, size_str));
         }
+
+        if let Some(ref cache) = self.cache {
+            cache.set(&cache_key, result.clone());
+        }
+
         Ok(result)
     }
 }
