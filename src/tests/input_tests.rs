@@ -888,3 +888,183 @@ fn paste_during_picker_is_ignored() {
     editor.handle_paste("a\nb\nc\nd");
     assert_eq!(editor.buffer.as_str(), buffer_before);
 }
+
+fn ctrl_j() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn ctrl_j_inserts_newline_as_fallback() {
+    // Terminals that don't deliver Shift+Enter as a distinct event always
+    // deliver Ctrl+J. It must insert a newline, never submit.
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "hello");
+    editor.handle_key(ctrl_j());
+    type_str(&mut editor, "world");
+    assert_eq!(editor.buffer.as_str(), "hello\nworld");
+}
+
+#[test]
+fn ctrl_j_during_picker_is_noop() {
+    let mut editor = InputEditor::new();
+    editor.handle_key(press(KeyCode::Char('@')));
+    let buf_before = editor.buffer.to_string();
+    let result = editor.handle_key(ctrl_j());
+    assert!(result.is_none());
+    assert_eq!(editor.buffer.as_str(), buf_before);
+}
+
+#[test]
+fn paste_with_crlf_line_endings_collapses() {
+    // Regression: a paste from a clipboard/source that uses \r\n line
+    // endings used to be treated as a single line because matches('\n')
+    // only counts LF. The threshold check failed, the raw text (including
+    // \r) got inserted, and the terminal rendered carriage returns as
+    // overstrikes — garbling the input.
+    let mut editor = InputEditor::new();
+    editor.handle_paste("a\r\nb\r\nc\r\nd\r\ne");
+    // After normalization the paste is 5 lines, >= 4, so collapses.
+    assert!(editor.buffer.contains('\u{0001}'));
+    assert_eq!(editor.expanded().as_str(), "a\nb\nc\nd\ne");
+}
+
+#[test]
+fn paste_with_cr_only_line_endings_collapses() {
+    // Some sources (e.g., legacy macOS clipboards) deliver `\r` alone.
+    // Same normalization should apply.
+    let mut editor = InputEditor::new();
+    editor.handle_paste("a\rb\rc\rd\re");
+    assert!(editor.buffer.contains('\u{0001}'));
+    assert_eq!(editor.expanded().as_str(), "a\nb\nc\nd\ne");
+}
+#[test]
+fn yank_after_submit_preserves_pasted_content() {
+    // Regression: killing a marker into the kill ring, then submitting
+    // (which cleared `pastes`), then yanking back, used to leave marker
+    // bytes in the buffer referencing a now-empty pastes vec. `expanded()`
+    // silently dropped them, so the agent received text *without* the
+    // paste body the user thought they'd yanked back. We now expand
+    // markers inline in kill-ring entries before clearing pastes, so the
+    // kill ring carries raw text across the submit boundary.
+    let mut editor = InputEditor::new();
+    editor.handle_paste("a\nb\nc\nd\ne");
+    editor.handle_key(ctrl(KeyCode::Char('u'))); // kill marker into ring
+    editor.handle_key(press(KeyCode::Enter)); // submit empty (clears pastes)
+    type_str(&mut editor, "hello");
+    editor.handle_key(ctrl(KeyCode::Char('y'))); // yank — text, not marker
+    let submitted = editor.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(
+        submitted.contains("a\nb\nc\nd\ne"),
+        "expected yank to restore paste body, got: {:?}",
+        submitted
+    );
+}
+
+// ── Paste collapse — robustness ─────────────────────────────
+
+#[test]
+fn paste_at_start_of_buffer() {
+    let mut editor = InputEditor::new();
+    editor.handle_paste("a\nb\nc\nd");
+    type_str(&mut editor, " trailing");
+    assert_eq!(editor.expanded().as_str(), "a\nb\nc\nd trailing");
+}
+
+#[test]
+fn paste_in_middle_of_buffer() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "before-after");
+    editor.cursor = "before-".len();
+    editor.handle_paste("L1\nL2\nL3\nL4");
+    assert_eq!(editor.expanded().as_str(), "before-L1\nL2\nL3\nL4after");
+}
+
+#[test]
+fn two_distinct_pastes_keep_both_bodies() {
+    let mut editor = InputEditor::new();
+    editor.handle_paste("paste-1-a\nb\nc\nd");
+    type_str(&mut editor, " mid ");
+    editor.handle_paste("paste-2-w\nx\ny\nz");
+    assert_eq!(
+        editor.expanded().as_str(),
+        "paste-1-a\nb\nc\nd mid paste-2-w\nx\ny\nz"
+    );
+    // Two complete marker blocks → 4 sentinel chars total.
+    assert_eq!(editor.buffer.matches('\u{0001}').count(), 4);
+}
+
+#[test]
+fn home_and_end_skip_past_markers() {
+    let mut editor = InputEditor::new();
+    editor.handle_paste("a\nb\nc\nd");
+    type_str(&mut editor, "tail");
+    editor.handle_key(press(KeyCode::End));
+    assert_eq!(editor.cursor, editor.buffer.len());
+    editor.handle_key(press(KeyCode::Home));
+    assert_eq!(editor.cursor, 0);
+    assert_eq!(editor.expanded().as_str(), "a\nb\nc\ndtail");
+}
+
+#[test]
+fn marker_survives_multiline_up_down_nav() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "row1");
+    editor.handle_key(shift_enter());
+    editor.handle_paste("p1\np2\np3\np4");
+    editor.handle_key(shift_enter());
+    type_str(&mut editor, "row3");
+    editor.handle_key(press(KeyCode::Up));
+    editor.handle_key(press(KeyCode::Up));
+    editor.handle_key(press(KeyCode::Down));
+    editor.handle_key(press(KeyCode::Down));
+    assert_eq!(editor.expanded().as_str(), "row1\np1\np2\np3\np4\nrow3");
+}
+
+#[test]
+fn empty_paste_is_noop() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "existing");
+    let buf_before = editor.buffer.to_string();
+    let cur_before = editor.cursor;
+    editor.handle_paste("");
+    assert_eq!(editor.buffer.as_str(), buf_before);
+    assert_eq!(editor.cursor, cur_before);
+}
+
+#[test]
+fn paste_containing_only_paste_mark_chars_is_noop() {
+    // PASTE_MARK chars get stripped first; if the paste was *only* those
+    // chars, cleaned content is empty and we return early — no placeholder,
+    // no empty marker block.
+    let mut editor = InputEditor::new();
+    editor.handle_paste("\u{0001}\u{0001}\u{0001}\u{0001}");
+    assert_eq!(editor.buffer.as_str(), "");
+    assert_eq!(editor.cursor, 0);
+}
+
+#[test]
+fn delete_at_start_of_marker_removes_whole_block() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "before");
+    editor.handle_paste("p1\np2\np3\np4");
+    type_str(&mut editor, "after");
+    editor.cursor = "before".len();
+    editor.handle_key(press(KeyCode::Delete));
+    assert_eq!(editor.expanded().as_str(), "beforeafter");
+    assert!(!editor.buffer.contains('\u{0001}'));
+}
+
+#[test]
+fn multibyte_chars_adjacent_to_marker() {
+    // Marker bytes are ASCII, but surrounding text may be multibyte UTF-8.
+    // Cursor motion and slicing must not split a multibyte char.
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "héllo "); // 'é' is 2 bytes
+    editor.handle_paste("p1\np2\np3\np4");
+    type_str(&mut editor, " wörld");
+    while editor.cursor > 0 {
+        editor.handle_key(press(KeyCode::Left));
+    }
+    assert_eq!(editor.cursor, 0);
+    assert_eq!(editor.expanded().as_str(), "héllo p1\np2\np3\np4 wörld");
+}

@@ -14,6 +14,11 @@ pub struct LineEntry {
     pub color: Color,
 }
 
+/// Cap on how many logical input lines we'll show stacked at the bottom of
+/// the screen before the input box starts internally scrolling. Beyond this
+/// the chat-history viewport would be unreasonably squashed.
+pub const MAX_INPUT_VISIBLE_LINES: usize = 8;
+
 pub struct Renderer {
     lines: u16,
     col: u16,
@@ -23,6 +28,11 @@ pub struct Renderer {
     partial_color: Color,
     scroll_offset: usize,
     input_scroll_offset: usize,
+    /// Number of rows the input area currently occupies (1 by default, grows
+    /// up to MAX_INPUT_VISIBLE_LINES as the user adds newlines via
+    /// Shift+Enter / Meta+Enter / Ctrl+J). The chat viewport shrinks by the
+    /// same amount so the total layout fits.
+    input_rows: u16,
     monochrome: bool,
     pub selection_active: bool,
     pub selection_start: Option<usize>,
@@ -40,6 +50,7 @@ impl Renderer {
             partial_color: Color::White,
             scroll_offset: 0,
             input_scroll_offset: 0,
+            input_rows: 1,
             monochrome: false,
             selection_active: false,
             selection_start: None,
@@ -98,14 +109,24 @@ impl Renderer {
         }
     }
 
+    /// Number of rows reserved for chat history above the input area.
+    /// Subtracts the input box (`input_rows`) and the status line (1 row).
     pub fn visible_lines(&self) -> usize {
         let (_, rows) = self.terminal_size();
-        rows.saturating_sub(2) as usize
+        rows.saturating_sub(self.input_rows + 1) as usize
+    }
+
+    /// The screen row index where the input box starts. Overlays that need
+    /// to anchor *above* the input box (e.g. the file picker) should treat
+    /// this as their bottom limit.
+    pub fn input_top_row(&self) -> u16 {
+        let (_, rows) = self.terminal_size();
+        rows.saturating_sub(self.input_rows + 1)
     }
 
     pub fn buffer_line_at_row(&self, row: u16) -> Option<usize> {
         let (_, rows) = self.terminal_size();
-        let visible = rows.saturating_sub(2) as usize;
+        let visible = rows.saturating_sub(self.input_rows + 1) as usize;
         let total = self.buffer.len();
         if total == 0 {
             return None;
@@ -232,7 +253,7 @@ impl Renderer {
 
     pub fn render_viewport(&mut self) -> io::Result<()> {
         let (cols, rows) = self.terminal_size();
-        let visible = rows.saturating_sub(2) as usize;
+        let visible = rows.saturating_sub(self.input_rows + 1) as usize;
         let total = self.buffer.len();
         let mut stdout = io::stdout();
 
@@ -309,7 +330,7 @@ impl Renderer {
         if rows < 3 {
             return;
         }
-        let max_content = rows.saturating_sub(2);
+        let max_content = rows.saturating_sub(self.input_rows + 1);
         if self.lines >= max_content {
             let mut stdout = io::stdout();
             let _ = stdout.execute(ScrollUp(1));
@@ -324,7 +345,7 @@ impl Renderer {
 
     fn content_row(&self) -> u16 {
         let (_, rows) = self.terminal_size();
-        self.lines.min(rows.saturating_sub(3))
+        self.lines.min(rows.saturating_sub(self.input_rows + 2))
     }
 
     pub fn write_line(&mut self, text: &str, color: Color) -> io::Result<()> {
@@ -466,74 +487,122 @@ impl Renderer {
         let full_input: &str = editor.buffer.as_str();
         let full_cursor: usize = editor.cursor;
 
-        let input_row = rows.saturating_sub(2);
+        // Break the buffer into logical lines (one per `\n`). An empty buffer
+        // still shows one row so the prompt is visible.
+        let logical_lines: Vec<&str> = if full_input.is_empty() {
+            vec![""]
+        } else {
+            full_input.split('\n').collect()
+        };
+        let line_count = logical_lines.len();
+
+        // Determine which logical line the cursor sits on, and the byte
+        // offset within it.
+        let cursor_line_start = full_input[..full_cursor]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let cursor_line_idx = full_input[..cursor_line_start].matches('\n').count();
+        let cursor_col_in_line = full_cursor - cursor_line_start;
+
+        // Decide how many input rows to show. Cap at MAX_INPUT_VISIBLE_LINES
+        // so the chat viewport doesn't disappear under huge pastes / drafts.
+        let visible_input_rows = line_count.min(MAX_INPUT_VISIBLE_LINES).max(1);
+
+        // Pick which slice of logical lines to render so the cursor's line is
+        // always on screen. Simple scroll-to-keep-cursor-visible strategy.
+        let first_visible_line = if cursor_line_idx >= visible_input_rows {
+            cursor_line_idx + 1 - visible_input_rows
+        } else {
+            0
+        };
+
+        // If the bottom panel grew or shrank, the chat viewport needs to be
+        // repainted at its new size before we overwrite the bottom rows.
+        let new_input_rows = visible_input_rows as u16;
+        if new_input_rows != self.input_rows {
+            self.input_rows = new_input_rows;
+            self.render_viewport()?;
+        }
+
         let status_row = rows.saturating_sub(1);
-        let prompt = if is_running {
+        let input_top = rows.saturating_sub(self.input_rows + 1);
+        let prompt_main = if is_running {
             self.spinner_tick = !self.spinner_tick;
             if self.spinner_tick { ". " } else { ": " }
         } else {
             "> "
         };
+        // Continuation rows get a dimmer prompt so the user can see at a
+        // glance which row is "the" prompt and which are wrapped lines.
+        let prompt_cont = "· ";
 
-        // Extract the current logical line, then render with paste
-        // placeholders substituted so the input bar stays compact.
-        let line_start = full_input[..full_cursor]
-            .rfind('\n')
-            .map(|p| p + 1)
-            .unwrap_or(0);
-        let line_end = full_input[full_cursor..]
-            .find('\n')
-            .map(|p| full_cursor + p)
-            .unwrap_or(full_input.len());
-        let raw_line = &full_input[line_start..line_end];
-        let raw_col = full_cursor - line_start;
-        let (visible_line_owned, col_in_line) = editor.render_line(raw_line, raw_col);
-        let visible_line: &str = visible_line_owned.as_str();
-
-        // Count lines for status display (buffer-logical, not paste-expanded).
-        let line_count = if full_input.is_empty() {
-            1
-        } else {
-            full_input.chars().filter(|&c| c == '\n').count() + 1
-        };
-
-        stdout.execute(MoveTo(0, input_row))?;
-        write!(stdout, "{}", " ".repeat(cols as usize))?;
-        stdout.execute(MoveTo(0, input_row))?;
-        write!(stdout, "{}", SetForegroundColor(self.color(Color::Cyan)))?;
-        write!(stdout, "{}", prompt)?;
-        write!(stdout, "{}", ResetColor)?;
-        let visible_width = cols.saturating_sub(2) as usize;
-        let input_len = visible_line.len();
-
-        if col_in_line < self.input_scroll_offset {
-            self.input_scroll_offset = col_in_line;
-        } else if col_in_line >= self.input_scroll_offset + visible_width {
-            self.input_scroll_offset = col_in_line - visible_width + 1;
-        }
-        let max_scroll = input_len.saturating_sub(visible_width);
-        self.input_scroll_offset = self.input_scroll_offset.min(max_scroll);
-
-        let visible: String = visible_line
-            .chars()
-            .skip(self.input_scroll_offset)
-            .take(visible_width)
-            .collect();
-        write!(stdout, "{}", visible)?;
-
-        // Token estimate counts the expanded text, since that's what the agent
-        // actually receives.
+        // Reserve right-edge space for the token counter so it never
+        // overdraws line content. Width is the width of the longest
+        // realistic counter string ("  (NNNN tk)" ~= 12 chars).
         let token_est = editor.expanded().len() as u64 / 4;
-        if token_est > 0 {
+        let counter_reserve: u16 = if token_est > 0 { 12 } else { 0 };
+        let visible_width = cols.saturating_sub(2 + counter_reserve) as usize;
+
+        // Recompute horizontal scroll based on the cursor's line. Each draw
+        // re-anchors so very long single lines still pan horizontally.
+        let cursor_raw_line = logical_lines[cursor_line_idx];
+        let (_, cursor_display_col) = editor.render_line(cursor_raw_line, cursor_col_in_line);
+        if cursor_display_col < self.input_scroll_offset {
+            self.input_scroll_offset = cursor_display_col;
+        } else if cursor_display_col >= self.input_scroll_offset + visible_width {
+            self.input_scroll_offset = cursor_display_col - visible_width + 1;
+        }
+
+        // Render each visible logical line.
+        for row_offset in 0..visible_input_rows {
+            let row = input_top + row_offset as u16;
+            let line_idx = first_visible_line + row_offset;
+            stdout.execute(MoveTo(0, row))?;
+            write!(stdout, "{}", " ".repeat(cols as usize))?;
+            stdout.execute(MoveTo(0, row))?;
+            write!(stdout, "{}", SetForegroundColor(self.color(Color::Cyan)))?;
+            if line_idx == 0 {
+                write!(stdout, "{}", prompt_main)?;
+            } else {
+                write!(stdout, "{}", prompt_cont)?;
+            }
+            write!(stdout, "{}", ResetColor)?;
+            let raw_line = logical_lines.get(line_idx).copied().unwrap_or("");
+            let (display_line, _) = editor.render_line(raw_line, 0);
+            // Apply horizontal scroll if this line contains the cursor; other
+            // lines render from column 0 (they'll get truncated if too wide).
+            let scroll = if line_idx == cursor_line_idx {
+                self.input_scroll_offset
+            } else {
+                0
+            };
+            let visible: String = display_line
+                .chars()
+                .skip(scroll)
+                .take(visible_width)
+                .collect();
+            write!(stdout, "{}", visible)?;
+        }
+
+        // Token counter on the last visible row, sitting in the reserved
+        // right-edge gap (see `counter_reserve` above). Doesn't overdraw
+        // line content because `visible_width` already excludes this band.
+        if counter_reserve > 0 {
+            let last_row = input_top + (visible_input_rows as u16 - 1);
+            let counter = format!("  ({} tk)", token_est);
+            let counter_col = cols.saturating_sub(counter.len() as u16);
+            stdout.execute(MoveTo(counter_col, last_row))?;
             write!(
                 stdout,
                 "{}",
                 SetForegroundColor(self.color(Color::DarkGrey))
             )?;
-            write!(stdout, "  ({} tk)", token_est)?;
+            write!(stdout, "{}", counter)?;
             write!(stdout, "{}", ResetColor)?;
         }
 
+        // Status row.
         stdout.execute(MoveTo(0, status_row))?;
         write!(stdout, "{}", " ".repeat(cols as usize))?;
         stdout.execute(MoveTo(0, status_row))?;
@@ -547,15 +616,25 @@ impl Renderer {
         } else {
             status.to_string()
         };
-        if line_count > 1 {
+        if line_count > MAX_INPUT_VISIBLE_LINES {
+            // Buffer is bigger than the visible window — tell the user how
+            // many extra logical lines there are.
+            status_display.push_str(&format!(
+                " [{} lines, {} hidden]",
+                line_count,
+                line_count - MAX_INPUT_VISIBLE_LINES
+            ));
+        } else if line_count > 1 {
             status_display.push_str(&format!(" [{} lines]", line_count));
         }
         let truncated: String = status_display.chars().take(cols as usize).collect();
         write!(stdout, "{}", truncated)?;
         write!(stdout, "{}", ResetColor)?;
 
-        let cursor_x = (2 + col_in_line.saturating_sub(self.input_scroll_offset)) as u16;
-        stdout.execute(MoveTo(cursor_x, input_row))?;
+        // Place the visible cursor on its row at the right column.
+        let cursor_row = input_top + (cursor_line_idx - first_visible_line) as u16;
+        let cursor_x = (2 + cursor_display_col.saturating_sub(self.input_scroll_offset)) as u16;
+        stdout.execute(MoveTo(cursor_x, cursor_row))?;
         stdout.flush()?;
         Ok(())
     }

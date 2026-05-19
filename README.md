@@ -135,7 +135,7 @@ dirge --provider glm       # defaults to glm-4
 | Meta+Y | Yank-pop (cycle kill ring after yank) |
 | Ctrl+N / Down | History next (multi-line: next logical line, history at boundary) |
 | Ctrl+P / Up | History previous (multi-line: previous logical line, history at boundary) |
-| Shift+Enter / Meta+Enter | Insert newline (multi-line input) |
+| Shift+Enter / Meta+Enter / Ctrl+J | Insert newline (input box expands; Ctrl+J works in any terminal) |
 | Tab | Insert 2 spaces |
 | `@<query>` | File picker (Tab/Enter select, Esc cancel) |
 | Paste (≥4 lines) | Collapses to `[N lines pasted]`; re-paste same content to expand inline |
