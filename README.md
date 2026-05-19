@@ -142,6 +142,14 @@ dirge --provider glm       # defaults to glm-4
 | `!! cmd` | Run shell command (invisible) |
 | Mouse drag | Select text (copies to clipboard on release) |
 
+**Tool output display**
+
+| Feature | Detail |
+|---------|--------|
+| Tool results visible | Default on (`show_tool_details: true`), toggle in config |
+| Smart truncation | Outputs >500 chars truncated with `[N more chars]` indicator (`tool_result_max_chars` in config) |
+| Colorized edit diffs | `edit` tool results render with `-` (red), `+` (green), `@@` (cyan) coloring (`show_edit_diff: true` in config) |
+
 ## Prompts system
 
 Built-in prompts that change the agent's behavior and tone:
