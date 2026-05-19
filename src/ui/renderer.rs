@@ -516,6 +516,17 @@ impl Renderer {
             .collect();
         write!(stdout, "{}", visible)?;
 
+        let token_est = input_line.len() as u64 / 4;
+        if token_est > 0 {
+            write!(
+                stdout,
+                "{}",
+                SetForegroundColor(self.color(Color::DarkGrey))
+            )?;
+            write!(stdout, "  ({} tk)", token_est)?;
+            write!(stdout, "{}", ResetColor)?;
+        }
+
         stdout.execute(MoveTo(0, status_row))?;
         write!(stdout, "{}", " ".repeat(cols as usize))?;
         stdout.execute(MoveTo(0, status_row))?;

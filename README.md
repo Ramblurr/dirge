@@ -150,6 +150,7 @@ dirge --provider glm       # defaults to glm-4
 | `! cmd` | Run shell command (visible, injected into chat) |
 | `!! cmd` | Run shell command (invisible) |
 | Mouse drag | Select text (copies to clipboard on release) |
+| (input) | Live token count shown next to input bar (`N tk`) |
 
 **Tool output display**
 
