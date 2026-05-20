@@ -187,6 +187,10 @@ pub async fn run_interactive(
     // UI can abort in-flight work on Ctrl+C/D/Esc — otherwise tools keep
     // running and permission prompts arrive after the user has interrupted.
     let mut agent_abort: Option<tokio::task::JoinHandle<()>> = None;
+    // Sender into the running agent's interjection channel. The UI signals
+    // (unit-only payload) when a user-typed interjection is queued; the
+    // runner honors it at the next tool-result boundary.
+    let mut agent_interject: Option<mpsc::UnboundedSender<()>> = None;
     let mut agent_line_started = false;
     let mut response_buf = String::new();
     let mut response_start_line: Option<usize> = None;
@@ -396,6 +400,7 @@ pub async fn run_interactive(
                                 is_running = false;
                                 if let Some(h) = agent_abort.take() { h.abort(); }
                                 agent_rx = None;
+                                agent_interject = None;
                                 #[cfg(feature = "loop")]
                                 if let Some(ref mut ls) = loop_state {
                                     ls.active = false;
@@ -556,6 +561,7 @@ pub async fn run_interactive(
                             is_running = false;
                             if let Some(h) = agent_abort.take() { h.abort(); }
                             agent_rx = None;
+                            agent_interject = None;
                             #[cfg(feature = "loop")]
                             if let Some(ref mut ls) = loop_state {
                                 ls.active = false;
@@ -735,6 +741,7 @@ pub async fn run_interactive(
                                                 );
                                                 agent_rx = Some(runner.event_rx);
                                                 agent_abort = Some(runner.task);
+                                                agent_interject = Some(runner.interject_tx);
                                                 is_running = true;
                                             }
                                             Err(e) => {
@@ -828,6 +835,7 @@ pub async fn run_interactive(
                                             );
                                             agent_rx = Some(runner.event_rx);
                                                 agent_abort = Some(runner.task);
+                                                agent_interject = Some(runner.interject_tx);
                                             is_running = true;
                                             wt_return_path = Some(main_path);
                                         }
@@ -893,6 +901,7 @@ pub async fn run_interactive(
                                             );
                                             agent_rx = Some(runner.event_rx);
                                                 agent_abort = Some(runner.task);
+                                                agent_interject = Some(runner.interject_tx);
                                             is_running = true;
                                             loop_label = Some(ls.iteration_label());
                                         }
@@ -911,6 +920,16 @@ pub async fn run_interactive(
                                 // current run finishes. Echo it dimmed so the
                                 // user sees it landed in the queue, not lost.
                                 interjection_queue.push_back(text.to_string());
+                                // Ask the runner to stop at its next tool-result
+                                // boundary so the queued message is picked up
+                                // promptly instead of waiting for the whole
+                                // multi-turn run to finish. send() returning
+                                // Err just means the runner already exited
+                                // (race with Done) — harmless, queue still
+                                // drains on the Done handler.
+                                if let Some(tx) = agent_interject.as_ref() {
+                                    let _ = tx.send(());
+                                }
                                 for line in text.lines() {
                                     let safe_line = sanitize_output(line);
                                     renderer.write_line(
@@ -920,7 +939,7 @@ pub async fn run_interactive(
                                 }
                                 renderer.write_line(
                                     &format!(
-                                        "(queued; will run when current task finishes — Ctrl+X drops, Ctrl+C cancels run)"
+                                        "(queued; runner will stop at next safe boundary — Ctrl+X drops, Ctrl+C cancels)"
                                     ),
                                     Color::DarkGrey,
                                 )?;
@@ -981,6 +1000,7 @@ pub async fn run_interactive(
                                 );
                                 agent_rx = Some(runner.event_rx);
                                                 agent_abort = Some(runner.task);
+                                                agent_interject = Some(runner.interject_tx);
                                 is_running = true;
 
                                 session.add_message(MessageRole::User, &text);
@@ -1263,6 +1283,7 @@ pub async fn run_interactive(
                         is_running = false;
                         if let Some(h) = agent_abort.take() { h.abort(); }
                         agent_rx = None;
+                        agent_interject = None;
 
                         #[cfg(feature = "plugin")]
                         let followup_for_decision = plugin_followup.clone();
@@ -1292,6 +1313,7 @@ pub async fn run_interactive(
                                 );
                                 agent_rx = Some(runner.event_rx);
                                                 agent_abort = Some(runner.task);
+                                                agent_interject = Some(runner.interject_tx);
                                 is_running = true;
                             }
                             crate::plugin::PostDoneAction::LoopStop => {
@@ -1321,6 +1343,7 @@ pub async fn run_interactive(
                                     );
                                     agent_rx = Some(runner.event_rx);
                                                 agent_abort = Some(runner.task);
+                                                agent_interject = Some(runner.interject_tx);
                                     is_running = true;
                                     loop_label = Some(ls.iteration_label());
                                     renderer.write_line(
@@ -1397,6 +1420,89 @@ pub async fn run_interactive(
                             );
                             agent_rx = Some(runner.event_rx);
                             agent_abort = Some(runner.task);
+                            agent_interject = Some(runner.interject_tx);
+                            is_running = true;
+                        }
+                    }
+                    AgentEvent::Interjected { partial_response, tokens } => {
+                        was_reasoning = false;
+                        last_tool_name = None;
+
+                        // Finalize whatever assistant text streamed so far so
+                        // the conversation history reflects what the user saw,
+                        // not a phantom turn that "never happened".
+                        if !response_buf.is_empty() {
+                            let max_width = renderer.line_width();
+                            let mut styled = crate::ui::markdown::markdown_to_styled(
+                                &response_buf,
+                                max_width,
+                            );
+                            if !styled.is_empty() {
+                                styled[0].text =
+                                    CompactString::from(format!("< {}", styled[0].text));
+                            }
+                            if let Some(start) = response_start_line {
+                                renderer.replace_from(start, styled);
+                                renderer.render_viewport()?;
+                            }
+                        }
+                        renderer.write_line("", Color::White)?;
+                        renderer.write_line(
+                            "(interjected — stopped at last tool-result boundary)",
+                            Color::DarkGrey,
+                        )?;
+                        renderer.write_line("", Color::White)?;
+
+                        // Record the (partial) assistant response in session
+                        // history. Even truncated, it lets the LLM see what
+                        // it had said when the user spoke up.
+                        if !partial_response.is_empty() {
+                            session.add_message(MessageRole::Assistant, &partial_response);
+                            session.total_tokens = session.total_tokens.saturating_add(tokens);
+                        }
+                        agent_line_started = false;
+                        response_buf.clear();
+                        response_start_line = None;
+
+                        if !cli.no_session
+                            && let Err(e) = crate::session::storage::save_session(session)
+                        {
+                            renderer.write_line(
+                                &format!("warning: failed to save session: {}", e),
+                                C_ERROR,
+                            )?;
+                        }
+                        is_running = false;
+                        if let Some(h) = agent_abort.take() { h.abort(); }
+                        agent_rx = None;
+                        agent_interject = None;
+
+                        // Drain the queue immediately — it's guaranteed to be
+                        // non-empty here since the runner only emits this
+                        // event when the UI signaled an interjection, and the
+                        // signal is only sent from the queue-push code path.
+                        if !interjection_queue.is_empty() {
+                            let queued: Vec<String> = interjection_queue.drain(..).collect();
+                            let combined = queued.join("\n\n");
+                            for line in combined.lines() {
+                                let safe_line = sanitize_output(line);
+                                renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
+                            }
+                            renderer.write_line("", Color::White)?;
+
+                            let history = crate::agent::runner::convert_history(session);
+                            session.add_message(MessageRole::User, &combined);
+
+                            let runner = agent.clone().spawn_runner(
+                                crate::agent::tools::background::prepend_pending_notifications(
+                                    &combined,
+                                    bg_store.as_ref(),
+                                ),
+                                history,
+                            );
+                            agent_rx = Some(runner.event_rx);
+                            agent_abort = Some(runner.task);
+                            agent_interject = Some(runner.interject_tx);
                             is_running = true;
                         }
                     }
@@ -1426,6 +1532,7 @@ pub async fn run_interactive(
                         is_running = false;
                         if let Some(h) = agent_abort.take() { h.abort(); }
                         agent_rx = None;
+                        agent_interject = None;
                         agent_line_started = false;
                         response_buf.clear();
                         response_start_line = None;

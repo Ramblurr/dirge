@@ -19,6 +19,12 @@ pub struct AgentRunner {
     /// running to completion in the background and emitting permission
     /// prompts after the user thought they cancelled.
     pub task: JoinHandle<()>,
+    /// Send a unit signal to ask the runner to stop the stream at the next
+    /// safe boundary (after the current tool call's result). The runner
+    /// emits `AgentEvent::Interjected` with whatever assistant text had
+    /// streamed so far, and the UI is responsible for queueing the next
+    /// user turn. Unbounded because the signal payload is just `()`.
+    pub interject_tx: mpsc::UnboundedSender<()>,
 }
 
 pub fn convert_history(session: &Session) -> Vec<Message> {
@@ -51,6 +57,10 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
 struct StreamOutcome {
     had_tool_calls: bool,
     error: Option<String>,
+    /// Set when the UI requested an interjection and the runner honored it
+    /// at a tool-result boundary. When true the retry loop skips retries and
+    /// the run is considered terminated for this turn.
+    interjected: bool,
 }
 
 async fn run_stream<M, P>(
@@ -58,6 +68,7 @@ async fn run_stream<M, P>(
     prompt: &str,
     history: Vec<Message>,
     event_tx: &mpsc::Sender<AgentEvent>,
+    interject_rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> StreamOutcome
 where
     M: CompletionModel + 'static,
@@ -66,10 +77,16 @@ where
 {
     let mut outcome = StreamOutcome::default();
     let mut stream = agent.stream_chat(prompt.to_string(), history).await;
+    // Accumulate assistant text so we can hand it back to the UI when an
+    // interjection cuts the run short — otherwise the partial response would
+    // be lost (the UI also tracks it, but echoing it here keeps the event
+    // payload self-contained).
+    let mut partial = String::new();
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                partial.push_str(&text.text);
                 let _ = event_tx
                     .send(AgentEvent::Token(CompactString::from(text.text)))
                     .await;
@@ -112,6 +129,24 @@ where
                         output: CompactString::from(output),
                     })
                     .await;
+                // Tool-result boundaries are the only safe place to honor an
+                // interjection: the LLM has just received the result and is
+                // about to plan its next action, so cutting here preserves
+                // tool-call/result pairing in the rig conversation state.
+                if interject_rx.try_recv().is_ok() {
+                    // Drain any further pending signals so a flurry of typing
+                    // doesn't queue them up for the *next* run.
+                    while interject_rx.try_recv().is_ok() {}
+                    let estimated_tokens = Session::estimate_tokens(&partial);
+                    outcome.interjected = true;
+                    let _ = event_tx
+                        .send(AgentEvent::Interjected {
+                            partial_response: CompactString::from(partial.as_str()),
+                            tokens: estimated_tokens,
+                        })
+                        .await;
+                    return outcome;
+                }
             }
             Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                 let response_text = res.response();
@@ -148,13 +183,27 @@ where
 {
     cache.clear();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
+    let (interject_tx, mut interject_rx) = mpsc::unbounded_channel::<()>();
 
     let task = tokio::spawn(async move {
         let policy = RecoveryPolicy::default();
         let mut attempts = 0;
 
         loop {
-            let outcome = run_stream(&agent, &prompt, history.clone(), &event_tx).await;
+            let outcome = run_stream(
+                &agent,
+                &prompt,
+                history.clone(),
+                &event_tx,
+                &mut interject_rx,
+            )
+            .await;
+
+            // Interjection takes precedence over retry: the user asked us to
+            // stop and listen, so don't quietly re-issue the same prompt.
+            if outcome.interjected {
+                break;
+            }
 
             let msg = match outcome.error {
                 None => break,
@@ -221,7 +270,11 @@ where
         }
     });
 
-    AgentRunner { event_rx, task }
+    AgentRunner {
+        event_rx,
+        task,
+        interject_tx,
+    }
 }
 
 pub async fn run_print<M, P>(

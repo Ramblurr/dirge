@@ -17,6 +17,15 @@ pub enum AgentEvent {
         tokens: u64,
         cost: f64,
     },
+    /// The runner observed an interjection request at a tool-result boundary
+    /// and stopped the stream cleanly. Whatever assistant text had streamed
+    /// so far is captured in `partial_response`. The UI is expected to
+    /// commit it as an assistant message and then drain its interjection
+    /// queue as the next user turn.
+    Interjected {
+        partial_response: CompactString,
+        tokens: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
