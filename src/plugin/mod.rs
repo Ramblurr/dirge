@@ -588,6 +588,63 @@ mod tests {
         assert_eq!(pending, vec![("info".to_string(), "msg".to_string())]);
     }
 
+    // --- Phase 4: harness/replace-prompt --------------------------------
+
+    /// A plugin calling `(harness/replace-prompt "...")` from an on-prompt
+    /// hook writes a slot the host consumes to replace the user's text
+    /// before the LLM call.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_replace_prompt_roundtrips() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        assert_eq!(mgr.take_pending_prompt_replace(), None);
+
+        mgr.eval(r#"(harness/replace-prompt "Please act in spanish.")"#)
+            .unwrap();
+        assert_eq!(
+            mgr.take_pending_prompt_replace(),
+            Some("Please act in spanish.".to_string())
+        );
+        // Drained on read.
+        assert_eq!(mgr.take_pending_prompt_replace(), None);
+    }
+
+    /// Last-write-wins when multiple hooks rewrite.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_replace_prompt_last_write_wins() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/replace-prompt "first")"#).unwrap();
+        mgr.eval(r#"(harness/replace-prompt "second")"#).unwrap();
+        assert_eq!(
+            mgr.take_pending_prompt_replace(),
+            Some("second".to_string())
+        );
+    }
+
+    /// Non-string args silently drop.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_replace_prompt_ignores_non_string() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/replace-prompt 42)"#).unwrap();
+        assert_eq!(mgr.take_pending_prompt_replace(), None);
+    }
+
+    /// Special characters in the replacement round-trip via the escape
+    /// pipeline (quotes, newlines, backslashes).
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_replace_prompt_handles_special_chars() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/replace-prompt "say \"hi\"\nline 2 \\ x")"#)
+            .unwrap();
+        assert_eq!(
+            mgr.take_pending_prompt_replace(),
+            Some("say \"hi\"\nline 2 \\ x".to_string())
+        );
+    }
+
     // --- Phase 2: plugin-registered slash commands ----------------------
 
     /// `harness/register-command` records a (cmd-name, handler-fn) pair
@@ -817,6 +874,14 @@ impl PluginManager {
                     (set harness-cmd-list
                          (string harness-cmd-list name "|" handler "\n"))))
 
+                # Replace the user's prompt for the current turn. Plugins
+                # call this from on-prompt hooks. Distinct from
+                # harness/request-prompt which queues a follow-up turn.
+                (var harness-prompt-replace nil)
+                (defn harness/replace-prompt [text]
+                  (when (string? text)
+                    (set harness-prompt-replace text)))
+
                 # Notification queue. Plugins call (harness/notify msg level?)
                 # to push a line into the host's chat display. Stored as a
                 # `level\tmsg\n` blob; the host's drain_notifications
@@ -1001,6 +1066,20 @@ impl PluginManager {
 
     #[cfg(not(feature = "plugin"))]
     pub fn take_pending_replace_result(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Read and clear the `harness-prompt-replace` slot. Set by plugins
+    /// from `on-prompt` to rewrite the user turn before the agent runs.
+    /// Distinct from `take_pending_prompt`, which carries the
+    /// `request-prompt` queue for the *next* turn.
+    #[cfg(feature = "plugin")]
+    pub fn take_pending_prompt_replace(&mut self) -> Option<String> {
+        self.take_string_slot("harness-prompt-replace")
+    }
+
+    #[cfg(not(feature = "plugin"))]
+    pub fn take_pending_prompt_replace(&mut self) -> Option<String> {
         None
     }
 

@@ -1101,6 +1101,8 @@ pub async fn run_interactive(
 
                                 #[allow(unused_mut)]
                                 let mut plugin_hint: Option<String> = None;
+                                #[allow(unused_mut)]
+                                let mut plugin_replace: Option<String> = None;
                                 #[cfg(feature = "plugin")]
                                 if let Some(pm) = plugin_manager {
                                     let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
@@ -1133,9 +1135,29 @@ pub async fn run_interactive(
                                     if let Some(pending) = mgr.take_pending_prompt() {
                                         plugin_hint = Some(pending);
                                     }
+                                    // harness/replace-prompt rewrites the current
+                                    // turn entirely (distinct from request-prompt
+                                    // which queues a follow-up turn). Takes
+                                    // precedence over hint prepending below.
+                                    plugin_replace = mgr.take_pending_prompt_replace();
                                 }
 
-                                let prompt = if let Some(hint) = plugin_hint {
+                                let prompt = if let Some(replacement) = plugin_replace {
+                                    // Echo the rewrite so the user can see what
+                                    // the LLM is actually receiving — otherwise
+                                    // it looks like their message vanished.
+                                    renderer.write_line(
+                                        "[plugin] prompt rewritten:",
+                                        Color::DarkGrey,
+                                    )?;
+                                    for line in replacement.lines() {
+                                        renderer.write_line(
+                                            &format!("  {}", sanitize_output(line)),
+                                            Color::DarkGrey,
+                                        )?;
+                                    }
+                                    replacement
+                                } else if let Some(hint) = plugin_hint {
                                     format!("{}\n\n{}", hint, text)
                                 } else {
                                     text.to_string()

@@ -250,6 +250,11 @@ Janet scripts access harness capabilities through built-in functions:
 (harness/notify "msg")              # default :info, dim grey
 (harness/notify "watch out" :warn)  # yellow
 (harness/notify "broken" :error)    # red
+
+# Input transform (from on-prompt hooks):
+(harness/replace-prompt "rewritten user message")
+# Replaces the user's message for the current turn entirely.
+# Distinct from harness/request-prompt, which queues a follow-up turn.
 ```
 
 See `plugins/protected_paths.janet` for an example that blocks writes
