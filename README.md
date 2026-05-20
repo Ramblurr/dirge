@@ -24,7 +24,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Git Worktrees**: `/worktree` to create branch-per-task worktrees, `/wt-merge`, `/wt-exit`
 - **Loop system**: iterative coding loop for long-horizon tasks
 - **ACP support** (gated): Agent Communication Protocol server for editor integration
-- **Plugin system** (Janet): embeddable scripting for custom workflows, hooks, and harness-driven agent orchestration
+- **Plugin system** (Janet, on a dedicated worker thread): hooks for the full session/agent/tool lifecycle. Plugins can intercept tool calls (block/mutate/replace), register slash commands, transform user input, post notifications, and prompt the user with blocking `confirm`/`select` dialogs
 
 **NOTE**: Windows support is not tested, but feel free to try and open an issue if you encounter any bugs.
 
@@ -266,9 +266,17 @@ Plugins live in `~/.config/dirge/plugins/*.janet` (global) or
 `./.dirge/plugins/*.janet` (project-local). Janet runs on a dedicated
 worker thread so blocking dialogs don't freeze the UI.
 
-See `plugins/protected_paths.janet` for an example that blocks writes
-to sensitive paths and truncates oversized tool outputs.
-See `plugins/hello_cmd.janet` for a minimal slash-command plugin.
+Example plugins in `plugins/`:
+
+| File | Demonstrates |
+|------|--------------|
+| `workflow.janet` | Built-in architect → implementor → review orchestration |
+| `protected_paths.janet` | `harness/block` + `harness/replace-result` (deny + truncate) |
+| `hello_cmd.janet` | `harness/register-command` (custom `/cmd`) |
+| `notify_example.janet` | `harness/notify` for chat notifications |
+| `prefix_lang.janet` | `harness/replace-prompt` for input transform |
+| `confirm_destructive.janet` | `harness/confirm` gating bash danger commands |
+| `select_persona.janet` | `harness/select` + `/persona` to pick a response style |
 
 ### Workflow plugin
 
