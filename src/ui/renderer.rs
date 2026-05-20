@@ -646,8 +646,20 @@ impl Renderer {
                     if indent > 0 {
                         write!(stdout, "{}", " ".repeat(indent))?;
                     }
+                    // Bold-glow for bright tones so streamed text
+                    // reads the same as the post-redraw render_viewport
+                    // path. Without this, streaming chunks look flat
+                    // until the next full repaint shifts them to the
+                    // bright/bold weight.
+                    let bloom = crate::ui::theme::is_bright(color);
+                    if bloom {
+                        write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
+                    }
                     write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
                     writeln!(stdout, "{}", chunk)?;
+                    if bloom {
+                        write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
+                    }
                     write!(stdout, "{}", ResetColor)?;
                     self.lines = self.lines.saturating_add(1);
                     self.col = 0;
@@ -701,8 +713,15 @@ impl Renderer {
                     let r = self.content_row();
                     stdout.execute(MoveTo(indent + self.col, r))?;
                     if !segment.is_empty() {
+                        let bloom = crate::ui::theme::is_bright(color);
+                        if bloom {
+                            write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
+                        }
                         write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
                         write!(stdout, "{}", segment)?;
+                        if bloom {
+                            write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
+                        }
                         write!(stdout, "{}", ResetColor)?;
                     }
                     writeln!(stdout)?;
@@ -731,8 +750,15 @@ impl Renderer {
                         let mut stdout = io::stdout();
                         let r = self.content_row();
                         stdout.execute(MoveTo(indent + self.col, r))?;
+                        let bloom = crate::ui::theme::is_bright(color);
+                        if bloom {
+                            write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
+                        }
                         write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
                         write!(stdout, "{}", chunk)?;
+                        if bloom {
+                            write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
+                        }
                         write!(stdout, "{}", ResetColor)?;
                         self.col = self.col.saturating_add(chunk.chars().count() as u16);
                     }
@@ -882,6 +908,13 @@ impl Renderer {
             stdout.execute(MoveTo(0, row))?;
             write!(stdout, "{}", " ".repeat(cols as usize))?;
             stdout.execute(MoveTo(bottom_indent as u16, row))?;
+            // Bold-glow the prompt indicator + input text so they
+            // match the chat above. Without this the bottom area
+            // looked dimmer than the chat that scrolled past it.
+            let accent_bloom = crate::ui::theme::is_bright(crate::ui::theme::accent());
+            if accent_bloom {
+                write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
+            }
             write!(
                 stdout,
                 "{}",
@@ -893,10 +926,17 @@ impl Renderer {
             } else {
                 write!(stdout, "{}", prompt_cont)?;
             }
+            if accent_bloom {
+                write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
+            }
             // Switch to the user-input text tone (bright phosphor)
             // before writing what the user typed, so the prompt
             // accent and the input text are visually distinct but
             // both on the green axis.
+            let user_bloom = crate::ui::theme::is_bright(crate::ui::theme::user());
+            if user_bloom {
+                write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
+            }
             write!(
                 stdout,
                 "{}",
@@ -907,6 +947,9 @@ impl Renderer {
             {
                 let slice: String = chars[vr.char_start..vr.char_end].iter().collect();
                 write!(stdout, "{}", slice)?;
+            }
+            if user_bloom {
+                write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
             }
             write!(stdout, "{}", ResetColor)?;
         }

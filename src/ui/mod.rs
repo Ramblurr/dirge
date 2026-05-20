@@ -1666,7 +1666,14 @@ pub async fn run_interactive(
                             && session.needs_compaction(cfg.resolve_reserve_tokens())
                             && !cli.no_session
                         {
-                            renderer.write_line("auto-compacting...", theme::dim())?;
+                            // Auto-compact failure used to render as a
+                            // single dim red line that scrolled past
+                            // unnoticed — users kept typing into an
+                            // over-full context and saw mysterious
+                            // context-length errors next turn. Frame
+                            // the warning so it visibly stops the eye
+                            // and tells the user what to do next.
+                            renderer.write_line("▒░ auto-compacting context ░▒", theme::accent())?;
                             let compress_result = handle_compress(
                                 None,
                                 &mut agent, &client, &mut renderer, session, cli, cfg, context,
@@ -1675,7 +1682,34 @@ pub async fn run_interactive(
                                 #[cfg(feature = "semantic")] semantic_manager,
                             ).await;
                             if let Err(e) = compress_result {
-                                renderer.write_line(&format!("auto-compact error: {}", e), c_error())?;
+                                renderer.write_line(
+                                    "╭─ ⚠ AUTO-COMPACT FAILED ─────────────────────────────╮",
+                                    c_error(),
+                                )?;
+                                renderer.write_line(
+                                    &format!("│ cause: {}", e),
+                                    c_error(),
+                                )?;
+                                renderer.write_line(
+                                    "│ context is over the threshold — replies may start",
+                                    c_error(),
+                                )?;
+                                renderer.write_line(
+                                    "│ hitting context-length errors. Try /compress",
+                                    c_error(),
+                                )?;
+                                renderer.write_line(
+                                    "│ manually, /clear to start fresh, or restart with",
+                                    c_error(),
+                                )?;
+                                renderer.write_line(
+                                    "│ a larger context_window in config.",
+                                    c_error(),
+                                )?;
+                                renderer.write_line(
+                                    "╰─────────────────────────────────────────────────────╯",
+                                    c_error(),
+                                )?;
                             }
                         }
 
@@ -2072,6 +2106,26 @@ pub async fn run_interactive(
                 // nested inside it.
                 close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
                 renderer.set_avatar_state(avatar::AvatarState::Alert);
+                // Force a bottom-row repaint so the avatar updates to
+                // the Alert face immediately, before the user reads
+                // the prompt and reaches for a key. Without this, the
+                // avatar still showed the in-flight tool's face
+                // (Reading/Writing/Bash) until the next keystroke.
+                renderer.draw_bottom(
+                    &input,
+                    &with_queue(
+                        StatusLine::render(
+                            session,
+                            is_running,
+                            0,
+                            loop_label.as_deref(),
+                            context.current_prompt_name.as_deref(),
+                            perm_mode().as_deref(),
+                        ),
+                        interjection_queue.len(),
+                    ),
+                    is_running,
+                )?;
 
                 // Framed permission prompt. The double-bar border +
                 // ALERT wordmark visually arrests the eye — this is
@@ -2895,7 +2949,7 @@ fn update_search(renderer: &Renderer, query: &str, matches: &mut Vec<usize>, sel
 }
 
 fn draw_search_bar(query: &str, matches: &[usize], selected: usize) -> std::io::Result<()> {
-    use crossterm::style::{ResetColor, SetForegroundColor};
+    use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
     use crossterm::terminal::{Clear, ClearType};
     use std::io::Write;
 
@@ -2908,9 +2962,19 @@ fn draw_search_bar(query: &str, matches: &[usize], selected: usize) -> std::io::
     };
     let bar = format!("Search: {} [{}]", query, indicator);
     crossterm::execute!(stdout, Clear(ClearType::CurrentLine))?;
+    // Bold-glow on accent so the search bar reads consistently with
+    // the rest of the chat. Without Bold it was visibly duller than
+    // surrounding content.
+    let bloom = theme::is_bright(theme::accent());
+    if bloom {
+        crossterm::execute!(stdout, SetAttribute(Attribute::Bold))?;
+    }
     crossterm::execute!(stdout, SetForegroundColor(theme::accent()))?;
     write!(stdout, "\r\n")?;
     write!(stdout, "{}", bar)?;
+    if bloom {
+        crossterm::execute!(stdout, SetAttribute(Attribute::NormalIntensity))?;
+    }
     crossterm::execute!(stdout, ResetColor)?;
     Ok(())
 }
