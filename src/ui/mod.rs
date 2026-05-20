@@ -10,6 +10,7 @@ mod status;
 #[cfg(feature = "plugin")]
 mod streaming;
 mod terminal;
+pub(crate) mod theme;
 mod tree;
 
 use std::collections::VecDeque;
@@ -48,10 +49,25 @@ use crate::ui::slash::{handle_compress, handle_slash};
 use crate::ui::status::StatusLine;
 use crate::ui::terminal::TerminalGuard;
 
-const C_AGENT: Color = Color::White;
-const C_ERROR: Color = Color::Red;
-const C_TOOL: Color = Color::Yellow;
-const C_PERM: Color = Color::Magenta;
+// Themed color accessors. These wrap `theme::agent()` etc. so we can
+// keep the existing call-site spelling (e.g. `c_agent()` is now a fn).
+// Active palette is set at startup via `theme::init`.
+#[inline]
+fn c_agent() -> Color {
+    theme::agent()
+}
+#[inline]
+fn c_error() -> Color {
+    theme::error()
+}
+#[inline]
+fn c_tool() -> Color {
+    theme::tool()
+}
+#[inline]
+fn c_perm() -> Color {
+    theme::perm()
+}
 
 /// Append a `q:N` queue-depth suffix to the status line when there are
 /// interjections waiting to be sent to the agent. Hidden when the queue
@@ -124,12 +140,9 @@ fn render_plugin_entry(
 
     // Default rendering: identify the custom type and dump the data.
     // Keeps entries visible even when their plugin is uninstalled.
-    renderer.write_line(&format!("[entry: {}]", entry.custom_type), Color::DarkGrey)?;
+    renderer.write_line(&format!("[entry: {}]", entry.custom_type), theme::dim())?;
     if !entry.data.is_empty() {
-        renderer.write_line(
-            &format!("  {}", sanitize_output(&entry.data)),
-            Color::DarkGrey,
-        )?;
+        renderer.write_line(&format!("  {}", sanitize_output(&entry.data)), theme::dim())?;
     }
     Ok(())
 }
@@ -514,8 +527,8 @@ pub async fn run_interactive(
             for (level, msg) in pending {
                 let color = match level.as_str() {
                     "warn" => Color::Yellow,
-                    "error" => C_ERROR,
-                    _ => Color::DarkGrey,
+                    "error" => c_error(),
+                    _ => theme::dim(),
                 };
                 renderer.write_line(&format!("[plugin] {}", msg), color)?;
             }
@@ -561,13 +574,13 @@ pub async fn run_interactive(
                 let effect = plugin_tree::apply_tree_op(op, session, &mut input);
                 match effect {
                     plugin_tree::TreeOpEffect::Applied(msg) => {
-                        renderer.write_line(&msg, Color::DarkGrey)?;
+                        renderer.write_line(&msg, theme::dim())?;
                     }
                     plugin_tree::TreeOpEffect::Failed(msg) => {
-                        renderer.write_line(&msg, C_ERROR)?;
+                        renderer.write_line(&msg, c_error())?;
                     }
                     plugin_tree::TreeOpEffect::SessionReplaced(msg) => {
-                        renderer.write_line(&msg, C_AGENT)?;
+                        renderer.write_line(&msg, c_agent())?;
                         any_session_replaced = true;
                     }
                 }
@@ -713,10 +726,10 @@ pub async fn run_interactive(
                                 if dropped > 0 {
                                     renderer.write_line(
                                         &format!("interrupted ({} queued message{} dropped)", dropped, if dropped == 1 { "" } else { "s" }),
-                                        C_ERROR,
+                                        c_error(),
                                     )?;
                                 } else {
-                                    renderer.write_line("interrupted", C_ERROR)?;
+                                    renderer.write_line("interrupted", c_error())?;
                                 }
                                 renderer.draw_bottom(
                                     &input,
@@ -755,7 +768,7 @@ pub async fn run_interactive(
                                     "dropped 1 queued message ({} remaining)",
                                     interjection_queue.len()
                                 ),
-                                Color::DarkGrey,
+                                theme::dim(),
                             )?;
                             renderer.draw_bottom(
                                 &input,
@@ -869,7 +882,7 @@ pub async fn run_interactive(
                                 ls.active = false;
                                 loop_label = None;
                             }
-                            renderer.write_line("interrupted (Esc)", C_ERROR)?;
+                            renderer.write_line("interrupted (Esc)", c_error())?;
                             renderer.draw_bottom(
                                 &input,
                                 &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
@@ -914,7 +927,7 @@ pub async fn run_interactive(
                                 }
                             }
                             last_esc = Some(now);
-                            renderer.write_line("Press Esc again to rewind...", Color::DarkGrey)?;
+                            renderer.write_line("Press Esc again to rewind...", theme::dim())?;
                             renderer.draw_bottom(
                                 &input,
                                 &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
@@ -1003,7 +1016,7 @@ pub async fn run_interactive(
                         if let Some(text) = input.handle_key(key) {
                             #[cfg(feature = "loop")]
                             if loop_state.as_ref().is_some_and(|ls| ls.active) && !text.starts_with('/') {
-                                renderer.write_line("loop active: /loop stop to cancel", C_ERROR)?;
+                                renderer.write_line("loop active: /loop stop to cancel", c_error())?;
                                 renderer.draw_bottom(
                                     &input,
                                     &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
@@ -1016,7 +1029,7 @@ pub async fn run_interactive(
                             }
                             if let Some(prefix) = shell::parse_shell_prefix(&text) {
                                 if is_running {
-                                    renderer.write_line("agent is busy, wait or interrupt first", C_ERROR)?;
+                                    renderer.write_line("agent is busy, wait or interrupt first", c_error())?;
                                     renderer.draw_bottom(
                                         &input,
                                         &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
@@ -1026,14 +1039,14 @@ pub async fn run_interactive(
                                 }
                                 for line in text.lines() {
                                     let safe_line = sanitize_output(line);
-                                    renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
+                                    renderer.write_line(&format!("<you>   {}", safe_line), theme::user())?;
                                 }
                                 renderer.write_line("", Color::White)?;
                                 match prefix {
                                     shell::ShellPrefix::Visible(cmd) => {
                                         match run_shell_command(&cmd, &sandbox).await {
                                             Ok(output) => {
-                                                renderer.write_line(&output, Color::DarkGrey)?;
+                                                renderer.write_line(&output, theme::dim())?;
                                                 let msg = format!("I ran: $ {}\n\nOutput:\n{}", cmd, output);
                                                 let history = crate::agent::runner::convert_history(session);
                                                 session.add_message(MessageRole::User, &msg);
@@ -1047,17 +1060,17 @@ pub async fn run_interactive(
                                                 is_running = true;
                                             }
                                             Err(e) => {
-                                                renderer.write_line(&format!("shell error: {}", e), C_ERROR)?;
+                                                renderer.write_line(&format!("shell error: {}", e), c_error())?;
                                             }
                                         }
                                     }
                                     shell::ShellPrefix::Invisible(cmd) => {
                                         match run_shell_command(&cmd, &sandbox).await {
                                             Ok(output) => {
-                                                renderer.write_line(&output, Color::DarkGrey)?;
+                                                renderer.write_line(&output, theme::dim())?;
                                             }
                                             Err(e) => {
-                                                renderer.write_line(&format!("shell error: {}", e), C_ERROR)?;
+                                                renderer.write_line(&format!("shell error: {}", e), c_error())?;
                                             }
                                         }
                                     }
@@ -1074,7 +1087,7 @@ pub async fn run_interactive(
                                     text.split_whitespace().next().unwrap_or(""),
                                     "/quit" | "/help" | "/reasoning"
                                 ) {
-                                    renderer.write_line("agent is busy — wait, interrupt (Ctrl+C), or use /quit", C_ERROR)?;
+                                    renderer.write_line("agent is busy — wait, interrupt (Ctrl+C), or use /quit", c_error())?;
                                     renderer.draw_bottom(
                                         &input,
                                         &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
@@ -1084,7 +1097,7 @@ pub async fn run_interactive(
                                 }
                                 for line in text.lines() {
                                     let safe_line = sanitize_output(line);
-                                    renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
+                                    renderer.write_line(&format!("<you>   {}", safe_line), theme::user())?;
                                 }
                                 renderer.write_line("", Color::White)?;
                                 let result = handle_slash(&text, &mut agent, &client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut is_running, &mut input, &permission, &ask_tx, &mut todo_tools_enabled, &bg_store, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager, #[cfg(feature = "semantic")] semantic_manager).await;
@@ -1103,12 +1116,12 @@ pub async fn run_interactive(
                                             #[cfg(feature = "semantic")] semantic_manager,
                                         ).await;
                                         if let Err(e) = compress_result {
-                                            renderer.write_line(&format!("compress error: {}", e), C_ERROR)?;
+                                            renderer.write_line(&format!("compress error: {}", e), c_error())?;
                                         }
                                         if let Err(e) = crate::session::storage::save_session(session) {
                                             renderer.write_line(
                                                 &format!("warning: failed to save session: {}", e),
-                                                C_ERROR,
+                                                c_error(),
                                             )?;
                                         }
                                     }
@@ -1172,7 +1185,7 @@ pub async fn run_interactive(
                                             render_session(&mut renderer, session, cli, cfg, context)?;
                                             renderer.write_line(
                                                 &format!("returned to main repo at {}", main_path),
-                                                C_AGENT,
+                                                c_agent(),
                                             )?;
                                         }
                                     }
@@ -1180,7 +1193,7 @@ pub async fn run_interactive(
                                         if e.downcast_ref::<std::io::Error>().is_some_and(|e: &std::io::Error| e.kind() == std::io::ErrorKind::Interrupted) {
                                             break;
                                         }
-                                        renderer.write_line(&format!("error: {}", e), C_ERROR)?;
+                                        renderer.write_line(&format!("error: {}", e), c_error())?;
                                     }
                                     Ok(_) => {
                                         if !cli.no_session
@@ -1188,7 +1201,7 @@ pub async fn run_interactive(
                                         {
                                             renderer.write_line(
                                                 &format!("warning: failed to save session: {}", e),
-                                                C_ERROR,
+                                                c_error(),
                                             )?;
                                         }
                                         #[cfg(feature = "loop")]
@@ -1214,7 +1227,7 @@ pub async fn run_interactive(
                                 {
                                     renderer.write_line(
                                         &format!("warning: failed to save session: {}", e),
-                                        C_ERROR,
+                                        c_error(),
                                     )?;
                                 }
                             } else if is_running {
@@ -1236,19 +1249,19 @@ pub async fn run_interactive(
                                     let safe_line = sanitize_output(line);
                                     renderer.write_line(
                                         &format!("» {}", safe_line),
-                                        Color::DarkGrey,
+                                        theme::dim(),
                                     )?;
                                 }
                                 renderer.write_line(
                                     &format!(
                                         "(queued; runner will stop at next safe boundary — Ctrl+X drops, Ctrl+C cancels)"
                                     ),
-                                    Color::DarkGrey,
+                                    theme::dim(),
                                 )?;
                             } else {
                                 for line in text.lines() {
                                     let safe_line = sanitize_output(line);
-                                    renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
+                                    renderer.write_line(&format!("<you>   {}", safe_line), theme::user())?;
                                 }
                                 renderer.write_line("", Color::White)?;
 
@@ -1272,7 +1285,7 @@ pub async fn run_interactive(
                                             for line in &results {
                                                 renderer.write_line(
                                                     &format!("[plugin] {}", line),
-                                                    Color::DarkGrey,
+                                                    theme::dim(),
                                                 )?;
                                             }
                                             plugin_hint = Some(results.join("\n"));
@@ -1281,7 +1294,7 @@ pub async fn run_interactive(
                                         Err(e) => {
                                             renderer.write_line(
                                                 &format!("[plugin] on-prompt error: {e}"),
-                                                C_ERROR,
+                                                c_error(),
                                             )?;
                                         }
                                     }
@@ -1303,12 +1316,12 @@ pub async fn run_interactive(
                                     // it looks like their message vanished.
                                     renderer.write_line(
                                         "[plugin] prompt rewritten:",
-                                        Color::DarkGrey,
+                                        theme::dim(),
                                     )?;
                                     for line in replacement.lines() {
                                         renderer.write_line(
                                             &format!("  {}", sanitize_output(line)),
-                                            Color::DarkGrey,
+                                            theme::dim(),
                                         )?;
                                     }
                                     replacement
@@ -1354,7 +1367,7 @@ pub async fn run_interactive(
                             continue;
                         }
                         if !agent_line_started {
-                            renderer.write("< ", Color::DarkMagenta)?;
+                            renderer.write("<dirge> ", Color::DarkMagenta)?;
                             agent_line_started = true;
                         }
                         let safe = sanitize_output(&text);
@@ -1399,13 +1412,13 @@ pub async fn run_interactive(
                             continue;
                         }
 
-                        let max_width = renderer.line_width();
+                        let max_width = renderer.content_width().saturating_sub(9); // 8-col handle + space
                         let mut styled =
                             crate::ui::markdown::markdown_to_styled(&response_buf, max_width);
 
                         if !styled.is_empty() {
                             styled[0].text =
-                                CompactString::from(format!("< {}", styled[0].text));
+                                CompactString::from(format!("<dirge> {}", styled[0].text));
                         }
 
                         if let Some(start) = response_start_line {
@@ -1420,6 +1433,12 @@ pub async fn run_interactive(
                     }
                     AgentEvent::ToolCall { name, args } => {
                         was_reasoning = false;
+                        // If a previous tool's chamber never closed
+                        // (errored without a ToolResult, etc.), close
+                        // it before opening the new one. Without this
+                        // the new `╭─ NAME ─ args` lands inside the
+                        // stale chamber.
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
                         last_tool_name = Some(name.to_string());
                         if agent_line_started {
                             renderer.write_line("", Color::White)?;
@@ -1427,8 +1446,27 @@ pub async fn run_interactive(
                         }
                         response_buf.clear();
                         response_start_line = None;
-                        let line = format!("◈ {}", format_tool_call_summary(&name, &args));
-                        renderer.write_line(&sanitize_output(&line), C_TOOL)?;
+                        // Tool-call line: rounded chamber TOP border
+                        // with the tool name on it. Output lines below
+                        // get `│ ` chamber rows; the chamber is closed
+                        // by `╰────╯` after the ToolResult. Header
+                        // border pads with dashes out to the frame
+                        // width so it visually mates with the closing
+                        // bottom border (matching btop's framed cards).
+                        let upper = name.to_ascii_uppercase();
+                        let summary = format_tool_call_summary(&name, &args);
+                        let trimmed = summary
+                            .strip_prefix(&format!("{} ", name))
+                            .unwrap_or(&summary);
+                        let pre = format!("╭─ {} ─ {} ", upper, trimmed);
+                        let pre_clean = sanitize_output(&pre).into_string();
+                        let (frame_w, _) = chamber_widths(&renderer);
+                        let pre_len = pre_clean.chars().count();
+                        let dashes = frame_w
+                            .saturating_sub(pre_len + 1) // 1 for closing ╮
+                            .max(0);
+                        let header = format!("{}{}╮", pre_clean, "─".repeat(dashes));
+                        renderer.write_line(&header, c_tool())?;
 
                         // Note: on-tool-start fires from HookedToolDyn now,
                         // around the actual tool invocation. The UI no
@@ -1458,32 +1496,58 @@ pub async fn run_interactive(
                                     .iter()
                                     .position(|l| l.starts_with("--- a/"));
                                 if let Some(pre) = diff_start {
-                                    // Show non-diff prefix
+                                    let (frame_w, inner) = chamber_widths(&renderer);
+                                    // Pre-diff prose (the edit tool's
+                                    // header line, etc.) renders in
+                                    // the chamber's standard tone.
                                     for l in &lines[..pre] {
                                         if !l.is_empty() {
+                                            let txt = sanitize_output(l).into_string();
                                             renderer.write_line(
-                                                &format!("◈ {}", sanitize_output(l)),
-                                                Color::DarkGrey,
+                                                &chamber_row(&txt, inner),
+                                                theme::result(),
                                             )?;
                                         }
                                     }
-                                    // Show colorized diff
+                                    // Colorized diff with opencode-style
+                                    // tinted backgrounds: + lines get a
+                                    // dim-green bg (palette 22), - lines
+                                    // get a dim-red bg (palette 52).
+                                    // Header (`--- ` / `+++ ` / `@@`) and
+                                    // context lines have no bg.
                                     for l in &lines[pre..] {
+                                        let txt = sanitize_output(l).into_string();
                                         if l.starts_with("--- ") || l.starts_with("+++ ") {
-                                            renderer.write_line(l, Color::Cyan)?;
+                                            renderer.write_line(
+                                                &chamber_row(&txt, inner),
+                                                Color::Cyan,
+                                            )?;
                                         } else if l.starts_with("@@") {
-                                            renderer.write_line(l, Color::DarkCyan)?;
+                                            renderer.write_line(
+                                                &chamber_row(&txt, inner),
+                                                Color::DarkCyan,
+                                            )?;
                                         } else if l.starts_with('+') {
-                                            renderer.write_line(l, Color::Green)?;
+                                            renderer.write_line(
+                                                &chamber_row_with_bg(&txt, inner, 22),
+                                                Color::Green,
+                                            )?;
                                         } else if l.starts_with('-') {
-                                            renderer.write_line(l, Color::Red)?;
+                                            renderer.write_line(
+                                                &chamber_row_with_bg(&txt, inner, 52),
+                                                Color::Red,
+                                            )?;
                                         } else {
                                             renderer.write_line(
-                                                &sanitize_output(l),
-                                                Color::DarkGrey,
+                                                &chamber_row(&txt, inner),
+                                                theme::dim(),
                                             )?;
                                         }
                                     }
+                                    renderer.write_line(
+                                        &chamber_bottom(frame_w),
+                                        theme::dim(),
+                                    )?;
                                 } else {
                                     // No diff section found, show normally
                                     render_tool_output(
@@ -1518,7 +1582,7 @@ pub async fn run_interactive(
                                     for line in &results {
                                         renderer.write_line(
                                             &format!("[plugin] {}", line),
-                                            Color::DarkGrey,
+                                            theme::dim(),
                                         )?;
                                     }
                                     plugin_followup = Some(results.join("\n"));
@@ -1527,7 +1591,7 @@ pub async fn run_interactive(
                                 Err(e) => {
                                     renderer.write_line(
                                         &format!("[plugin] on-response error: {e}"),
-                                        C_ERROR,
+                                        c_error(),
                                     )?;
                                 }
                             }
@@ -1539,21 +1603,21 @@ pub async fn run_interactive(
                         }
 
                         if !response_buf.is_empty() {
-                            let max_width = renderer.line_width();
+                            let max_width = renderer.content_width().saturating_sub(9); // 8-col handle + space
                             let mut styled = crate::ui::markdown::markdown_to_styled(
                                 &response_buf,
                                 max_width,
                             );
                             if !styled.is_empty() {
                                 styled[0].text =
-                                    CompactString::from(format!("< {}", styled[0].text));
+                                    CompactString::from(format!("<dirge> {}", styled[0].text));
                             }
                             if let Some(start) = response_start_line {
                                 renderer.replace_from(start, styled);
                                 renderer.render_viewport()?;
                             }
                         } else if !agent_line_started {
-                            renderer.write("< ", C_AGENT)?;
+                            renderer.write("<dirge> ", c_agent())?;
                         }
 
                         renderer.write_line("", Color::White)?;
@@ -1575,7 +1639,7 @@ pub async fn run_interactive(
                             && session.needs_compaction(cfg.resolve_reserve_tokens())
                             && !cli.no_session
                         {
-                            renderer.write_line("auto-compacting...", Color::DarkGrey)?;
+                            renderer.write_line("auto-compacting...", theme::dim())?;
                             let compress_result = handle_compress(
                                 None,
                                 &mut agent, &client, &mut renderer, session, cli, cfg, context,
@@ -1584,7 +1648,7 @@ pub async fn run_interactive(
                                 #[cfg(feature = "semantic")] semantic_manager,
                             ).await;
                             if let Err(e) = compress_result {
-                                renderer.write_line(&format!("auto-compact error: {}", e), C_ERROR)?;
+                                renderer.write_line(&format!("auto-compact error: {}", e), c_error())?;
                             }
                         }
 
@@ -1593,7 +1657,7 @@ pub async fn run_interactive(
                         {
                             renderer.write_line(
                                 &format!("warning: failed to save session: {}", e),
-                                C_ERROR,
+                                c_error(),
                             )?;
                         }
                         is_running = false;
@@ -1640,7 +1704,7 @@ pub async fn run_interactive(
                                             "[loop] max iterations ({}) reached, stopping",
                                             ls.iteration
                                         ),
-                                        C_AGENT,
+                                        c_agent(),
                                     )?;
                                     ls.active = false;
                                     loop_label = None;
@@ -1664,7 +1728,7 @@ pub async fn run_interactive(
                                     loop_label = Some(ls.iteration_label());
                                     renderer.write_line(
                                         &format!("[loop] launching {}", ls.iteration_label()),
-                                        C_AGENT,
+                                        c_agent(),
                                     )?;
                                 }
                             }
@@ -1697,13 +1761,13 @@ pub async fn run_interactive(
                                     render_session(&mut renderer, session, cli, cfg, context)?;
                                     renderer.write_line(
                                         &format!("merged and returned to main repo at {}", main_path),
-                                        C_AGENT,
+                                        c_agent(),
                                     )?;
                                 }
                                 Err(e) => {
                                     renderer.write_line(
                                         &format!("warning: failed to change back to main repo: {}", e),
-                                        C_ERROR,
+                                        c_error(),
                                     )?;
                                 }
                             }
@@ -1720,7 +1784,7 @@ pub async fn run_interactive(
                             for line in combined.lines() {
                                 let safe_line = sanitize_output(line);
                                 renderer
-                                    .write_line(&format!("> {}", safe_line), Color::Green)?;
+                                    .write_line(&format!("<you>   {}", safe_line), theme::user())?;
                             }
                             renderer.write_line("", Color::White)?;
 
@@ -1742,20 +1806,20 @@ pub async fn run_interactive(
                     }
                     AgentEvent::Interjected { partial_response, tokens } => {
                         was_reasoning = false;
-                        last_tool_name = None;
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
 
                         // Finalize whatever assistant text streamed so far so
                         // the conversation history reflects what the user saw,
                         // not a phantom turn that "never happened".
                         if !response_buf.is_empty() {
-                            let max_width = renderer.line_width();
+                            let max_width = renderer.content_width().saturating_sub(9); // 8-col handle + space
                             let mut styled = crate::ui::markdown::markdown_to_styled(
                                 &response_buf,
                                 max_width,
                             );
                             if !styled.is_empty() {
                                 styled[0].text =
-                                    CompactString::from(format!("< {}", styled[0].text));
+                                    CompactString::from(format!("<dirge> {}", styled[0].text));
                             }
                             if let Some(start) = response_start_line {
                                 renderer.replace_from(start, styled);
@@ -1765,7 +1829,7 @@ pub async fn run_interactive(
                         renderer.write_line("", Color::White)?;
                         renderer.write_line(
                             "(interjected — stopped at last tool-result boundary)",
-                            Color::DarkGrey,
+                            theme::dim(),
                         )?;
                         renderer.write_line("", Color::White)?;
 
@@ -1785,7 +1849,7 @@ pub async fn run_interactive(
                         {
                             renderer.write_line(
                                 &format!("warning: failed to save session: {}", e),
-                                C_ERROR,
+                                c_error(),
                             )?;
                         }
                         is_running = false;
@@ -1802,7 +1866,7 @@ pub async fn run_interactive(
                             let combined = queued.join("\n\n");
                             for line in combined.lines() {
                                 let safe_line = sanitize_output(line);
-                                renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
+                                renderer.write_line(&format!("<you>   {}", safe_line), theme::user())?;
                             }
                             renderer.write_line("", Color::White)?;
 
@@ -1824,9 +1888,9 @@ pub async fn run_interactive(
                     }
                     AgentEvent::Error(e) => {
                         was_reasoning = false;
-                        last_tool_name = None;
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
                         let safe = sanitize_output(&e);
-                        renderer.write_line(&format!("error: {}", safe), C_ERROR)?;
+                        renderer.write_line(&format!("error: {}", safe), c_error())?;
 
                         #[cfg(feature = "plugin")]
                         if let Some(pm) = plugin_manager {
@@ -1840,7 +1904,7 @@ pub async fn run_interactive(
                             ) {
                                 renderer.write_line(
                                     &format!("[plugin] on-error error: {dispatch_err}"),
-                                    C_ERROR,
+                                    c_error(),
                                 )?;
                             }
                         }
@@ -1866,7 +1930,7 @@ pub async fn run_interactive(
                                     dropped,
                                     if dropped == 1 { "" } else { "s" }
                                 ),
-                                C_ERROR,
+                                c_error(),
                             )?;
                         }
                     }
@@ -1953,20 +2017,41 @@ pub async fn run_interactive(
                     agent_line_started = false;
                 }
 
+                // If a tool chamber is open (the in-flight tool that
+                // triggered this permission check), close it first so
+                // the alert renders outside the chamber rather than
+                // nested inside it.
+                close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
+
+                // Framed permission prompt. The double-bar border +
+                // ALERT wordmark visually arrests the eye — this is
+                // the single most important UX moment and the user
+                // must not miss it. Box width = 64 for a stable look
+                // independent of terminal width; the chat area
+                // requires at least 60 cols anyway.
+                const BOX_W: usize = 64;
+                let pre = "╭─ ⚠ ALERT · PERMISSION ";
+                let pre_len = pre.chars().count();
+                let top_fill = BOX_W.saturating_sub(pre_len + 1);
+                let bot_bar = "─".repeat(BOX_W.saturating_sub(2));
                 renderer.write_line(
-                    &format!("[permission] {}: {}", ask_req.tool, ask_req.input),
-                    C_PERM,
+                    &format!("{}{}╮", pre, "─".repeat(top_fill)),
+                    c_perm(),
                 )?;
+                renderer.write_line(&format!("│ tool : {}", ask_req.tool), c_perm())?;
+                renderer.write_line(&format!("│ args : {}", ask_req.input), c_perm())?;
+                renderer.write_line(&format!("├{}┤", bot_bar), c_perm())?;
                 renderer.write_line(
-                    "  (y) allow once  (a) allow always  (n) deny  (ESC) abort",
-                    C_PERM,
+                    "│ [y] allow once  [a] allow always  [n] deny  [ESC] abort",
+                    c_perm(),
                 )?;
+                renderer.write_line(&format!("╰{}╯", bot_bar), c_perm())?;
 
                 let decision = loop {
                     tokio::select! {
                         Some(ev) = user_rx.recv() => {
-                            if let UserEvent::Key(key) = ev {
-                                match key.code {
+                            match ev {
+                                UserEvent::Key(key) => match key.code {
                                     KeyCode::Char('y') => break UserDecision::AllowOnce,
                                     KeyCode::Char('a') => {
                                         let pattern = suggest_pattern(&ask_req.tool, &ask_req.input);
@@ -1978,7 +2063,21 @@ pub async fn run_interactive(
                                     }
                                     KeyCode::Char('n') | KeyCode::Esc => break UserDecision::Deny,
                                     _ => {}
+                                },
+                                // Keep scroll responsive while the
+                                // alert is up — previously these
+                                // events were dropped on the floor
+                                // inside this loop, locking the chat
+                                // viewport.
+                                UserEvent::ScrollUp => {
+                                    renderer.scroll_line_up();
+                                    renderer.render_viewport()?;
                                 }
+                                UserEvent::ScrollDown => {
+                                    renderer.scroll_line_down();
+                                    renderer.render_viewport()?;
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1999,7 +2098,7 @@ pub async fn run_interactive(
                         if let Err(e) = crate::session::storage::save_session(session) {
                             renderer.write_line(
                                 &format!("warning: failed to save session: {}", e),
-                                C_ERROR,
+                                c_error(),
                             )?;
                         }
                     }
@@ -2036,7 +2135,7 @@ pub async fn run_interactive(
                 let (label, color) = match &lifecycle_evt {
                     LifecycleEvent::Started { id } => {
                         let short: String = id.chars().take(8).collect();
-                        (format!("[task {} started]", short), C_TOOL)
+                        (format!("[task {} started]", short), c_tool())
                     }
                     LifecycleEvent::Finished(notif) => {
                         let short: String = notif.id.chars().take(8).collect();
@@ -2046,7 +2145,7 @@ pub async fn run_interactive(
                             }
                             TS::Failed(err) => {
                                 let head = sanitize_single_line(err, 80);
-                                (format!("[task {} failed: {}]", short, head), C_ERROR)
+                                (format!("[task {} failed: {}]", short, head), c_error())
                             }
                             // Running is never queued for notification.
                             TS::Running => continue,
@@ -2086,12 +2185,12 @@ pub async fn run_interactive(
                     if let Some(header) = &question.header {
                         renderer.write_line(
                             &format!("\n--- {} ---", header),
-                            C_PERM,
+                            c_perm(),
                         )?;
                     }
                     renderer.write_line(
                         &format!("\n[question {}] {}", qi + 1, question.question),
-                        C_PERM,
+                        c_perm(),
                     )?;
 
                     let multi = question.multi_select.unwrap_or(false);
@@ -2127,7 +2226,7 @@ pub async fn run_interactive(
                                 text: compact_str::CompactString::new(
                                     &format!("  {} {} — {}", marker, opt.label, opt.description),
                                 ),
-                                color: C_PERM,
+                                color: c_perm(),
                             });
                         }
                         if custom {
@@ -2139,7 +2238,7 @@ pub async fn run_interactive(
                             };
                             lines.push(LineEntry {
                                 text: compact_str::CompactString::new(&custom_label),
-                                color: C_PERM,
+                                color: c_perm(),
                             });
                         }
                         lines.push(LineEntry {
@@ -2148,7 +2247,7 @@ pub async fn run_interactive(
                             } else {
                                 "  ↑↓ navigate  Enter select  Esc reject all"
                             }),
-                            color: C_PERM,
+                            color: c_perm(),
                         });
 
                         // Replace previous render with updated options
@@ -2178,7 +2277,7 @@ pub async fn run_interactive(
                                 if custom && cursor == num_options {
                                     // Custom text input (works for both single and multi)
                                     let mut buf = String::new();
-                                    renderer.write_line("  enter your answer:", C_PERM)?;
+                                    renderer.write_line("  enter your answer:", c_perm())?;
                                     let input_anchor = renderer.buffer_len();
                                     loop {
                                         renderer.replace_from(
@@ -2187,7 +2286,7 @@ pub async fn run_interactive(
                                                 text: compact_str::CompactString::new(
                                                     &format!("  > {}", buf),
                                                 ),
-                                                color: C_PERM,
+                                                color: c_perm(),
                                             }],
                                         );
                                         renderer.render_viewport()?;
@@ -2238,7 +2337,7 @@ pub async fn run_interactive(
                                     if picked.is_empty() {
                                         renderer.write_line(
                                             "  select at least one option",
-                                            C_PERM,
+                                            c_perm(),
                                         )?;
                                     } else {
                                         answers.push(picked);
@@ -2313,11 +2412,11 @@ pub async fn run_interactive(
                     DialogRequest::Confirm { title, question, reply } => {
                         renderer.write_line(
                             &format!("[plugin {}] {}", title, question),
-                            C_PERM,
+                            c_perm(),
                         )?;
                         renderer.write_line(
                             "  (y) yes  (n) no  (ESC) cancel = no",
-                            C_PERM,
+                            c_perm(),
                         )?;
                         let answer = loop {
                             tokio::select! {
@@ -2354,23 +2453,23 @@ pub async fn run_interactive(
                         let _ = reply.send(DialogReply::Confirm(answer));
                         renderer.write_line(
                             &format!("  -> {}", if answer { "yes" } else { "no" }),
-                            Color::DarkGrey,
+                            theme::dim(),
                         )?;
                     }
                     DialogRequest::Select { title, options, reply } => {
                         renderer.write_line(
                             &format!("[plugin {}] pick one:", title),
-                            C_PERM,
+                            c_perm(),
                         )?;
                         for (i, opt) in options.iter().enumerate() {
                             renderer.write_line(
                                 &format!("  {}: {}", i + 1, opt),
-                                C_PERM,
+                                c_perm(),
                             )?;
                         }
                         renderer.write_line(
                             "  (1-9) select  (ESC) cancel",
-                            C_PERM,
+                            c_perm(),
                         )?;
                         let answer: Option<String> = loop {
                             tokio::select! {
@@ -2402,7 +2501,7 @@ pub async fn run_interactive(
                         let _ = reply.send(DialogReply::Select(answer));
                         renderer.write_line(
                             &format!("  -> {}", label),
-                            Color::DarkGrey,
+                            theme::dim(),
                         )?;
                     }
                 }
@@ -2438,7 +2537,7 @@ pub async fn run_interactive(
 
                 renderer.write_line(
                     &format!("[plan] switch to {}? (y/n)", label),
-                    C_PERM,
+                    c_perm(),
                 )?;
 
                 let accepted = loop {
@@ -2492,7 +2591,7 @@ pub async fn run_interactive(
                         if let Err(e) = render_session(&mut renderer, session, cli, cfg, context) {
                             renderer.write_line(
                                 &format!("render error: {}", e),
-                                resolve_color(C_ERROR, cli.no_color),
+                                resolve_color(c_error(), cli.no_color),
                             )?;
                         }
                     }
@@ -2555,6 +2654,24 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
     }
 }
 
+/// Close the in-flight tool chamber if one is open. Used at every
+/// site that fires without going through `render_tool_output` (which
+/// closes the chamber itself): permission alerts, agent errors,
+/// interjections, fresh `ToolCall` events when the previous chamber
+/// wasn't terminated by a `ToolResult`. Idempotent — calling twice
+/// emits one bottom border at most.
+fn close_tool_chamber_if_open(
+    renderer: &mut Renderer,
+    last_tool_name: &mut Option<String>,
+) -> anyhow::Result<()> {
+    if last_tool_name.is_some() {
+        let (frame_w, _) = chamber_widths(renderer);
+        renderer.write_line(&chamber_bottom(frame_w), theme::dim())?;
+        *last_tool_name = None;
+    }
+    Ok(())
+}
+
 fn render_tool_output(
     renderer: &mut Renderer,
     output: &str,
@@ -2562,18 +2679,88 @@ fn render_tool_output(
 ) -> anyhow::Result<()> {
     let sanitized = sanitize_output(output);
     let char_count = sanitized.chars().count();
-    if char_count <= max_chars {
-        renderer.write_line(&sanitized, Color::DarkGrey)?;
+    let body: String = if char_count <= max_chars {
+        sanitized.into_string()
     } else {
-        let preview: String = sanitized.chars().take(max_chars).collect();
-        let remaining = char_count - max_chars;
-        renderer.write_line(&preview, Color::DarkGrey)?;
-        renderer.write_line(
-            &format!("  [truncated: {} more chars]", remaining),
-            Color::DarkCyan,
-        )?;
+        sanitized.chars().take(max_chars).collect()
+    };
+    // Tool output renders inside a closed rounded chamber:
+    //   ╭─ READ ─ /path
+    //   │ contents ...                    │
+    //   ╰─────────────────────────────────╯
+    // Lines are padded/truncated to a fixed inner width so the right
+    // border stays aligned across the chamber.
+    let (frame_w, inner) = chamber_widths(renderer);
+    for line in body.lines() {
+        renderer.write_line(&chamber_row(line, inner), theme::result())?;
     }
+    if char_count > max_chars {
+        let remaining = char_count - max_chars;
+        let note = format!("░ +{} chars truncated", remaining);
+        renderer.write_line(&chamber_row(&note, inner), theme::dim())?;
+    }
+    renderer.write_line(&chamber_bottom(frame_w), theme::dim())?;
     Ok(())
+}
+
+/// Standard tool-chamber widths derived from the renderer's content
+/// area. Capped at 120 so very wide terminals don't produce sprawling
+/// chambers that overwhelm the content.
+fn chamber_widths(renderer: &Renderer) -> (usize, usize) {
+    let term_w = renderer.line_width().max(20);
+    let frame_w = term_w.min(120);
+    let inner = frame_w.saturating_sub(4); // `│ ` + ` │`
+    (frame_w, inner)
+}
+
+/// `╰────────────╯` footer of a tool chamber, sized to `frame_w`.
+fn chamber_bottom(frame_w: usize) -> String {
+    format!("╰{}╯", "─".repeat(frame_w.saturating_sub(2)))
+}
+
+/// `│ content (truncated/padded to inner) │` row of a tool chamber.
+fn chamber_row(content: &str, inner: usize) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let trimmed: String = if chars.len() <= inner {
+        chars.iter().collect()
+    } else if inner == 0 {
+        String::new()
+    } else {
+        let mut out: String = chars[..inner.saturating_sub(1)].iter().collect();
+        out.push('…');
+        out
+    };
+    let pad = inner.saturating_sub(trimmed.chars().count());
+    format!("│ {}{} │", trimmed, " ".repeat(pad))
+}
+
+/// Background-tinted chamber row for diff `+`/`-` lines. Emits raw
+/// SGR `48;5;{bg}` background sequence inside the row so the diff
+/// tint fills the inner width; the left + right border glyphs sit
+/// outside the bg span so they keep the chamber color.
+///
+/// Opencode uses subtly-tinted backgrounds (`tint(bg, green, 0.15)`
+/// etc.) to mark added/removed lines without overwhelming the
+/// scanability. We approximate that with the 256-color palette:
+/// dim green (22) for adds, dim red (52) for removes.
+fn chamber_row_with_bg(content: &str, inner: usize, bg_idx: u8) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let trimmed: String = if chars.len() <= inner {
+        chars.iter().collect()
+    } else if inner == 0 {
+        String::new()
+    } else {
+        let mut out: String = chars[..inner.saturating_sub(1)].iter().collect();
+        out.push('…');
+        out
+    };
+    let pad = inner.saturating_sub(trimmed.chars().count());
+    format!(
+        "│ \x1b[48;5;{}m{}{}\x1b[49m │",
+        bg_idx,
+        trimmed,
+        " ".repeat(pad),
+    )
 }
 
 fn update_search(renderer: &Renderer, query: &str, matches: &mut Vec<usize>, selected: &mut usize) {
@@ -2593,7 +2780,7 @@ fn update_search(renderer: &Renderer, query: &str, matches: &mut Vec<usize>, sel
 }
 
 fn draw_search_bar(query: &str, matches: &[usize], selected: usize) -> std::io::Result<()> {
-    use crossterm::style::{Color, ResetColor, SetForegroundColor};
+    use crossterm::style::{ResetColor, SetForegroundColor};
     use crossterm::terminal::{Clear, ClearType};
     use std::io::Write;
 
@@ -2606,7 +2793,7 @@ fn draw_search_bar(query: &str, matches: &[usize], selected: usize) -> std::io::
     };
     let bar = format!("Search: {} [{}]", query, indicator);
     crossterm::execute!(stdout, Clear(ClearType::CurrentLine))?;
-    crossterm::execute!(stdout, SetForegroundColor(Color::Cyan))?;
+    crossterm::execute!(stdout, SetForegroundColor(theme::accent()))?;
     write!(stdout, "\r\n")?;
     write!(stdout, "{}", bar)?;
     crossterm::execute!(stdout, ResetColor)?;
@@ -2650,7 +2837,7 @@ fn rewind_session(
         let removed = session.messages.len() - msg_idx;
         session.messages.truncate(msg_idx);
         session.total_estimated_tokens = session.messages.iter().map(|m| m.estimated_tokens).sum();
-        renderer.write_line(&format!("rewound {} message(s)", removed), Color::Cyan)?;
+        renderer.write_line(&format!("rewound {} message(s)", removed), theme::accent())?;
     }
     Ok(())
 }
