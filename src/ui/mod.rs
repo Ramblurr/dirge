@@ -381,7 +381,11 @@ pub async fn run_interactive(
                         break;
                     }
                 }
-                Ok(event::Event::Resize(_, _)) => {}
+                Ok(event::Event::Resize(_, _)) => {
+                    if user_tx_clone.blocking_send(UserEvent::Resize).is_err() {
+                        break;
+                    }
+                }
                 Err(_) => break,
                 _ => {}
             }
@@ -455,6 +459,19 @@ pub async fn run_interactive(
                     }
                     UserEvent::Paste(text) => {
                         input.handle_paste(&text);
+                        renderer.draw_bottom(
+                            &input,
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
+                            is_running,
+                        )?;
+                        continue;
+                    }
+                    UserEvent::Resize => {
+                        // Terminal dimensions changed — repaint everything so
+                        // wrap, panel clipping, and input box rows recompute
+                        // at the new size instead of waiting for the next
+                        // unrelated event to trigger a redraw.
+                        renderer.render_viewport()?;
                         renderer.draw_bottom(
                             &input,
                             &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()), interjection_queue.len()),
@@ -2354,5 +2371,20 @@ mod tests {
         assert!(s.ends_with('…'));
         // Round-trip as &str succeeds.
         let _ = s.as_str();
+    }
+
+    #[test]
+    fn with_queue_hides_zero_count() {
+        // No interjections waiting → status line unchanged so the user
+        // doesn't see ambient "q:0" noise during normal operation.
+        let s = with_queue("ready".to_string(), 0);
+        assert_eq!(s, "ready");
+    }
+
+    #[test]
+    fn with_queue_appends_count() {
+        let s = with_queue("running".to_string(), 3);
+        assert!(s.ends_with("q:3"));
+        assert!(s.starts_with("running"));
     }
 }

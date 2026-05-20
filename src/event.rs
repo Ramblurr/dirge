@@ -49,4 +49,8 @@ pub enum UserEvent {
         col: u16,
     },
     Paste(String),
+    /// Terminal was resized. Carries no payload — the renderer queries
+    /// `crossterm::terminal::size()` directly; the variant is just a kick
+    /// to repaint at the new dimensions.
+    Resize,
 }

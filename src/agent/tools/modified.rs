@@ -43,3 +43,92 @@ pub fn recent(n: usize) -> Vec<PathBuf> {
     let start = len.saturating_sub(n);
     set.iter().skip(start).cloned().collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize tests that share the global `MODIFIED_FILES` set so they
+    /// don't observe each other's writes when cargo runs tests in parallel.
+    /// The production code path only holds the inner lock for a single
+    /// mark/clear, so real-world contention is a non-issue.
+    static TEST_GATE: Mutex<()> = Mutex::new(());
+
+    fn with_isolated<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = TEST_GATE.lock().unwrap_or_else(|e| e.into_inner());
+        clear_modified();
+        let r = f();
+        clear_modified();
+        r
+    }
+
+    #[test]
+    fn mark_modified_dedups_by_path() {
+        with_isolated(|| {
+            // Use unique paths under /tmp so canonicalize succeeds and tests
+            // don't collide.
+            let dir = std::env::temp_dir().join("dirge-modified-test-dedup");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = dir.join("a.txt");
+            std::fs::write(&p, "x").unwrap();
+
+            mark_modified(&p);
+            mark_modified(&p);
+            mark_modified(&p);
+            assert_eq!(recent(10).len(), 1);
+        });
+    }
+
+    #[test]
+    fn mark_modified_preserves_recency_order() {
+        with_isolated(|| {
+            let dir = std::env::temp_dir().join("dirge-modified-test-order");
+            std::fs::create_dir_all(&dir).unwrap();
+            let a = dir.join("a.txt");
+            let b = dir.join("b.txt");
+            std::fs::write(&a, "x").unwrap();
+            std::fs::write(&b, "x").unwrap();
+
+            mark_modified(&a);
+            mark_modified(&b);
+            mark_modified(&a); // re-touch a → moves it to the end
+
+            let recent = recent(10);
+            assert_eq!(recent.len(), 2);
+            // Last entry is the most-recently-touched file.
+            assert!(recent.last().unwrap().ends_with("a.txt"));
+            assert!(recent.first().unwrap().ends_with("b.txt"));
+        });
+    }
+
+    #[test]
+    fn recent_caps_at_requested_length() {
+        with_isolated(|| {
+            let dir = std::env::temp_dir().join("dirge-modified-test-cap");
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..5 {
+                let p = dir.join(format!("f{}.txt", i));
+                std::fs::write(&p, "x").unwrap();
+                mark_modified(&p);
+            }
+            assert_eq!(recent(3).len(), 3);
+            assert_eq!(recent(10).len(), 5);
+            assert_eq!(recent(0).len(), 0);
+        });
+    }
+
+    #[test]
+    fn clear_modified_empties_the_set() {
+        with_isolated(|| {
+            let dir = std::env::temp_dir().join("dirge-modified-test-clear");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = dir.join("a.txt");
+            std::fs::write(&p, "x").unwrap();
+            mark_modified(&p);
+            assert_eq!(recent(10).len(), 1);
+            clear_modified();
+            assert_eq!(recent(10).len(), 0);
+        });
+    }
+}

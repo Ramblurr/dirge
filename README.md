@@ -115,6 +115,7 @@ dirge --provider glm       # defaults to glm-4
 | `/toggle` | Toggle features on/off (currently todo tools) |
 | `/regen-prompts` | Restore built-in prompts |
 | `/mcp` | List MCP servers and tools |
+| `/panel [on\|off\|auto]` | Toggle the right-hand info panel (cwd, MCP, LSP, todos, modified files). `auto` shows it when the terminal is at least 100 cols wide. |
 | `/quit` | Exit dirge |
 | `/retry` | Retry last prompt |
 | `/help` | Show all commands |
@@ -149,7 +150,9 @@ dirge --provider glm       # defaults to glm-4
 
 | Key | Action |
 |-----|--------|
-| Ctrl+C / Ctrl+D / Esc | Interrupt running agent |
+| Ctrl+C / Ctrl+D / Esc | Interrupt running agent (also clears queued interjections) |
+| Type while running | Queues your message; runs after the current turn finishes. The runner also stops at the next tool-result boundary so the message is picked up quickly instead of waiting for the whole multi-turn run. Status line shows `q:N` for pending count. |
+| Ctrl+X | Drop the most-recently-queued interjection |
 | Esc-Esc (idle) | Open rewind picker (truncate history) |
 | Ctrl+F | Search chat buffer |
 | Ctrl+R | Toggle reasoning visibility |
