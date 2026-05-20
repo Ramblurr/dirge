@@ -1010,6 +1010,14 @@ pub async fn handle_slash(
             )?;
             renderer.write_line("  Ctrl+R                 toggle reasoning", C_RESULT)?;
             renderer.write_line("  Ctrl+C / Ctrl+D        interrupt/quit", C_RESULT)?;
+            renderer.write_line(
+                "  Ctrl+X                 drop last queued interjection",
+                C_RESULT,
+            )?;
+            renderer.write_line(
+                "  (type while agent runs to queue a follow-up message)",
+                C_RESULT,
+            )?;
             renderer.write_line("  mouse scroll           scroll chat", C_RESULT)?;
         }
         _ => {
