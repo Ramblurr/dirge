@@ -845,11 +845,19 @@ impl Renderer {
         let cursor_line_idx = full_input[..cursor_line_start].matches('\n').count();
         let cursor_col_in_line = full_cursor - cursor_line_start;
 
-        // Wrap width: content width minus the 3-char prompt prefix
+        // Wrap width: chat-content width minus the 3-char prompt prefix
         // (`▌▌ ` idle, `░▌ `/`▒▌ ` spinner, `▏  ` continuation — all 3
-        // columns) that sits in front of every visible row. Min 1 to
-        // avoid div-by-zero in wrap math on ridiculous terminal sizes.
-        let wrap_width = (cols.saturating_sub(3) as usize).max(1);
+        // columns) that sits in front of every visible row.
+        //
+        // Must use `content_width()` (the capped, centered band the chat
+        // uses) and NOT raw `cols`. On wide terminals where content is
+        // capped at 120 cols, `bottom_indent` is non-zero — wrapping at
+        // `cols - 3` would let input text spill past the centered band's
+        // right edge into the divider/panel/blank margin, and the
+        // terminal's own hard-wrap would kick in instead of ours. The
+        // user sees that as "soft-wrap is broken." Min 1 to avoid
+        // div-by-zero in wrap math on ridiculous terminal sizes.
+        let wrap_width = (self.content_width().saturating_sub(3)).max(1);
 
         // Pre-render each logical line (placeholder expansion etc.) into the
         // displayable form, alongside the cursor's display column on its line.

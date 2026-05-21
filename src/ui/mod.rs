@@ -623,6 +623,20 @@ pub async fn run_interactive(
         })
     };
 
+    // Populate the right-hand info panel *before* the initial paint so
+    // MCP servers, LSP, cwd, etc. show their real values on startup.
+    // The event-loop top refreshes this every iteration, but waits on
+    // `tokio::select!` first — without seeding it here, the very first
+    // paint runs against the default-empty `PanelData` and "(none)"
+    // shows for every panel field until the user nudges any event.
+    renderer.set_panel_data(build_panel_data(
+        session,
+        #[cfg(feature = "mcp")]
+        mcp_manager,
+        #[cfg(feature = "lsp")]
+        lsp_manager.as_ref(),
+    ));
+
     render_session(&mut renderer, session, cli, cfg, context)?;
     renderer.draw_bottom(
         &input,
@@ -2494,17 +2508,23 @@ pub async fn run_interactive(
                             theme::dim(),
                         )?;
                         renderer.write_line(&chamber_bottom(frame_w), c_tool())?;
-                        // Blank line between the closed chamber and
-                        // the alert box so the two boxes don't sit
-                        // flush against each other — `╰─╯` directly
-                        // followed by `╭─ ⚠ ALERT` reads as one
-                        // continuous border.
-                        renderer.write_line("", Color::White)?;
                         last_tool_name = None;
                         Some(open_name)
                     } else {
                         None
                     };
+                // Blank line above the ALERT box guarantees visual
+                // separation from whatever was just on screen — a
+                // closed tool chamber, plain agent text, or even
+                // nothing at all. Previously this blank only fired
+                // when a chamber was closed; if `last_tool_name`
+                // happened to be `None` at ask time (e.g. tokio
+                // select! picked the ask channel between when the
+                // ToolCall handler drew the chamber TOP and when the
+                // ToolResult would have cleared `last_tool_name`),
+                // the alert's `╭─ ⚠ ALERT` sat flush against the
+                // previous line and read as a stacked second border.
+                renderer.write_line("", Color::White)?;
 
                 renderer.set_avatar_state(avatar::AvatarState::Alert);
                 // Force a bottom-row repaint so the avatar updates to

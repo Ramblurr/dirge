@@ -1,9 +1,10 @@
 use std::io::Write;
+use std::time::Duration;
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 
@@ -32,11 +33,38 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
         let mut stdout = std::io::stdout();
+        // Send the mode-reset sequences (`DisableMouseCapture`,
+        // `DisableBracketedPaste`) while we're STILL in raw mode and
+        // STILL on the alt screen. Some terminals (and tmux state
+        // machines) answer these resets — and other transitions like
+        // leaving the alt screen — with synchronous responses (OSC 11
+        // bg-color, primary DA `\x1b[?…c`, cursor-position `\x1b[…R`)
+        // that travel back through stdin. If raw mode is already
+        // disabled when those bytes land, the TTY line discipline
+        // echoes them straight to the user's shell prompt instead of
+        // letting crossterm parse and discard them.
         let _ = stdout.execute(Show);
         let _ = stdout.execute(DisableBracketedPaste);
         let _ = stdout.execute(DisableMouseCapture);
+        let _ = stdout.flush();
+        // Brief poll/drain pass: pull any pending terminal events
+        // (including the unsolicited responses described above) from
+        // the input buffer while crossterm can still parse them as
+        // structured events. ~30ms is enough for local terminals to
+        // flush their reply queue without making quit feel laggy; if
+        // there's nothing pending the first `poll` returns `false`
+        // immediately and we exit the loop.
+        let deadline = std::time::Instant::now() + Duration::from_millis(30);
+        while let Ok(true) = event::poll(Duration::from_millis(5)) {
+            if event::read().is_err() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        let _ = terminal::disable_raw_mode();
         let _ = stdout.execute(LeaveAlternateScreen);
         let _ = stdout.flush();
     }
