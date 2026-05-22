@@ -293,6 +293,31 @@ pub enum LoopEvent {
         result: super::result::LoopToolResult,
         is_error: bool,
     },
+
+    /// Agent run started. Phase 4 — emitted by `run_agent_loop`
+    /// and `run_agent_loop_continue` once at the top. Port of pi
+    /// `agent_start` (types.ts:405).
+    AgentStart,
+
+    /// Agent run finished — carries the new messages produced
+    /// during the run. Phase 4 — emitted exactly once at the
+    /// end of every code path that exits the loop. Port of pi
+    /// `agent_end` (types.ts:406).
+    AgentEnd { messages: Vec<LoopMessage> },
+
+    /// One turn started. Pi semantics (agent-loop.ts:176): NOT
+    /// emitted on the very first iteration (the outer wrapper
+    /// already fired `turn_start` after `agent_start`). Subsequent
+    /// turns emit this.
+    TurnStart,
+
+    /// One turn ended. Carries the assistant message that
+    /// completed the turn + the tool results dispatched in this
+    /// turn. Port of pi `turn_end` (types.ts:409).
+    TurnEnd {
+        message: AssistantMessage,
+        tool_results: Vec<ToolResultMessage>,
+    },
 }
 
 impl LoopEvent {
@@ -307,6 +332,10 @@ impl LoopEvent {
             LoopEvent::ToolExecutionStart { .. } => "tool_execution_start",
             LoopEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
             LoopEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+            LoopEvent::AgentStart => "agent_start",
+            LoopEvent::AgentEnd { .. } => "agent_end",
+            LoopEvent::TurnStart => "turn_start",
+            LoopEvent::TurnEnd { .. } => "turn_end",
         }
     }
 }

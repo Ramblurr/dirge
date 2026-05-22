@@ -191,6 +191,25 @@ pub struct LoopConfig {
     /// content / details / isError / terminate. Port of pi
     /// `afterToolCall?` (types.ts:276).
     pub after_tool_call: Option<super::hooks::AfterToolCallFn>,
+
+    /// Phase 4 hook — fires between turns. May swap model /
+    /// thinking / context for the next turn. Port of pi
+    /// `prepareNextTurn?` (types.ts:215).
+    pub prepare_next_turn: Option<super::hooks::PrepareNextTurnFn>,
+
+    /// Phase 4 hook — fires between turns. Return true to stop
+    /// the loop after the current turn finishes. Port of pi
+    /// `shouldStopAfterTurn?` (types.ts:208).
+    pub should_stop_after_turn: Option<super::hooks::ShouldStopAfterTurnFn>,
+
+    /// Phase 4 hook — polled for messages to inject mid-run. Port
+    /// of pi `getSteeringMessages?` (types.ts:230).
+    pub get_steering_messages: Option<super::hooks::GetSteeringMessagesFn>,
+
+    /// Phase 4 hook — polled at outer-loop boundary for
+    /// continuation messages. Port of pi `getFollowUpMessages?`
+    /// (types.ts:243).
+    pub get_followup_messages: Option<super::hooks::GetFollowupMessagesFn>,
 }
 
 /// `convertToLlm` signature. Synchronous in pi (returns
@@ -243,6 +262,22 @@ impl std::fmt::Debug for LoopConfig {
                 "after_tool_call",
                 &self.after_tool_call.as_ref().map(|_| "<fn>"),
             )
+            .field(
+                "prepare_next_turn",
+                &self.prepare_next_turn.as_ref().map(|_| "<fn>"),
+            )
+            .field(
+                "should_stop_after_turn",
+                &self.should_stop_after_turn.as_ref().map(|_| "<fn>"),
+            )
+            .field(
+                "get_steering_messages",
+                &self.get_steering_messages.as_ref().map(|_| "<fn>"),
+            )
+            .field(
+                "get_followup_messages",
+                &self.get_followup_messages.as_ref().map(|_| "<fn>"),
+            )
             .finish()
     }
 }
@@ -257,6 +292,10 @@ impl Clone for LoopConfig {
             tool_execution: self.tool_execution,
             before_tool_call: self.before_tool_call.clone(),
             after_tool_call: self.after_tool_call.clone(),
+            prepare_next_turn: self.prepare_next_turn.clone(),
+            should_stop_after_turn: self.should_stop_after_turn.clone(),
+            get_steering_messages: self.get_steering_messages.clone(),
+            get_followup_messages: self.get_followup_messages.clone(),
         }
     }
 }

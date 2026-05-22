@@ -26,6 +26,7 @@
 //! implementation that yields actual provider events.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use futures::Stream;
 use futures::stream::StreamExt;
@@ -49,22 +50,28 @@ pub struct LlmContext {
 }
 
 /// Stream function signature. Caller provides one; the function
-/// is invoked once per LLM call and returns a stream of
-/// `StreamEvent`s. Phase 1 takes ownership of the context to
-/// keep the lifetime simple; future phases may relax.
+/// is invoked ONCE PER LLM CALL within a run — multi-turn runs
+/// call it N times. Returns a fresh stream of `StreamEvent`s
+/// each invocation.
 ///
 /// In pi (types.ts:24): `StreamFn = (...args: Parameters<typeof
 /// streamSimple>) => ReturnType<typeof streamSimple>`. Pi's
 /// `streamSimple` takes `(model, context, options)`; we collapse
 /// model/options into `LlmContext` + `api_key` separately for
 /// now.
-pub type StreamFn = Box<
-    dyn FnOnce(
+///
+/// `Arc<dyn Fn …>` so the loop can clone the same StreamFn across
+/// every turn without consuming it. Stateful closures (e.g. test
+/// mocks tracking `callIndex`) use interior mutability
+/// (`Arc<AtomicUsize>` captured by the closure).
+pub type StreamFn = Arc<
+    dyn Fn(
             LlmContext,
             Option<String>, // resolved api_key
             AbortSignal,
         ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>>
-        + Send,
+        + Send
+        + Sync,
 >;
 
 /// Run the stream function and bridge its events to the loop's
@@ -80,7 +87,7 @@ pub async fn stream_assistant_response(
     config: &LoopConfig,
     signal: AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
-    stream_fn: StreamFn,
+    stream_fn: &StreamFn,
 ) -> AssistantMessage {
     // 1. transformContext (optional, AgentMessage[] → AgentMessage[])
     let messages: Vec<serde_json::Value> = if let Some(transform) = &config.transform_context {
@@ -277,7 +284,7 @@ mod tests {
     /// from pi (createAssistantMessage + done push).
     fn canned_done_stream(content_text: &str) -> StreamFn {
         let text = content_text.to_string();
-        Box::new(move |_ctx, _key, _signal| {
+        Arc::new(move |_ctx, _key, _signal| {
             let message = AssistantMessage::new(
                 vec![ContentBlock::Text { text: text.clone() }],
                 StopReason::Stop,
@@ -300,6 +307,10 @@ mod tests {
             tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
             before_tool_call: None,
             after_tool_call: None,
+            prepare_next_turn: None,
+            should_stop_after_turn: None,
+            get_steering_messages: None,
+            get_followup_messages: None,
         }
     }
 
@@ -326,7 +337,7 @@ mod tests {
             &config,
             signal,
             &tx,
-            canned_done_stream("Hi there!"),
+            &canned_done_stream("Hi there!"),
         )
         .await;
         drop(tx); // close so we can drain the channel
@@ -396,7 +407,7 @@ mod tests {
             &config,
             signal,
             &tx,
-            canned_done_stream("Response"),
+            &canned_done_stream("Response"),
         )
         .await;
         drop(tx);
@@ -478,6 +489,10 @@ mod tests {
             tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
             before_tool_call: None,
             after_tool_call: None,
+            prepare_next_turn: None,
+            should_stop_after_turn: None,
+            get_steering_messages: None,
+            get_followup_messages: None,
         };
         let signal = AbortSignal::new();
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);
@@ -487,7 +502,7 @@ mod tests {
             &config,
             signal,
             &tx,
-            canned_done_stream("Response"),
+            &canned_done_stream("Response"),
         )
         .await;
         drop(tx);
@@ -517,12 +532,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);
 
         // Stream that yields nothing — closes immediately.
-        let empty_stream: StreamFn = Box::new(|_ctx, _key, _sig| {
+        let empty_stream: StreamFn = Arc::new(|_ctx, _key, _sig| {
             Box::pin(futures::stream::iter::<Vec<StreamEvent>>(vec![]))
         });
 
         let final_msg =
-            stream_assistant_response(&mut ctx, &config, signal, &tx, empty_stream).await;
+            stream_assistant_response(&mut ctx, &config, signal, &tx, &empty_stream).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(e) = rx.recv().await {

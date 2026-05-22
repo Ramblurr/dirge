@@ -25,6 +25,7 @@
 pub mod hooks;
 pub mod message;
 pub mod result;
+pub mod run;
 pub mod stream;
 pub mod tool;
 pub mod tools;
@@ -32,13 +33,15 @@ pub mod types;
 
 pub use hooks::{
     AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
-    BeforeToolCallReturn,
+    BeforeToolCallReturn, GetFollowupMessagesFn, GetSteeringMessagesFn, PrepareNextTurnFn,
+    ShouldStopAfterTurnFn, TurnHookContext,
 };
 pub use message::{
     AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
     ToolResultMessage, UserMessage,
 };
 pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
+pub use run::{LoopError, run_agent_loop, run_agent_loop_continue, run_loop};
 pub use stream::{LlmContext, StreamFn, stream_assistant_response};
 pub use tool::LoopTool;
 pub use tools::{

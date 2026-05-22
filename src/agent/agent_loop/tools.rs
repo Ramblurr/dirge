@@ -864,6 +864,10 @@ mod tests {
             tool_execution: ToolExecutionMode::Sequential,
             before_tool_call: None,
             after_tool_call: None,
+            prepare_next_turn: None,
+            should_stop_after_turn: None,
+            get_steering_messages: None,
+            get_followup_messages: None,
         }
     }
 

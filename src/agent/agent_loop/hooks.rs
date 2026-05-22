@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::message::AssistantMessage;
+use super::message::{AssistantMessage, LoopMessage, ToolResultMessage};
 use super::result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
+use super::types::{Context, TurnUpdate};
 
 /// Context passed to `beforeToolCall`. Port of pi
 /// `BeforeToolCallContext` (types.ts:84).
@@ -87,6 +88,77 @@ pub type AfterToolCallFn = Arc<
         + Send
         + Sync,
 >;
+
+// ---------------------------------------------------------------
+// Phase 4 hooks: prepareNextTurn, shouldStopAfterTurn,
+// getSteeringMessages, getFollowupMessages.
+// ---------------------------------------------------------------
+
+/// Context passed to `prepareNextTurn` AND `shouldStopAfterTurn`.
+/// Pi has `PrepareNextTurnContext extends ShouldStopAfterTurnContext`
+/// (types.ts:133) — same shape, two aliases. We define one struct.
+///
+/// Port of pi `ShouldStopAfterTurnContext` (types.ts:112):
+///   `{ message, toolResults, context, newMessages }`
+#[derive(Debug, Clone)]
+pub struct TurnHookContext {
+    /// The assistant message that completed the turn.
+    pub message: AssistantMessage,
+    /// Tool result messages from this turn (empty if no tools).
+    pub tool_results: Vec<ToolResultMessage>,
+    /// Current agent context AFTER the turn's assistant + tool
+    /// results have been appended.
+    pub context: Context,
+    /// Messages this loop invocation will return if it exits at
+    /// this point. Pi semantics: includes initial prompts for
+    /// `agentLoop`; excludes pre-existing context messages for
+    /// `agentLoopContinue` (types.ts:120).
+    pub new_messages: Vec<LoopMessage>,
+}
+
+/// `prepareNextTurn` hook signature. Port of pi
+/// `prepareNextTurn?` (types.ts:215):
+///   `(context) => AgentLoopTurnUpdate | undefined | Promise<...>`
+///
+/// `None` means "no changes — continue with current state". The
+/// returned `TurnUpdate`'s `Some` fields replace the
+/// corresponding loop config / context for the next turn.
+pub type PrepareNextTurnFn = Arc<
+    dyn Fn(TurnHookContext) -> Pin<Box<dyn Future<Output = Option<TurnUpdate>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// `shouldStopAfterTurn` hook signature. Port of pi
+/// `shouldStopAfterTurn?` (types.ts:208):
+///   `(context) => boolean | Promise<boolean>`
+///
+/// Returning `true` requests a graceful stop after the current
+/// turn — the loop emits `agent_end` and exits without polling
+/// steering or follow-up queues.
+pub type ShouldStopAfterTurnFn =
+    Arc<dyn Fn(TurnHookContext) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
+/// `getSteeringMessages` hook signature. Port of pi
+/// `getSteeringMessages?` (types.ts:230):
+///   `() => Promise<AgentMessage[]>`
+///
+/// Polled at: (a) loop entry, (b) after each `turn_end` /
+/// `prepareNextTurn` / `shouldStopAfterTurn` cycle. Returned
+/// messages inject BEFORE the next assistant response.
+pub type GetSteeringMessagesFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<LoopMessage>> + Send>> + Send + Sync>;
+
+/// `getFollowupMessages` hook signature. Port of pi
+/// `getFollowUpMessages?` (types.ts:243):
+///   `() => Promise<AgentMessage[]>`
+///
+/// Polled at the OUTER-loop boundary — when the inner loop has
+/// no more tool calls AND no pending steering. Non-empty return
+/// triggers the outer loop to re-enter the inner loop with these
+/// messages as pending.
+pub type GetFollowupMessagesFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<LoopMessage>> + Send>> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
