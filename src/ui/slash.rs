@@ -324,10 +324,31 @@ pub async fn handle_slash(
                 // 128k. config explicit value always wins; otherwise
                 // the per-model table is consulted.
                 let new_ctx = cfg.resolve_context_window(new_model.as_str());
-                if new_ctx != session.context_window {
+                let old_ctx = session.context_window;
+                if new_ctx != old_ctx {
                     session.context_window = new_ctx;
                 }
                 renderer.write_line(&format!("switched to model: {}", new_model), c_agent())?;
+                // Review #3: if the new model has a smaller window
+                // and the current session already exceeds it
+                // (minus reserve), the next prompt would error out
+                // with ContextLength mid-stream. Surface a warning
+                // + recommend `/compress` so the user can shrink
+                // proactively. The auto-compact recovery path also
+                // catches this on the next prompt; the warning
+                // here lets the user act without burning a turn.
+                let reserve = cfg.resolve_reserve_tokens();
+                let budget = new_ctx.saturating_sub(reserve);
+                if new_ctx < old_ctx && session.total_estimated_tokens > budget {
+                    renderer.write_line(
+                        &format!(
+                            "warning: session uses ~{}k tokens but new model's context budget is ~{}k. Run /compress before the next prompt or the next turn may overflow.",
+                            session.total_estimated_tokens / 1_000,
+                            budget / 1_000,
+                        ),
+                        c_error(),
+                    )?;
+                }
             }
         }
         "/sessions" => {

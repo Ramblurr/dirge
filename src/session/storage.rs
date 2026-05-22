@@ -141,9 +141,17 @@ pub fn load_session(id: &str) -> anyhow::Result<Session> {
 /// `#[serde(default)]` so they already migrate transparently.
 /// This function exists so future schema bumps have a hook.
 fn migrate_session(session: &mut Session) {
-    let _ = session;
-    // No-op for v0 → v1. Future migrations gate on
-    // `if session.schema_version < N` checks.
+    // v0 → v1: no-op (back-compat handled entirely via `#[serde(default)]`).
+    // v1 → v2: recompute `estimated_tokens` for every message + the
+    // session's `total_estimated_tokens` because pre-9a044ce sessions
+    // counted only assistant TEXT — tool args and tool results were
+    // ignored. Without this migration, a resumed long-running session
+    // shows a context usage 5–10× under reality and could silently
+    // exceed the model's actual context window before any compress
+    // fires.
+    if session.schema_version < 2 {
+        session.recompute_all_estimates();
+    }
 }
 
 pub fn delete_session(id: &str) -> anyhow::Result<()> {
@@ -166,6 +174,52 @@ mod tests {
         assert!(validate_session_id("plain-id").is_ok());
         assert!(validate_session_id("2024.session").is_ok());
         assert!(validate_session_id("session_42").is_ok());
+    }
+
+    /// Review #2: v1 → v2 migration recomputes
+    /// `estimated_tokens` because pre-9a044ce sessions counted
+    /// only assistant TEXT. A v1 session JSON with under-counted
+    /// values must come up with the new (correct) higher count.
+    #[test]
+    fn v1_to_v2_recomputes_under_counted_estimates() {
+        use crate::session::{MessageRole, Session, SessionMessage, ToolCallEntry, ToolCallState};
+        // Build a v1-shape session manually with a tool call whose
+        // result is 8000 chars but estimated_tokens reflects only
+        // the assistant text (5 chars / 4 = 1).
+        let mut s = Session::new("p", "m", 128_000);
+        // Forcibly create a message that mimics the pre-9a044ce
+        // accounting (skip add_message_with_tool_calls' new logic).
+        let tc = ToolCallEntry {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "..."}),
+            state: ToolCallState::Completed {
+                result: "x".repeat(8000),
+            },
+        };
+        let msg = SessionMessage {
+            role: MessageRole::Assistant,
+            content: compact_str::CompactString::new("hello"),
+            estimated_tokens: 1, // ← under-counted on purpose
+            id: compact_str::CompactString::new("m1"),
+            timestamp: 1,
+            tool_calls: vec![tc],
+        };
+        s.messages.push(msg.clone());
+        s.message_store
+            .insert(compact_str::CompactString::new("m1"), msg);
+        s.total_estimated_tokens = 1;
+        s.schema_version = 1;
+        // Apply migration.
+        migrate_session(&mut s);
+        // After migration: total reflects text + args + result + name + 16.
+        assert!(
+            s.total_estimated_tokens >= 1900,
+            "migration must recompute estimates; got {}",
+            s.total_estimated_tokens,
+        );
+        // Per-message field also corrected.
+        assert!(s.messages[0].estimated_tokens >= 1900);
     }
 
     /// F8: pre-F8 session files (no `schema_version` field) load

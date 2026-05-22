@@ -47,6 +47,14 @@ pub struct PermissionChecker {
     prompt_deny_tools: Vec<String>,
 }
 
+/// Tools that execute external code with broad effects. Accept mode
+/// does NOT coerce `Ask → Allow` for these — the "I trust the agent
+/// inside cwd" rationale that justifies the coercion for other
+/// non-path tools doesn't generalize to shell + MCP servers.
+fn is_high_risk_non_path_tool(tool: &str) -> bool {
+    matches!(tool, "mcp_tool" | "bash")
+}
+
 /// Tool names where the input is a filesystem path. For these, `*` keeps
 /// classic glob semantics (one segment, doesn't cross `/`). Everything else
 /// is treated as shell/text where `*` means "any chars including /".
@@ -289,6 +297,15 @@ impl PermissionChecker {
                 Action::Ask => {
                     if self.is_path_tool(tool) && self.is_external_path(input) {
                         self.match_ext_dir(input).unwrap_or(Action::Ask)
+                    } else if is_high_risk_non_path_tool(tool) {
+                        // Accept mode coerces Ask → Allow for non-path
+                        // tools on the assumption that "trust the
+                        // agent inside cwd" generalizes. That breaks
+                        // for tools that execute external code with
+                        // arbitrary effects: MCP servers run third-
+                        // party code; `bash` runs shell. Keep the Ask
+                        // for these specifically. Review #1.
+                        Action::Ask
                     } else {
                         Action::Allow
                     }
@@ -827,6 +844,57 @@ mod tests {
         assert!(
             matches!(r, CheckResult::Ask),
             "unconfigured mcp_tool must default to Ask, got {:?}",
+            r,
+        );
+    }
+
+    /// Review #1: Accept mode previously coerced `Ask → Allow` for
+    /// every non-path tool, silently bypassing the new default-Ask
+    /// for `mcp_tool`. The coercion now special-cases
+    /// `is_high_risk_non_path_tool` so MCP / shell keep their Ask
+    /// even under `--accept`. (For bash, the legacy bash rule table
+    /// already auto-allows safe commands by name; the special case
+    /// here matters when an explicit user config sets bash to Ask —
+    /// Accept mode must not silently undo that.)
+    #[test]
+    fn accept_mode_does_not_coerce_mcp_to_allow() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Accept,
+            Some(std::path::PathBuf::from("/tmp")),
+        );
+        // mcp_tool has its default-Ask rule installed; accept-mode
+        // coercion must NOT downgrade it to Allow.
+        let r = checker.check("mcp_tool", "mcp_tool:lattice:lattice_query");
+        assert!(
+            matches!(r, CheckResult::Ask),
+            "Accept mode must NOT bypass mcp_tool's default-Ask, got {:?}",
+            r,
+        );
+    }
+
+    /// Accept mode STILL coerces other non-path Ask tools to Allow —
+    /// the special-case is targeted, not a wholesale change.
+    /// `question` (a non-path tool with Ask semantics in some
+    /// configs) still gets the Accept-mode allow.
+    #[test]
+    fn accept_mode_still_coerces_safe_non_path_tools() {
+        use std::collections::HashMap;
+        let mut config = PermissionConfig::default();
+        // Set question to Ask explicitly so Accept's coercion path
+        // is exercised.
+        let mut q_map: HashMap<String, Action> = HashMap::new();
+        q_map.insert("*".to_string(), Action::Ask);
+        config.question = Some(crate::permission::ToolPerm::Granular(q_map));
+        let mut checker = PermissionChecker::new(
+            &config,
+            SecurityMode::Accept,
+            Some(std::path::PathBuf::from("/tmp")),
+        );
+        let r = checker.check("question", "some question");
+        assert!(
+            matches!(r, CheckResult::Allowed),
+            "Accept mode SHOULD coerce question's Ask → Allow (not high-risk), got {:?}",
             r,
         );
     }

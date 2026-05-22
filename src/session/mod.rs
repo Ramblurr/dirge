@@ -206,7 +206,7 @@ pub struct PluginEntry {
 /// session's stored value: equal or higher is fine (we'll just
 /// see defaults for fields we don't recognize); strictly lower
 /// triggers a migration shim.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -285,6 +285,54 @@ pub struct Session {
 impl Session {
     pub fn estimate_tokens(text: &str) -> u64 {
         (text.len() as u64 / 4).max(1)
+    }
+
+    /// Estimate the token cost of a single `SessionMessage` using
+    /// the SAME logic as `add_message_with_tool_calls`. Used by the
+    /// schema-v2 migration to repair the under-counted
+    /// `estimated_tokens` field on sessions saved before commit
+    /// 9a044ce.
+    pub fn estimate_message_tokens(msg: &SessionMessage) -> u64 {
+        let mut tokens = Self::estimate_tokens(&msg.content);
+        for tc in &msg.tool_calls {
+            tokens = tokens
+                .saturating_add(Self::estimate_tokens(&tc.args.to_string()))
+                .saturating_add(Self::estimate_tokens(&tc.name))
+                .saturating_add(16);
+            match &tc.state {
+                ToolCallState::Completed { result } => {
+                    tokens = tokens.saturating_add(Self::estimate_tokens(result));
+                }
+                ToolCallState::Failed { error } => {
+                    tokens = tokens.saturating_add(Self::estimate_tokens(error));
+                }
+                ToolCallState::Interrupted => {
+                    tokens = tokens.saturating_add(8);
+                }
+            }
+        }
+        tokens
+    }
+
+    /// Recompute every message's `estimated_tokens` + the session's
+    /// `total_estimated_tokens` using the current accounting (which
+    /// includes tool args + tool results). Schema-v2 migration path
+    /// — pre-9a044ce session files have under-counted values from
+    /// the old text-only logic; this brings them up to date.
+    pub fn recompute_all_estimates(&mut self) {
+        for msg in self.messages.iter_mut() {
+            msg.estimated_tokens = Self::estimate_message_tokens(msg);
+        }
+        // Mirror into the message_store too — the tree-backed copy
+        // would otherwise carry the old values.
+        for (id, m) in self.message_store.iter_mut() {
+            if let Some(canonical) = self.messages.iter().find(|x| &x.id == id) {
+                m.estimated_tokens = canonical.estimated_tokens;
+            } else {
+                m.estimated_tokens = Self::estimate_message_tokens(m);
+            }
+        }
+        self.total_estimated_tokens = self.messages.iter().map(|m| m.estimated_tokens).sum();
     }
 
     pub fn new(provider: &str, model: &str, context_window: u64) -> Self {

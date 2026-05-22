@@ -384,9 +384,9 @@ When built with `--features semantic-bash`, dirge uses tree-sitter to parse shel
 Four modes, from safest to most permissive:
 
 1. **restrictive** (`-R`): every tool action prompts for approval
-2. **standard** (default): safe commands auto-approved; writes and destructive operations ask
-3. **accept-all** (`--accept-all`): auto-approves inside working directory; external paths prompt
-4. **yolo** (`--yolo`): auto-approves everything without prompting
+2. **standard** (default): safe commands auto-approved; writes, `bash`, and MCP tools ask
+3. **accept-all** (`--accept-all`): auto-approves inside working directory; external paths prompt. `bash` and `mcp_tool` still ask in this mode — they execute external code with arbitrary effects, so the "trust the agent inside cwd" rationale doesn't apply
+4. **yolo** (`--yolo`): auto-approves everything without prompting. Skips the rule eval, the per-tool default-ask for `mcp_tool`/`bash`, AND the doom-loop detector. The per-prompt `deny_tools` frontmatter still applies (that gate runs BEFORE the yolo short-circuit by design — opting into a restrictive prompt should survive `--yolo`). Use only when you know exactly what the agent will do
 
 Session allowlists persist approvals for the session. Doom-loop detection triggers after 3+ identical calls.
 

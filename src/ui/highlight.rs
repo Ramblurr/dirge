@@ -262,8 +262,23 @@ fn tokenize_line(line: &str, rules: &Rules, mut in_block: bool) -> (Vec<Span>, b
         // Identifier / keyword / type / call.
         if is_ident_start(ch, rules) {
             let start = i;
-            while i < bytes.len() && is_ident_cont(bytes[i] as char, rules) {
-                i += utf8_char_len(bytes[i]).max(1);
+            // Use char iteration so a non-ASCII grapheme inside an
+            // identifier (`naïve`, identifiers in non-English code)
+            // doesn't terminate the token half-way through. The old
+            // `bytes[i] as char` cast produced a Latin-1 char for
+            // the lead byte of a multi-byte sequence and the
+            // `is_ascii_alphanumeric` predicate rejected it,
+            // splitting the identifier mid-word. Predicate is now
+            // ASCII-OR-non-control: matches the spirit of "part of
+            // a word" without dragging Unicode XID classification in.
+            while i < bytes.len() {
+                let Some(next) = line[i..].chars().next() else {
+                    break;
+                };
+                if !is_ident_cont(next, rules) {
+                    break;
+                }
+                i += next.len_utf8();
             }
             let word = &line[start..i];
 
@@ -330,17 +345,26 @@ fn is_ident_start(c: char, _rules: &Rules) -> bool {
 }
 
 fn is_ident_cont(c: char, rules: &Rules) -> bool {
+    // Accept non-ASCII letters as identifier continuation so a
+    // unicode-named symbol (`naïve`, `日本語`) stays one token
+    // instead of splitting at the first non-ASCII byte. ASCII path
+    // unchanged. Review #4.
     c.is_ascii_alphanumeric()
         || c == '_'
         || c == '$'
+        || (!c.is_ascii() && !c.is_control() && !c.is_whitespace())
         || (rules.string_delims.is_empty() && c == '-')
 }
 
 fn looks_like_type(word: &str, _rules: &Rules) -> bool {
-    // Heuristic: identifier starting with uppercase ASCII letter, at
-    // least 2 chars (avoid matching single-letter loop vars `I`).
+    // Heuristic: identifier starting with uppercase ASCII letter,
+    // ≥3 chars. Tightened from ≥2 to skip false-positives like
+    // `Ok`/`No`/`Hi`/`Id` — short capitalised words are usually
+    // identifiers / variables, not type names. Real 2-char Rust
+    // types (`Ok`) are in the `Result`/`Option` keyword family and
+    // get colored via the types table when listed there. Review #5.
     let bytes = word.as_bytes();
-    bytes.len() >= 2
+    bytes.len() >= 3
         && bytes[0].is_ascii_uppercase()
         && bytes[1..].iter().any(|b| b.is_ascii_lowercase())
 }
@@ -651,7 +675,11 @@ static RUST_RULES: Rules = Rules {
     types: &[
         "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
         "u32", "u64", "u128", "usize", "str", "String", "Vec", "Option", "Result", "Box", "Rc",
-        "Arc", "RefCell", "Cell", "HashMap", "HashSet", "BTreeMap", "BTreeSet",
+        // Common variant constructors (idiomatically used like
+        // type/variant names; review #5 tightened the substring
+        // heuristic so 2-char `Ok`/`Err` no longer hit by accident).
+        "Ok", "Err", "Some", "None", "Arc", "RefCell", "Cell", "HashMap", "HashSet", "BTreeMap",
+        "BTreeSet",
     ],
     line_comment: Some("//"),
     block_comment: Some(("/*", "*/")),
