@@ -54,47 +54,79 @@ impl Drop for TerminalGuard {
         // internal mutex so our drain below can run without contention.
         EVENT_READER_SHUTDOWN.store(true, Ordering::Relaxed);
         let mut stdout = std::io::stdout();
-        // Send the mode-reset sequences (`DisableMouseCapture`,
-        // `DisableBracketedPaste`) while we're STILL in raw mode and
-        // STILL on the alt screen. Some terminals (and tmux state
-        // machines) answer these resets — and other transitions like
-        // leaving the alt screen — with synchronous responses (OSC 11
-        // bg-color, primary DA `\x1b[?…c`, cursor-position `\x1b[…R`)
-        // that travel back through stdin. If raw mode is already
-        // disabled when those bytes land, the TTY line discipline
-        // echoes them straight to the user's shell prompt instead of
-        // letting crossterm parse and discard them.
+        // The shutdown order matters. Each escape-emitting transition
+        // — DisableMouseCapture, DisableBracketedPaste, and especially
+        // LeaveAlternateScreen — provokes some terminals (iTerm2,
+        // tmux state machines, foot, kitty) to reply with synchronous
+        // status bytes: OSC 11 bg-color (`\x1b]11;rgb:…\x1b\\`),
+        // primary DA (`\x1b[?64;…c`), and cursor-position reports
+        // (`\x1b[…R`). If raw mode is already off when those bytes
+        // arrive on stdin, the TTY line discipline echoes them
+        // straight to the user's shell prompt as visible garbage.
+        //
+        // The fix is to keep raw mode on past every escape-emitting
+        // transition AND drain after each, then finally disable raw
+        // mode last. Previous ordering disabled raw mode BEFORE
+        // leaving the alt screen, so the alt-screen-exit's responses
+        // always leaked.
         let _ = stdout.execute(Show);
         let _ = stdout.execute(DisableBracketedPaste);
         let _ = stdout.execute(DisableMouseCapture);
         let _ = stdout.flush();
-        // Give the reader thread a window to observe the flag and
-        // exit, then drain anything still in crossterm's queue. A
-        // long-ish first poll (60ms) covers the reader's worst-case
-        // 50ms poll latency; subsequent passes are short.
-        let deadline = std::time::Instant::now() + Duration::from_millis(80);
-        let mut first = true;
-        loop {
-            let wait = if first {
-                Duration::from_millis(60)
-            } else {
-                Duration::from_millis(5)
-            };
-            first = false;
-            match event::poll(wait) {
-                Ok(true) => {
-                    if event::read().is_err() {
-                        break;
-                    }
-                }
-                _ => break,
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-        }
-        let _ = terminal::disable_raw_mode();
+        // Drain pass 1: catches responses to the three mode-resets
+        // above. Start with a long first poll (80ms) to cover the
+        // background reader's worst-case 50ms poll latency, then
+        // short polls until deadline. Total budget here is ~150ms
+        // — slow links (SSH-over-VPN, tmux-in-tmux) need more than
+        // the previous 80ms window.
+        drain_events(Duration::from_millis(150));
+        // NOW leave the alt screen while still in raw mode. Some
+        // terminals only emit the bg-color OSC 11 response on this
+        // specific transition; leaving alt screen after `disable_raw`
+        // was the original leak.
         let _ = stdout.execute(LeaveAlternateScreen);
         let _ = stdout.flush();
+        // Drain pass 2: catches responses to LeaveAlternateScreen.
+        drain_events(Duration::from_millis(100));
+        // Raw mode last — by now everything the terminal would
+        // unsolicit has been parsed and discarded.
+        let _ = terminal::disable_raw_mode();
+        let _ = stdout.flush();
+    }
+}
+
+/// Drain pending terminal events from crossterm's queue until either
+/// nothing is pending or the budget expires. Uses an initial longer
+/// poll (covers the background reader's poll latency) followed by
+/// short polls. Errors are swallowed — drain is best-effort and the
+/// process is exiting either way.
+fn drain_events(budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    let mut first = true;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let wait = if first {
+            // First poll absorbs the background reader's worst-case
+            // 50ms poll tick + a margin for the terminal round-trip.
+            remaining.min(Duration::from_millis(80))
+        } else {
+            remaining.min(Duration::from_millis(5))
+        };
+        first = false;
+        match event::poll(wait) {
+            Ok(true) => {
+                if event::read().is_err() {
+                    break;
+                }
+            }
+            // Quiet for one poll cycle — assume the terminal is done
+            // talking. Break instead of spinning to deadline so a
+            // fast-responding terminal exits promptly.
+            Ok(false) => break,
+            Err(_) => break,
+        }
     }
 }
