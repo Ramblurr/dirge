@@ -69,7 +69,11 @@ impl Drop for TerminalGuard {
         // mode last. Previous ordering disabled raw mode BEFORE
         // leaving the alt screen, so the alt-screen-exit's responses
         // always leaked.
-        let _ = stdout.execute(Show);
+        // Note: `Show` was previously sent here, on the alt screen.
+        // `LeaveAlternateScreen` (`?1049l`) restores the MAIN screen's
+        // saved DECTCEM state, so a Show issued to the alt buffer is
+        // discarded by the leave. Moved to after `LeaveAlternateScreen`
+        // (review #5).
         let _ = stdout.execute(DisableBracketedPaste);
         let _ = stdout.execute(DisableMouseCapture);
         let _ = stdout.flush();
@@ -91,6 +95,12 @@ impl Drop for TerminalGuard {
         // Raw mode last — by now everything the terminal would
         // unsolicit has been parsed and discarded.
         let _ = terminal::disable_raw_mode();
+        // Restore cursor visibility AFTER the alt-screen exit so the
+        // Show applies to the main screen (the user's shell), not
+        // the alt buffer we're about to tear down. Some prompt
+        // themes leave the cursor hidden; without this the user
+        // sees a missing cursor in their shell.
+        let _ = stdout.execute(Show);
         let _ = stdout.flush();
     }
 }
@@ -100,9 +110,19 @@ impl Drop for TerminalGuard {
 /// poll (covers the background reader's poll latency) followed by
 /// short polls. Errors are swallowed — drain is best-effort and the
 /// process is exiting either way.
+///
+/// Early-break policy: only short-circuit on `Ok(false)` AFTER we've
+/// already consumed at least one event. The first `Ok(false)` can
+/// otherwise mean "the background reader currently owns crossterm's
+/// internal mutex on its own poll cycle" rather than "the terminal
+/// is quiet" — exiting then would let a delayed response (OSC 11
+/// bg-color, primary DA) sneak through after we tear down raw mode.
+/// Honoring the full budget on the first quiet poll costs at most
+/// the remaining time; that's fine for a shutdown path.
 fn drain_events(budget: Duration) {
     let deadline = std::time::Instant::now() + budget;
     let mut first = true;
+    let mut saw_event = false;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -118,14 +138,21 @@ fn drain_events(budget: Duration) {
         first = false;
         match event::poll(wait) {
             Ok(true) => {
+                saw_event = true;
                 if event::read().is_err() {
                     break;
                 }
             }
-            // Quiet for one poll cycle — assume the terminal is done
-            // talking. Break instead of spinning to deadline so a
-            // fast-responding terminal exits promptly.
-            Ok(false) => break,
+            Ok(false) => {
+                // Quiet poll. Only break if we've already consumed
+                // at least one event — otherwise keep polling
+                // until the deadline; the silence may just mean
+                // the reader thread still owned the mutex on this
+                // tick.
+                if saw_event {
+                    break;
+                }
+            }
             Err(_) => break,
         }
     }

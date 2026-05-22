@@ -221,6 +221,50 @@ fn render_plugin_entry(
     Ok(())
 }
 
+/// Cache of the panel's rendered MODIFIED list, keyed by
+/// `(modified::version, cwd)`. Skips the lock + 256-PathBuf clone +
+/// path-strip on every redraw when nothing has changed. Single-
+/// threaded read (the UI loop) so a Mutex around the tuple is the
+/// simplest correct shape; contention is nil.
+static PANEL_MODIFIED_CACHE: std::sync::Mutex<Option<(u64, std::path::PathBuf, Vec<String>)>> =
+    std::sync::Mutex::new(None);
+
+fn panel_modified_cached(cwd: &std::path::Path) -> Vec<String> {
+    let v = crate::agent::tools::modified::version();
+    {
+        let guard = PANEL_MODIFIED_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_v, cached_cwd, cached_data)) = guard.as_ref()
+            && *cached_v == v
+            && cached_cwd.as_path() == cwd
+        {
+            return cached_data.clone();
+        }
+    }
+    // Cache miss — rebuild. Lock the modified tracker, project to
+    // display strings, store back.
+    let cwd_buf = cwd.to_path_buf();
+    let rendered: Vec<String> = crate::agent::tools::modified::recent(256)
+        .into_iter()
+        .map(|p| {
+            p.strip_prefix(&cwd_buf)
+                .map(|r| r.display().to_string())
+                .unwrap_or_else(|_| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| p.display().to_string())
+                })
+        })
+        .collect();
+    let mut guard = PANEL_MODIFIED_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = Some((v, cwd_buf, rendered.clone()));
+    rendered
+}
+
 /// Snapshot the various pieces of state the info panel surfaces (cwd, MCP,
 /// LSP, todos, modified files) into a `PanelData` ready to hand to the
 /// renderer. Reads global statics (TODO_LIST, MODIFIED_FILES) under their
@@ -300,19 +344,13 @@ fn build_panel_data(
     // actually fit in the panel based on remaining terminal rows and
     // appends a `+N older` footer when truncated — matches opencode's
     // grow-to-fit pattern.
-    let modified: Vec<String> = crate::agent::tools::modified::recent(256)
-        .into_iter()
-        .map(|p| {
-            p.strip_prefix(&cwd_path)
-                .map(|r| r.display().to_string())
-                .unwrap_or_else(|_| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(String::from)
-                        .unwrap_or_else(|| p.display().to_string())
-                })
-        })
-        .collect();
+    //
+    // Review #6: cache the rendered Vec<String> against the
+    // tracker's monotonic version counter. The panel redraws on
+    // every keystroke / streamed token; without the cache we'd
+    // lock + clone 256 PathBufs + path-strip per redraw. The cache
+    // also includes the cwd so a `/cd` invalidates it correctly.
+    let modified = panel_modified_cached(&cwd_path);
 
     crate::ui::renderer::PanelData {
         cwd: cwd_str,
@@ -3206,6 +3244,11 @@ pub async fn run_interactive(
                             )?;
                         }
                     }
+                    // Review #9: blank-line breathing room between
+                    // the alert's `╰─╯` and this green confirmation.
+                    // Without it the alert bottom and the "allowed"
+                    // line read as adjacent rows of one block.
+                    renderer.write_line("", Color::White)?;
                     renderer.write_line(
                         &format!(
                             "  allowed {} {} (saved to session)",
@@ -3376,11 +3419,19 @@ pub async fn run_interactive(
                         let mut lines: Vec<LineEntry> =
                             Vec::with_capacity(num_options + if custom { 2 } else { 1 });
                         for (i, opt) in question.options.iter().enumerate() {
+                            // Review #11: keep every marker in a
+                            // question at equal display width so
+                            // continuation indents (computed from
+                            // head_w) line up across rows. Without
+                            // this, single-select cursor (`▶`, w=1)
+                            // and non-cursor (`  `, w=2) differ by
+                            // one column, and the wrapped tails of
+                            // adjacent options misalign by 1.
                             let marker = if i == cursor {
                                 if multi {
                                     if selected[i] { "▶ [x]" } else { "▶ [ ]" }
                                 } else {
-                                    "▶"
+                                    "▶ "
                                 }
                             } else if multi {
                                 if selected[i] { "  [x]" } else { "  [ ]" }
@@ -3393,7 +3444,14 @@ pub async fn run_interactive(
                             // + space) so the eye keeps the option
                             // grouping visually.
                             let head = format!("  {} ", marker);
-                            let head_w = head.chars().count();
+                            // Review #10: display-width not chars.
+                            // Future markers using CJK arrows / emoji
+                            // (wide glyphs) would otherwise under-pad
+                            // the continuation indent — wrapped tails
+                            // would drift one column left of the
+                            // label.
+                            let head_w =
+                                unicode_width::UnicodeWidthStr::width(head.as_str());
                             let body = format!("{} — {}", opt.label, opt.description);
                             let cont_indent = " ".repeat(head_w);
                             let full = format!("{}{}", head, body);

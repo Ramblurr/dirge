@@ -1352,13 +1352,22 @@ impl Renderer {
         // Budget: terminal rows minus the status row at the bottom
         // minus everything already pushed above. Each new section
         // costs `3 + max(1, items.len())` rows (blank + header +
-        // body + bottom). MODIFIED needs ≥4 rows to be worth
-        // rendering at all (blank + header + 1 item + bottom);
-        // below that, hide it entirely.
+        // body + bottom).
+        //
+        // Review #3: floor at 5 rows (blank + header + 1 visible
+        // item + 1 footer row + bottom). The previous floor of 4
+        // had an off-by-one — at `available == 4`, `row_budget = 1`
+        // and a truncated list emitted 1 file + 1 `+N older` footer
+        // = 2 item rows, plus 3 frame rows = 5 total. draw_panel
+        // clipped at last_row and silently dropped the bottom
+        // `╰────╯` border. Bumping the floor (and using
+        // `effective_visible = min(row_budget, total)` for the
+        // count math) guarantees the bottom border is always
+        // painted.
         let last_row = (total_rows as usize).saturating_sub(1);
         let used = out.len();
         let available = last_row.saturating_sub(used);
-        const MIN_MOD_SECTION_ROWS: usize = 4;
+        const MIN_MOD_SECTION_ROWS: usize = 5;
         const FRAME_OVERHEAD: usize = 3; // blank + header + bottom
 
         if available >= MIN_MOD_SECTION_ROWS {
@@ -1366,7 +1375,9 @@ impl Renderer {
             let total = d.modified.len();
             // Reserve one row for the "+N older" footer when we
             // know we'll truncate. If total fits in row_budget,
-            // no footer needed.
+            // no footer needed. With the new floor, row_budget ≥ 2
+            // so `visible = row_budget - 1 ≥ 1` is always valid
+            // when truncation kicks in.
             let (visible_count, hidden) = if total <= row_budget {
                 (total, 0)
             } else {

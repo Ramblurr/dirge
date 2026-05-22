@@ -1,7 +1,21 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use indexmap::IndexSet;
+
+/// Monotonic version counter bumped on every `mark_modified` /
+/// `clear_modified` call. Lets the info-panel build path skip the
+/// O(N) clone-and-strip work when the underlying set hasn't changed
+/// — `recent(256)` previously locked + cloned 256 PathBufs on every
+/// keystroke during streaming (review #6).
+static VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Current version. Panel-side code remembers this and re-snapshots
+/// only when the value changes.
+pub fn version() -> u64 {
+    VERSION.load(Ordering::Acquire)
+}
 
 /// Files the agent has written, edited, or patched in this session, in
 /// insertion order (most-recently-modified appears last). The info panel
@@ -35,6 +49,7 @@ pub fn mark_modified(path: &Path) {
         set.shift_remove_index(0);
     }
     set.insert(canonical);
+    VERSION.fetch_add(1, Ordering::Release);
 }
 
 /// Clear the tracked list. Hooked into /clear so the panel resets along
@@ -44,6 +59,7 @@ pub fn clear_modified() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    VERSION.fetch_add(1, Ordering::Release);
 }
 
 /// Snapshot of the most-recent `n` modified files (newest last). Returns
@@ -73,6 +89,31 @@ mod tests {
         let r = f();
         clear_modified();
         r
+    }
+
+    /// Review #6: the version counter bumps on every mark + clear,
+    /// so panel-side caches can detect when their snapshot is stale.
+    #[test]
+    fn version_bumps_on_mark_and_clear() {
+        with_isolated(|| {
+            let v0 = version();
+            let dir = std::env::temp_dir().join("dirge-modified-test-version");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = dir.join("a.txt");
+            std::fs::write(&p, "x").unwrap();
+
+            mark_modified(&p);
+            let v1 = version();
+            assert!(v1 > v0, "mark must bump version: {v0} -> {v1}");
+
+            mark_modified(&p);
+            let v2 = version();
+            assert!(v2 > v1, "re-mark (re-insert) bumps too: {v1} -> {v2}");
+
+            clear_modified();
+            let v3 = version();
+            assert!(v3 > v2, "clear must bump version: {v2} -> {v3}");
+        });
     }
 
     #[test]

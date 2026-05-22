@@ -34,6 +34,15 @@ pub fn soft_wrap(text: &str, max_width: usize, continuation_indent: &str) -> Vec
     if max_width == 0 {
         return text.lines().map(|l| l.to_string()).collect();
     }
+    // Wide-glyph floor: a CJK char or emoji has display width 2.
+    // With `max_width == 1`, `break_long_token` can't place such a
+    // glyph anywhere without overflowing the budget — the row-full
+    // flush fires but the glyph is still pushed onto the
+    // freshly-emptied row, producing a width-2 row on a width-1
+    // budget. Bump the effective budget to 2 so wide glyphs always
+    // have a home. Callers that genuinely want width 1 lose nothing
+    // — a 1-cell terminal is unusable anyway.
+    let max_width = max_width.max(2);
     let cont_w = UnicodeWidthStr::width(continuation_indent);
     let effective_indent = if cont_w >= max_width {
         ""
@@ -43,7 +52,14 @@ pub fn soft_wrap(text: &str, max_width: usize, continuation_indent: &str) -> Vec
     let cont_w = UnicodeWidthStr::width(effective_indent);
 
     let mut out: Vec<String> = Vec::new();
-    for logical in text.split('\n') {
+    for raw_logical in text.split('\n') {
+        // Strip a trailing `\r` so CRLF tool output (Windows logs,
+        // some MCP servers) doesn't leak a carriage return into the
+        // line buffer. A bare `\r` mid-line interpreted by the
+        // terminal redraws the row from column 0, producing visible
+        // overwrite artifacts; the selection char-offset math also
+        // miscounts (`\r` counts as a char but draws 0 cells).
+        let logical = raw_logical.strip_suffix('\r').unwrap_or(raw_logical);
         if logical.is_empty() {
             out.push(String::new());
             continue;
@@ -94,15 +110,46 @@ fn wrap_logical_line(
         let tok_w = UnicodeWidthStr::width(token.text);
         let ws_w = UnicodeWidthStr::width(token.leading_ws);
 
-        // If current is empty (start of a row), drop the leading
-        // whitespace — no point indenting just because we wrapped.
+        // Start of a new row. Preserve leading whitespace on the
+        // FIRST row of a logical line (callers commonly indent their
+        // text by prepending spaces — option markers, confirmation
+        // lines — and dropping that indent silently changes the
+        // visual layout). On CONTINUATION rows (`!is_first_row`),
+        // the cont_indent already supplies the leading visual
+        // indent; an additional token-level leading_ws would
+        // double-indent, so drop it there.
         if current.is_empty() {
-            if tok_w <= budget {
+            // Carry leading whitespace only on the first row of the
+            // logical line. Empty-text tokens (trailing-only or
+            // all-whitespace lines) ALSO go through here — we want
+            // the ws preserved so an indented blank-padded line
+            // doesn't collapse to an empty row (review #8).
+            if is_first_row {
+                if ws_w + tok_w <= budget {
+                    current.push_str(token.leading_ws);
+                    current.push_str(token.text);
+                    current_w = ws_w + tok_w;
+                } else if tok_w <= budget {
+                    // ws_w pushed token over the budget; drop ws to
+                    // preserve the token rather than break-and-lose.
+                    current.push_str(token.text);
+                    current_w = tok_w;
+                } else {
+                    break_long_token(
+                        token.text,
+                        budget,
+                        max_width.saturating_sub(cont_w).max(1),
+                        &mut current,
+                        &mut current_w,
+                        out,
+                        cont_indent,
+                        &mut is_first_row,
+                    );
+                }
+            } else if tok_w <= budget {
                 current.push_str(token.text);
                 current_w = tok_w;
             } else {
-                // Token by itself overflows the budget. Hard-break
-                // it across however many rows are needed.
                 break_long_token(
                     token.text,
                     budget,
@@ -327,5 +374,49 @@ mod tests {
         let out = soft_wrap("aaa bbb ccc", 4, "            ");
         // Should still produce output and not panic.
         assert!(!out.is_empty());
+    }
+
+    /// Review #1: leading whitespace on the FIRST row must be
+    /// preserved. Option-line rendering relies on `"  ▶ label"`
+    /// keeping its `  ` margin; dropping it silently flattens the
+    /// visual layout.
+    #[test]
+    fn preserves_leading_whitespace_on_first_row() {
+        let out = soft_wrap("  ▶ hello world", 80, "");
+        assert_eq!(out[0], "  ▶ hello world");
+    }
+
+    /// Review #4: a CRLF logical line yields the same wrap result
+    /// as the LF variant; no `\r` in the output.
+    #[test]
+    fn strips_carriage_returns_from_crlf_input() {
+        let out_lf = soft_wrap("first\nsecond", 80, "");
+        let out_crlf = soft_wrap("first\r\nsecond", 80, "");
+        assert_eq!(out_lf, out_crlf);
+        for row in &out_crlf {
+            assert!(!row.contains('\r'), "row {row:?} should have no CR");
+        }
+    }
+
+    /// Review #7: documented floor on max_width — wide glyph must
+    /// not produce a row exceeding the budget.
+    #[test]
+    fn wide_glyph_respects_max_width_at_floor() {
+        let out = soft_wrap("中文", 1, "");
+        for line in &out {
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= 2,
+                "row {line:?} should not exceed effective floor of 2"
+            );
+        }
+    }
+
+    /// Review #8: an indented blank-padded logical line keeps its
+    /// indentation. `"  "` (two spaces, no word) should NOT collapse
+    /// to an empty row when it's the FIRST row.
+    #[test]
+    fn preserves_leading_whitespace_only_line() {
+        let out = soft_wrap("  ", 80, "");
+        assert_eq!(out[0], "  ");
     }
 }
