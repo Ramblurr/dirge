@@ -483,6 +483,37 @@ fn fit_banner_header(name_upper: &str, value: &str, frame_w: usize) -> String {
     use unicode_width::UnicodeWidthChar;
     use unicode_width::UnicodeWidthStr;
 
+    // The header MUST be one logical line. Multi-line bash commands
+    // (line-continuation backslash + newline), tool args with
+    // embedded `\t`, or any control char that `sanitize_output`
+    // preserves would otherwise split the chamber TOP across two
+    // terminal rows — the user reported seeing `╭─ BASH ─ "...\` on
+    // row 1 and the continuation `  nikon_he..."─╮` on row 2.
+    // Collapse all whitespace runs to a single space here so the
+    // banner shape is invariant under the shape of the value.
+    let value_owned: String;
+    let value: &str = if value.contains(|c: char| c == '\n' || c == '\r' || c == '\t') {
+        value_owned = value
+            .chars()
+            .map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            // Collapse runs of spaces from the normalization above so
+            // the visible value reads as one tight line rather than
+            // `cmd \    nikon_he…` with a gap from the backslash.
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        value_owned.as_str()
+    } else {
+        value
+    };
+
     // Cap the tool name so a pathological long name
     // (e.g. `mcp_tool:long_server:long_function`) doesn't push
     // the prefix past `frame_w` and overflow the chamber. Reserve
@@ -4587,6 +4618,45 @@ mod tests {
             "leading head should be truncated: {:?}",
             header,
         );
+    }
+
+    /// Regression: bash line-continuation commands carry a literal
+    /// `\n` through `sanitize_output` (which preserves `\n`/`\t` so
+    /// chat content stays whole). The banner header MUST collapse
+    /// those into a single visible line — otherwise `write_line`
+    /// splits on `\n` and emits two terminal rows, breaking the
+    /// chamber TOP into `╭─ BASH ─ "...\` on row 1 and
+    /// `  rest..."─╮` on row 2.
+    #[test]
+    fn banner_collapses_embedded_newlines_to_single_line() {
+        let multi = "clang++ predecessor.cpp \\\n  nikon_he_precinct_decode.cpp 2>&1";
+        let header = fit_banner_header("BASH", multi, 80);
+        assert!(
+            !header.contains('\n'),
+            "header must not contain newlines: {:?}",
+            header,
+        );
+        assert!(
+            !header.contains('\t'),
+            "header must not contain tabs: {:?}",
+            header,
+        );
+        assert!(
+            !header.contains('\r'),
+            "header must not contain carriage returns: {:?}",
+            header,
+        );
+        // Width invariant still holds.
+        assert_eq!(header.as_str().width(), 80);
+    }
+
+    /// Banner with a tab in the value (Makefile targets, etc.) also
+    /// collapses to a single line.
+    #[test]
+    fn banner_collapses_embedded_tabs() {
+        let header = fit_banner_header("READ", "path\twith\ttabs", 60);
+        assert!(!header.contains('\t'));
+        assert_eq!(header.as_str().width(), 60);
     }
 
     /// Empty value (e.g. tool with no banner-worthy arg) renders
