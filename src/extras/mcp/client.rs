@@ -197,9 +197,13 @@ fn emit_mcp_line(server_name: &str, raw: &[u8]) {
     // `read` loop seeing them as line delimiters; tabs become
     // spaces upstream.
     let sanitized = crate::ui::ansi::strip_controls(&s, crate::ui::ansi::StripPolicy::STRICT);
-    if sanitized.trim().is_empty() {
-        // Don't surface blank lines — children often emit \n
-        // between log groups; we collapse those.
+    // Review #9: previously used `trim().is_empty()` which also
+    // dropped legitimate whitespace-only lines (e.g. servers that
+    // emit indented continuation lines). Now drop only truly
+    // empty post-sanitize lines — `\n`-between-log-groups still
+    // collapses since the read loop sees the empty buf and emits
+    // nothing.
+    if sanitized.is_empty() {
         return;
     }
     crate::ui::notifications::notify_mcp_log(server_name, &sanitized);

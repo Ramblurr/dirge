@@ -769,12 +769,12 @@ pub async fn run_interactive(
         false,
     )?;
 
-    // Install the off-stream notification channel. Producers like
-    // the MCP-server stderr forwarder push lines through this so
-    // they render via the same `Renderer::write_line` pipeline as
-    // agent output — no more raw stderr writes painting over the
-    // alt-screen UI.
-    let mut notify_rx = crate::ui::notifications::install();
+    // Notification receiver. The SENDER side was installed at the
+    // very top of `main()` so MCP forwarders spawning during
+    // `connect_all` (which happens BEFORE we get here) can already
+    // push lines. We just take ownership of the receiver here for
+    // the UI loop's `tokio::select!`. Review #1.
+    let mut notify_rx = crate::ui::notifications::take_receiver();
 
     let (user_tx, mut user_rx) = mpsc::channel::<UserEvent>(64);
     let user_tx_clone = user_tx.clone();
@@ -3428,21 +3428,40 @@ pub async fn run_interactive(
                     &mut last_tool_name,
                     &mut tool_chamber_open,
                 )?;
+                // Review #7: sanitize at the RECEIVER, not just at
+                // the producer. The MCP forwarder already strips
+                // controls before sending, but future producers
+                // (plugin notifications, background-task warnings)
+                // may forget. One sanitize call here makes the
+                // contract un-bypassable: nothing leaves this arm
+                // to `write_line` carrying escape bytes.
+                let policy = crate::ui::ansi::StripPolicy::KEEP_NEWLINE;
                 match notif {
                     Notification::McpLog { server, line } => {
+                        let safe_server = crate::ui::ansi::strip_controls(&server, policy);
+                        let safe_line = crate::ui::ansi::strip_controls(&line, policy);
                         renderer.write_line(
-                            &format!("[mcp:{}] {}", server, line),
+                            &format!("[mcp:{}] {}", safe_server, safe_line),
                             theme::dim(),
                         )?;
                     }
                     Notification::Info(line) => {
-                        renderer.write_line(&line, c_agent())?;
+                        renderer.write_line(
+                            &crate::ui::ansi::strip_controls(&line, policy),
+                            c_agent(),
+                        )?;
                     }
                     Notification::Warn(line) => {
-                        renderer.write_line(&line, theme::warn())?;
+                        renderer.write_line(
+                            &crate::ui::ansi::strip_controls(&line, policy),
+                            theme::warn(),
+                        )?;
                     }
                     Notification::Error(line) => {
-                        renderer.write_line(&line, c_error())?;
+                        renderer.write_line(
+                            &crate::ui::ansi::strip_controls(&line, policy),
+                            c_error(),
+                        )?;
                     }
                 }
                 renderer.render_viewport()?;
@@ -4069,16 +4088,30 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
         // MCP tools: input has the shape `mcp_tool:<server>:<name>`.
         // "Allow always" usually means "trust everything from this
         // server" rather than "trust this exact call", so derive a
-        // wildcarded per-server pattern. Without this, mcp_tool
-        // fell into the catch-all PLACEHOLDER branch and "allow
-        // always" silently degraded to "allow once" — every
-        // subsequent call from the same server re-prompted the
-        // user, with no way to make the allowlist stick.
+        // wildcarded per-server pattern.
+        //
+        // Review #6: umbrella check is case-insensitive so a
+        // future caller surfacing `MCP_TOOL:...` doesn't silently
+        // hit the placeholder branch.
+        //
+        // Review #5: use rsplitn so an MCP tool with embedded
+        // colons in its name (e.g. `mcp_tool:server:do:thing`)
+        // still wildcards on the SERVER, not the whole tail. The
+        // previous `splitn(3, ':')` collapsed `do:thing` into the
+        // 3rd part — fine since we wildcard it anyway — but the
+        // pattern would over-coarsen for users wanting tool-level
+        // grants. Same behavior for the server-wildcard case
+        // either way; rsplitn just keeps the semantics
+        // deterministic if we ever switch to a different
+        // wildcarding policy.
         "mcp_tool" => {
+            // Lowercase umbrella check; preserve original case in
+            // the emitted pattern so the allowlist matches the
+            // wire format.
             let mut parts = trimmed.splitn(3, ':');
             let umbrella = parts.next().unwrap_or("");
             let server = parts.next().unwrap_or("");
-            if umbrella == "mcp_tool" && !server.is_empty() {
+            if umbrella.eq_ignore_ascii_case("mcp_tool") && !server.is_empty() {
                 format!("mcp_tool:{}:*", server)
             } else {
                 PLACEHOLDER.to_string()

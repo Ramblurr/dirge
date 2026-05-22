@@ -632,13 +632,21 @@ fn strip_tags_and_decode(s: &str) -> String {
     // Pass 2: decode entities + filter control bytes via the
     // shared sanitizer in `ui::ansi`. Search results occasionally
     // carry literal ESC / CR / C1 controls (mojibake, malformed
-    // pages). KEEP_BOTH preserves newlines + tabs since some
-    // snippets have legitimate multi-line content the LLM
-    // benefits from seeing.
-    crate::ui::ansi::strip_controls(
+    // pages).
+    //
+    // Review #8: dropped tabs from the policy. A snippet
+    // containing a literal `\t` flows through `chamber_row` which
+    // expands tabs but `Renderer::write_line` first splits on
+    // `\n` and re-wraps per chunk — embedded TABs inside the
+    // chamber row body interact poorly with the wrap math. We
+    // collapse tabs to spaces by replacement (preserving the
+    // visible cell-count) and keep newlines so multi-line
+    // snippets still render as multiple chamber rows.
+    let cleaned = crate::ui::ansi::strip_controls(
         &decode_entities(no_tags.trim()),
-        crate::ui::ansi::StripPolicy::KEEP_BOTH,
-    )
+        crate::ui::ansi::StripPolicy::KEEP_NEWLINE,
+    );
+    cleaned.replace('\t', " ")
 }
 
 fn decode_entities(s: &str) -> String {

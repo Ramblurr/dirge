@@ -71,17 +71,25 @@ impl StripPolicy {
     };
 }
 
-/// Strip control bytes from `s` according to `policy`. Returns a
-/// fresh `String` even when no bytes were removed — callers that
-/// want to avoid the allocation on the no-op path should check the
-/// input first.
+/// Strip control bytes from `s` according to `policy`. Review #14:
+/// fast-path returns the input unchanged when no chars would be
+/// filtered, avoiding the `chars().filter().collect()` allocation
+/// for the common case (most MCP log lines / chat tokens have no
+/// control bytes to strip).
 pub fn strip_controls(s: &str, policy: StripPolicy) -> String {
+    if s.chars().all(|c| keep_char(c, policy)) {
+        return s.to_string();
+    }
     s.chars().filter(|c| keep_char(*c, policy)).collect()
 }
 
 /// Same as `strip_controls` but returns a `CompactString` — used
 /// by `sanitize_output` callers that store the result in chamber
-/// row buffers.
+/// row buffers. Currently unused at call sites (the MCP forwarder
+/// is the highest-throughput caller and uses `strip_controls`);
+/// kept as part of the deliberate API surface for the future
+/// `sanitize_output` migration.
+#[allow(dead_code)]
 pub fn strip_controls_compact(s: &str, policy: StripPolicy) -> CompactString {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

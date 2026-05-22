@@ -246,6 +246,14 @@ fn compile_lsp_commands(cfg: &config::Config) -> std::collections::HashMap<Strin
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
+    // Install the off-stream notification channel EARLY so MCP
+    // stderr forwarders spawning during `connect_all` (later in
+    // main, before run_interactive) have a live sender to push
+    // into. Without this, lines fired during MCP-server handshake
+    // hit `sender() = None` and were silently dropped — exactly
+    // the regression review #1 caught.
+    ui::notifications::install();
+
     // Tracing filter precedence: RUST_LOG (always wins) > --verbose
     // (debug for dirge + warn for plugin hooks) > default
     // (warn, rig silenced). `--verbose` exists primarily so plugin
