@@ -191,6 +191,27 @@ pass openai-key | dirge --provider openai --api-key-stdin
 | Hard char cap | On top of the line cap, `tool_result_max_chars` (default `500`) trims a single pathological line so a 10 MB minified blob can't blow the chamber. |
 | Colorized edit diffs | `edit` tool results render with `-` (red), `+` (green), `@@` (cyan) coloring (`show_edit_diff: true` in config) |
 
+### Inline ASCII avatar
+
+A 5-cell face lives in the left margin of the input row and reflects what the
+agent is currently doing. Single-tick animation alternates between two poses
+where applicable.
+
+| State | Frames | Meaning |
+|-------|--------|---------|
+| **Idle** | `(o o)` / `(- -)` | Nothing happening — neutral blink |
+| **Thinking** | `(o .)` / `(. o)` | Reasoning tokens streaming (eyes shifting) |
+| **Speaking** | `(o o)` / `(o O)` | Regular tokens streaming (mouth opens) |
+| **Reading** | `[@ @]` | `read` / `grep` / `find_files` / `list_dir` / `lsp` / `semantic` tool running |
+| **Writing** | `(>_<)` / `(-_-)` | `write` / `edit` / `apply_patch` / `write_todo_list` tool running |
+| **Bash** | `[$_$]` | `bash` shell command running |
+| **Alert** | `(O_O)` | Permission prompt waiting on you — paints in the perm color |
+| **Error** | `(x_x)` | Agent hit an error — paints in the error color |
+| **Done** | `(^_^)` | Turn completed cleanly — paints in the accent color |
+
+Unknown / plugin / MCP tools default to the `Reading` face since most are
+observational. The avatar is purely informational — no functional dependence.
+
 ## Prompts system
 
 Built-in prompts that change the agent's behavior and tone:
