@@ -227,6 +227,11 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 ask_tx.clone(),
                 cache.clone(),
             )),
+            Box::new(tools::RepoOverviewTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+            )),
             Box::new(tools::WriteTodoList::new(
                 permission.clone(),
                 ask_tx.clone(),
@@ -274,16 +279,28 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         let webfetch_enabled = cfg.tools.as_ref().and_then(|t| t.webfetch).unwrap_or(true)
             || env_true("WEBFETCH_ENABLED");
 
-        let websearch_tool = websearch_enabled
-            .then(|| std::env::var("EXA_API_KEY").ok())
-            .flatten()
-            .map(|key| {
-                Box::new(tools::WebSearchTool::new(
+        // Audit M1: explicit warn when websearch is enabled but
+        // EXA_API_KEY is unset. Without this the tool silently
+        // didn't appear and users wondered why the LLM never used
+        // it. Fires once per agent build.
+        let websearch_tool = if websearch_enabled {
+            match std::env::var("EXA_API_KEY") {
+                Ok(key) if !key.is_empty() => Some(Box::new(tools::WebSearchTool::new(
                     permission.clone(),
                     ask_tx.clone(),
                     key,
-                )) as Box<dyn rig::tool::ToolDyn>
-            });
+                ))
+                    as Box<dyn rig::tool::ToolDyn>),
+                _ => {
+                    eprintln!(
+                        "warning: websearch tool is enabled but EXA_API_KEY is unset; the tool won't be available to the agent. Set EXA_API_KEY (from exa.ai) or disable via tools.websearch=false in config to silence this."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let webfetch_tool = webfetch_enabled.then(|| {
             Box::new(tools::WebFetchTool::new(permission.clone(), ask_tx.clone()))
                 as Box<dyn rig::tool::ToolDyn>
@@ -366,6 +383,19 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                     "webfetch",
                     "websearch",
                     "lsp",
+                    // R2 audit O1 — new structural-overview tool.
+                    "repo_overview",
+                    // Audit H1: semantic tools were missing from
+                    // this list, so an MCP server exporting any of
+                    // these names silently shadowed the built-in
+                    // (last-write-wins favored the semantic version
+                    // but no warning fired). Adding them surfaces
+                    // the collision symmetrically with the others.
+                    "list_symbols",
+                    "get_symbol_body",
+                    "find_definition",
+                    "find_callers",
+                    "find_callees",
                     // plan_enter / plan_exit are unconditionally
                     // added by the agent builder (they manage the
                     // plan mode state via plan_tx). An MCP server

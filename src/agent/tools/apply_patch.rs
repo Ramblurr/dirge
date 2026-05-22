@@ -6,7 +6,13 @@ use std::path::Path;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm_path};
 
-/// Max content size for a single create operation (1MB).
+/// Max content size for a single create op (1 MiB). Audit L5 noted
+/// the dual cap with `MAX_APPLY_PATCH_BYTES` (100 MiB) — both apply
+/// to creates and the tighter wins. Intentional: creating a 50 MB
+/// file from inside an LLM tool call is almost always a bug; the
+/// large cap exists for update / read paths on legitimately large
+/// files. The tight create cap protects the LLM from accidentally
+/// dumping a multi-MB blob into the repo.
 const MAX_CREATE_SIZE: usize = 1_048_576;
 
 #[derive(Deserialize, Debug, Clone)]

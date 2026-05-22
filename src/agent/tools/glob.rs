@@ -112,7 +112,7 @@ impl Tool for GlobTool {
                     },
                     "include_hidden": {
                         "type": "boolean",
-                        "description": "Include dotfiles (.env, .gitignore, etc.). Default false to avoid surfacing secrets and config files."
+                        "description": "Include dotfiles (.env, .gitignore, etc.) in results. Default false to avoid surfacing secrets and config files."
                     }
                 },
                 "required": ["pattern"]

@@ -5,7 +5,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 ## Features
 
 - **Multi-provider**: OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, GLM, Ollama, plus custom providers
-- **Standard tools**: read, write, edit, bash, grep, find_files, glob, list_dir, write_todo_list, apply_patch
+- **Standard tools**: read, write, edit, bash, grep, find_files, glob, list_dir, write_todo_list, apply_patch, repo_overview, webfetch, websearch, question, memory, skill, task, task_status
 - **Line-numbered read output**: `read` tool prefixes each line with right-aligned line numbers (`123: content`)
 - **Environment-aware**: system prompt includes OS, shell, working directory, and git branch for context
 - **Semantic code tools** (tree-sitter): list_symbols, get_symbol_body, find_definition, find_callers, find_callees — supports TypeScript/TSX, Python, Clojure (clj/cljs/cljc/edn/bb), Go, Ruby, Rust, Java, C, and C++
@@ -17,7 +17,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Info panel**: optional right-hand sidebar showing cwd, MCP/LSP server status, pending todos, and recently-modified files. Auto-shown at ≥100 cols; toggle via `/panel`
 - **Mid-execution interjection**: type while the agent is running to queue a follow-up message — the runner stops at the next tool-result boundary so it's picked up promptly instead of waiting for the whole multi-turn run. `Ctrl+X` drops queued messages, `Ctrl+C` cancels both the run and the queue
 - **Prompts system**: switch between system prompt modes at runtime (`code`, `plan`, `review`, `debug`, etc.)
-- **Plan mode**: write restriction — when a plan/review prompt is active, writes and edits are restricted to `PLAN.md` only
+- **Per-prompt tool restrictions**: each prompt (`prompts/<name>.md`) can declare a `deny_tools` frontmatter list. The permission checker refuses those tools while the prompt is active — replaces the previous prose-based "plan mode" gate with a real security boundary. `plan`, `review`, and `review-security` ship with `edit`, `write`, `apply_patch`, `bash`, and `webfetch` denied
 - **Subagent support**: `task` tool spawns a subagent for research or general analysis subtasks
 - **Memory tool**: persistent per-project memory store at `~/.dirge/memories/` — view, write, delete memories
 - **MCP support**: connect MCP servers for extended tooling (optional compile-time feature)

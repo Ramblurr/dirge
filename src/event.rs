@@ -71,17 +71,14 @@ pub enum UserEvent {
     Key(crossterm::event::KeyEvent),
     ScrollUp,
     ScrollDown,
-    #[allow(dead_code)]
     MouseDown {
         row: u16,
         col: u16,
     },
-    #[allow(dead_code)]
     MouseDrag {
         row: u16,
         col: u16,
     },
-    #[allow(dead_code)]
     MouseUp {
         row: u16,
         col: u16,

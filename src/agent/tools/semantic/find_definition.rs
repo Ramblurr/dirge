@@ -43,7 +43,7 @@ impl Tool for FindDefinitionTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "find_definition".to_string(),
-            description: "Find where a symbol (function, class, type, etc.) is defined across the project. Uses tree-sitter to locate definitions precisely.".to_string(),
+            description: "Find where a SYMBOL (function, class, type, etc.) is DEFINED across the project. Uses tree-sitter for precise structural matching. NOT for finding files by name — use `find_files` for that. NOT for content search — use `grep`.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

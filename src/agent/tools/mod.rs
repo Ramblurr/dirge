@@ -14,6 +14,7 @@ pub(crate) mod modified;
 pub(crate) mod plan;
 pub(crate) mod question;
 mod read;
+mod repo_overview;
 #[cfg(feature = "semantic")]
 pub mod semantic;
 mod skill;
@@ -38,6 +39,7 @@ pub use memory::MemoryTool;
 pub use plan::{PlanEnterTool, PlanExitTool};
 pub use question::QuestionTool;
 pub use read::ReadTool;
+pub use repo_overview::RepoOverviewTool;
 pub use skill::SkillTool;
 pub use task::TaskTool;
 pub use task_status::TaskStatusTool;

@@ -48,7 +48,7 @@ impl Tool for FindFilesTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "find_files".to_string(),
-            description: "Recursively find files matching a regex pattern in their filename. Respects .gitignore. Skips node_modules and target.".to_string(),
+            description: "Recursively find FILES whose FILENAME matches a regex pattern. Use this to locate a file by name (e.g. `^Cargo\\.toml$`, `.*_test\\.py$`). NOT for finding symbol definitions — use `find_definition` for that. NOT for content search — use `grep`. Respects .gitignore; skips node_modules and target.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
