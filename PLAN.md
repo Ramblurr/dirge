@@ -441,20 +441,230 @@ on `ContextOverflow` works.
 
 #### 4.5h — Flip default; delete old path
 
-**Goal**: make the new loop the only path. Delete the old
-rig-multi-turn consumer code. This is the ORIGINAL 4.5 description
-— but it now lands AFTER everything above proves the new path works.
+**SCOPE CORRECTION (second pass)**: 4.5h-1 (ContextOverflow
+classification) shipped. The rest of "flip default" is genuinely
+a multi-commit project — sub-divided below. Each sub-phase ships
+green builds + green tests + concrete progress toward the cutover.
+
+The decomposition is dependency-rooted but each piece is
+independent enough to be reordered if a blocker appears. Phases
+h-3 / h-4 / h-5 are mutually independent; h-6 composes them; h-7
+is the manual-verification gate; h-8 is the final cutover.
+
+##### 4.5h-1 — Bridge ContextOverflow classification ✓ (shipped)
+
+When `LoopEvent::AgentEnd` carries an assistant with
+`stop_reason=Error` + a context-length signal, the bridge emits
+`AgentEvent::ContextOverflow { prompt, error }` instead of
+`Error`. UI flow (auto-compact + respawn) works through the new
+path the same way it does today.
+
+##### 4.5h-2 — `AnyAgent` → `StreamFn` extraction helper
+
+**Goal**: produce a `StreamFn` from any `AnyAgent` variant
+without forcing every callsite to enumerate them.
+
+**Approach**: rig's `Agent.model: Arc<M>` is public. Add a
+method `AnyAgent::build_stream_fn(&self) -> StreamFn` that
+matches on `AnyAgentInner` and threads each variant through
+`rig_stream_fn_from_model::<M>(model.clone(), tools)`. Tools
+arg comes from 4.5h-4.
 
 **Files**:
-- `src/agent/runner.rs` — strip the rig multi-turn path
-- `Cargo.toml` — remove the `agent-loop` feature flag
-- `src/agent/agent_loop/mod.rs` — remove the `#![allow(dead_code)]`
-  + `#![allow(unused_imports)]` module-level allows
+- `src/provider.rs` — `AnyAgent::build_stream_fn` method
+- `src/agent/agent_loop/rig_stream_factory.rs` — possibly a
+  per-provider tweak if any provider's `StreamingResponse`
+  doesn't auto-satisfy the `Send + Sync + 'static + GetTokenUsage`
+  bound
 
-**Tests**: all 724+ default tests still pass.
+**Tests**: per-variant compile-time bounds check (assert each
+variant produces a `Send + Sync + 'static` `StreamFn`). No
+runtime stream test — that needs real API keys (deferred to
+h-7).
 
-**Risk**: medium. Deletion. Anything subtle that survived 4.5a-g
-should now be the ONLY behavior.
+**Risk**: low–medium. Some providers' streaming response types
+may need `+ 'static` bounds added — fixable if so.
+
+##### 4.5h-3 — Chunk timeout enforcement
+
+**Goal**: wrap rig's stream poll with `tokio::time::timeout` so
+a stalled provider stream surfaces as an Error event after the
+configured timeout (default 300s, per-provider override). Match
+the existing runner's behavior.
+
+**Approach**: insert a per-event timeout layer in either
+`rig_stream.rs::wrap_streamed_assistant` (per-poll) or
+`rig_stream_factory.rs::invoke_one_stream` (per-`next().await`).
+Tests use `tokio::time::pause` to simulate a stalled inner
+stream.
+
+**Files**:
+- `src/agent/agent_loop/rig_stream.rs` OR `rig_stream_factory.rs`
+  (decide on cleanest insertion point) — add `chunk_timeout:
+  Duration` parameter; emit Error event on timeout
+- The `rig_stream_fn_from_model` builder takes
+  `chunk_timeout: Duration` and threads it through
+
+**Tests**: stalled inner stream emits Error after timeout;
+fast inner stream is unaffected; cancellation interacts
+correctly.
+
+**Risk**: low. Pure stream-wrapping; no protocol changes.
+
+##### 4.5h-4 — Parallel `LoopTool` registry builder
+
+**Goal**: alongside the existing `Vec<Box<dyn ToolDyn>>` build
+that dirge does today, produce `Vec<Arc<dyn LoopTool>>` via
+`RigToolAdapter::new()` for each tool. Mutating tools (bash,
+edit, write, apply_patch) get `with_execution_mode(Sequential)`.
+
+**Approach**: in `agent/builder.rs` (or wherever tools are
+assembled today), add a parallel `build_loop_tools(...)` that
+takes the same constructor args (permission, ask_tx, cache,
+lsp_manager, etc.) and returns the LoopTool registry.
+
+**Files**:
+- `src/agent/builder.rs` — `build_loop_tools` function
+
+**Tests**: assert each known tool in the result is wrapped;
+sequential set has the right execution mode; integration test
+that runs a wrapped `ReadTool` through the LoopTool surface
+(already done by 4.5b's `adapter_matches_rig_path_for_real_dirge_tool`).
+
+**Risk**: medium. The dirge tool list isn't tiny; per-tool
+wrap order matters for sequential-mode tagging. Mechanical
+work + a checklist.
+
+##### 4.5h-5 — Background notifications + steering plumbing
+
+**Goal**: the existing runner calls
+`tools::background::prepend_pending_notifications(prompt)`
+before every run; the new path needs the same. The UI's
+`interjection_queue` (today drained between runs) needs to
+flow into `LoopSpawnConfig.steering_queue` so mid-run
+interjection works.
+
+**Files**:
+- The spawn site (4.5h-6's new function) — call
+  `prepend_pending_notifications` on the prompt
+- UI side: share the `Arc<Mutex<VecDeque<String>>>` between
+  the UI input pump and `LoopSpawnConfig.steering_queue`
+
+**Tests**: background notification flows into prompt;
+steering injection visible in the loop (already proven by
+4.5e + 4.5f).
+
+**Risk**: low.
+
+##### 4.5h-6 — Opt-in routing via `--use-agent-loop` flag
+
+**Goal**: a CLI flag (and config field) that routes
+`provider::spawn_runner` through `spawn_loop_runner` instead
+of `runner::spawn_agent`. Both paths coexist; default stays
+the old path. Returns the existing `AgentRunner` shape so UI
+callsites don't change.
+
+**Approach**:
+- Add `AnyAgent::spawn_runner_via_loop(prompt, history) ->
+  AgentRunner` that composes 4.5h-2 (StreamFn) + 4.5h-3
+  (chunk timeout) + 4.5h-4 (LoopTool registry) + 4.5h-5
+  (steering + notifications) and adapts the resulting
+  `LoopRunner` to the `AgentRunner` shape (signal → interject_tx
+  semantics)
+- Add `dirge_config::Config.use_agent_loop: bool`
+- Add `--use-agent-loop` CLI flag
+- `provider::spawn_runner` branches on the flag
+
+**Files**:
+- `src/provider.rs` — `spawn_runner_via_loop` + branch in
+  `spawn_runner`
+- `src/config/mod.rs` — flag field
+- `src/main.rs` — CLI arg parsing
+- `src/agent/agent_loop/integration.rs` —
+  `LoopRunner::into_agent_runner()` adapter or equivalent
+
+**Tests**: integration test that runs a canned multi-turn
+scenario through BOTH paths and asserts the AgentEvent
+streams match in structure (event kinds, ordering, key
+fields). Diff between paths is allowed only in known-okay
+fields (e.g. cost/tokens which old path tracks and new
+doesn't yet).
+
+**Risk**: high. First time the new path touches real dirge
+state. Expected friction: signal semantics differing
+between paths; chamber rendering state; ACP-specific event
+massaging.
+
+##### 4.5h-7 — Real-provider smoke testing (manual)
+
+**Goal**: validate the new path against actual Anthropic /
+OpenAI / OpenRouter accounts before deletion is safe.
+
+**Test scenarios**:
+1. Simple Q (no tools)
+2. Single-tool use (read a file)
+3. Multi-turn tool sequence (read → edit → bash test)
+4. Mid-run interjection ("wait, also do X")
+5. Rate limit recovery (force one or watch existing logs)
+6. Context overflow → auto-compact (large transcript)
+7. Plugin hook flow (with at least one local Janet plugin)
+
+**Files**: none structural. Bug-fix commits land as discovered.
+
+**Approach**: user runs `dirge --use-agent-loop` against
+configured providers; we iterate on bugs. May reveal missing
+features that earlier phases overlooked (e.g. specific
+provider quirks, ACP edge cases).
+
+**Risk**: high — unknown unknowns are most likely to surface
+here. Multi-session, requires API keys.
+
+##### 4.5h-8 — Flip default; delete old path
+
+**Goal**: make the new loop the only path. Final commit.
+
+**Approach**:
+- Default `use_agent_loop = true` (or delete the flag)
+- `provider::spawn_runner` calls `spawn_runner_via_loop`
+  unconditionally
+- Delete `runner::run_stream` + the recovery loop in
+  `spawn_agent` (~600 LOC removed)
+- Remove the `agent-loop` feature gate from `Cargo.toml`
+- Remove the `#![allow(dead_code)]` + `#![allow(unused_imports)]`
+  module-level allows in `src/agent/agent_loop/mod.rs`
+- Audit for any remaining references to the old path
+  (`convert_history` is still useful — kept; runner-specific
+  helpers go)
+
+**Files**:
+- `src/agent/runner.rs` — strip multi-turn path
+- `src/provider.rs` — remove the branch
+- `Cargo.toml` — remove `agent-loop = []`
+- `src/agent/agent_loop/mod.rs` — drop module-level allows
+
+**Tests**: all default tests still pass.
+
+**Risk**: medium. Deletion. By this point 4.5h-7 has validated
+parity; the deletion is mostly mechanical.
+
+---
+
+**Estimated sizes** (rough LOC + new tests per sub-phase):
+
+| Sub-phase | LOC | Tests | Cumulative state                                    |
+|-----------|-----|-------|----------------------------------------------------|
+| 4.5h-2    | 80  | 1-2   | StreamFn buildable from any provider               |
+| 4.5h-3    | 100 | 3-4   | + Chunk timeout enforced                           |
+| 4.5h-4    | 120 | 2-3   | + Full tool registry available as LoopTools        |
+| 4.5h-5    | 60  | 2     | + Background notifications + steering plumbed     |
+| 4.5h-6    | 250 | 4-6   | + Opt-in routing; parity-tested                    |
+| 4.5h-7    | ~50 | n/a   | + Real-provider verified (bug-fix commits)         |
+| 4.5h-8    | -600 + 50 | 0 net | New path is the only path                  |
+
+Each sub-phase ships green CI + a concrete user-visible step
+forward. Phases h-2 through h-5 are technically reorderable
+since they're mutually independent; the listed order is the
+risk-ascending one.
 
 ---
 
