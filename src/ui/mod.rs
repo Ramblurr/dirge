@@ -600,6 +600,24 @@ pub async fn run_interactive(
     let mut was_reasoning = false;
     let mut todo_tools_enabled = false;
     let mut last_tool_name: Option<String> = None;
+    // Tracks whether a tool chamber TOP has been drawn but no matching
+    // BOTTOM has been written yet. Used by the ask/alert handler to
+    // close the in-flight chamber BEFORE rendering the ALERT box.
+    //
+    // Why separate from `last_tool_name`?
+    // The alert handler used to gate the chamber-close on
+    // `last_tool_name.is_some()` — but in practice users reported the
+    // ALERT box rendering directly under an unclosed chamber TOP,
+    // meaning that check fell through. The root cause is subtle: when
+    // `tokio::select!` picks the ask channel after the ToolCall handler
+    // ran AND after a `close_tool_chamber_if_open` somewhere else
+    // cleared `last_tool_name`, the chamber TOP is on-screen but
+    // `last_tool_name` is `None`. Tracking the chamber visibility as
+    // its own boolean — set on every chamber TOP write, cleared on
+    // every chamber BOTTOM write — decouples the two state machines so
+    // the alert handler can rely on a fact about the *screen* rather
+    // than a fact about a name that has other clear sites.
+    let mut tool_chamber_open: bool = false;
     #[allow(unused_mut)]
     let mut loop_label: Option<String> = None;
     #[cfg(feature = "loop")]
@@ -1764,7 +1782,7 @@ pub async fn run_interactive(
                         // it before opening the new one. Without this
                         // the new `╭─ NAME ─ args` lands inside the
                         // stale chamber.
-                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name, &mut tool_chamber_open)?;
                         last_tool_name = Some(name.to_string());
                         if agent_line_started {
                             renderer.write_line("", Color::White)?;
@@ -1795,6 +1813,7 @@ pub async fn run_interactive(
                         let (frame_w, _) = chamber_widths(&renderer);
                         let header = fit_banner_header(&upper, &raw_value, frame_w);
                         renderer.write_line(&header, c_tool())?;
+                        tool_chamber_open = true;
 
                         // Note: on-tool-start fires from HookedToolDyn now,
                         // around the actual tool invocation. The UI no
@@ -1922,14 +1941,17 @@ pub async fn run_interactive(
                                         &chamber_bottom(frame_w),
                                         theme::dim(),
                                     )?;
+                                    tool_chamber_open = false;
                                 } else {
                                     // No diff section found, show normally
                                     render_tool_output(
                                         &mut renderer, &output, max_chars,
                                     )?;
+                                    tool_chamber_open = false;
                                 }
                             } else {
                                 render_tool_output(&mut renderer, &output, max_chars)?;
+                                tool_chamber_open = false;
                             }
                         }
                         // Clear after consuming so a future stray ToolResult
@@ -1938,7 +1960,17 @@ pub async fn run_interactive(
                     }
                     AgentEvent::Done { response, tokens, cost } => {
                         was_reasoning = false;
-                        last_tool_name = None;
+                        // A successful turn must not leave a chamber
+                        // half-painted. If anything slipped through
+                        // — e.g. an in-flight Ask that the user
+                        // resolved but the bottom-paint path didn't
+                        // execute — close it now so the next turn
+                        // doesn't start inside a stale chamber.
+                        close_tool_chamber_if_open(
+                            &mut renderer,
+                            &mut last_tool_name,
+                            &mut tool_chamber_open,
+                        )?;
                         renderer.set_avatar_state(avatar::AvatarState::Done);
 
                         #[allow(unused_mut, unused_variables)]
@@ -2270,7 +2302,7 @@ pub async fn run_interactive(
                     }
                     AgentEvent::Interjected { partial_response, tokens } => {
                         was_reasoning = false;
-                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name, &mut tool_chamber_open)?;
 
                         // Finalize whatever assistant text streamed so far so
                         // the conversation history reflects what the user saw,
@@ -2381,7 +2413,7 @@ pub async fn run_interactive(
                         // (compaction.ts:477-558) instead of leaving the
                         // user stranded at the error.
                         was_reasoning = false;
-                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name, &mut tool_chamber_open)?;
                         let safe = sanitize_output(&error);
                         renderer.write_line(
                             &format!("context overflow: {}", safe),
@@ -2479,7 +2511,7 @@ pub async fn run_interactive(
                     AgentEvent::Error(e) => {
                         was_reasoning = false;
                         renderer.set_avatar_state(avatar::AvatarState::Error);
-                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name)?;
+                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name, &mut tool_chamber_open)?;
                         let safe = sanitize_output(&e);
                         renderer.write_line(&format!("error: {}", safe), c_error())?;
 
@@ -2650,19 +2682,36 @@ pub async fn run_interactive(
                 // ToolResult body lands inside it as usual. If the
                 // user denies, the chamber is already closed and
                 // we add a brief "(denied)" line below.
-                let pending_chamber_tool =
-                    if let Some(open_name) = last_tool_name.clone() {
-                        let (frame_w, inner) = chamber_widths(&renderer);
-                        renderer.write_line(
-                            &chamber_row("awaiting permission…", inner),
-                            theme::dim(),
-                        )?;
-                        renderer.write_line(&chamber_bottom(frame_w), c_tool())?;
-                        last_tool_name = None;
-                        Some(open_name)
-                    } else {
-                        None
-                    };
+                // FIX: gate the in-flight chamber close on
+                // `tool_chamber_open`, not on `last_tool_name`. The
+                // two state variables drift apart in practice because
+                // `last_tool_name` is also cleared by paths that do
+                // not paint a chamber BOTTOM (e.g. `AgentEvent::Done`
+                // at the end of an LLM turn), leaving the chamber TOP
+                // on-screen but the name slot empty. Previously this
+                // showed up as an ALERT box rendering directly under
+                // an unclosed chamber TOP — no "awaiting permission…"
+                // row, no chamber bottom. Now the chamber-close is
+                // driven by what's actually on the screen.
+                let pending_chamber_tool: Option<String> = if tool_chamber_open {
+                    let (frame_w, inner) = chamber_widths(&renderer);
+                    renderer.write_line(
+                        &chamber_row("awaiting permission…", inner),
+                        theme::dim(),
+                    )?;
+                    renderer.write_line(&chamber_bottom(frame_w), c_tool())?;
+                    tool_chamber_open = false;
+                    let reopen = last_tool_name.clone();
+                    last_tool_name = None;
+                    // If `last_tool_name` was somehow cleared while
+                    // the chamber stayed open, the reopen-after-allow
+                    // path has no name to anchor the new chamber to.
+                    // Fall back to the asked tool's name so the
+                    // user still gets the visual pair.
+                    Some(reopen.unwrap_or_else(|| ask_req.tool.to_string()))
+                } else {
+                    None
+                };
                 // Blank line above the ALERT box guarantees visual
                 // separation from whatever was just on screen — a
                 // closed tool chamber, plain agent text, or even
@@ -2928,6 +2977,7 @@ pub async fn run_interactive(
                         let header = fit_banner_header(&upper, &raw_value, frame_w);
                         renderer.write_line(&header, c_tool())?;
                         last_tool_name = Some(reopen_name);
+                        tool_chamber_open = true;
                     }
                 }
 
@@ -3533,27 +3583,25 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
 fn close_tool_chamber_if_open(
     renderer: &mut Renderer,
     last_tool_name: &mut Option<String>,
+    tool_chamber_open: &mut bool,
 ) -> anyhow::Result<()> {
-    if last_tool_name.is_some() {
+    // Close ANY of: a name-tracked open chamber OR a flag-tracked one.
+    // The two can disagree (see comment on `tool_chamber_open` at its
+    // declaration). Either signal alone is enough to mean "there's an
+    // unclosed `╭─` on screen", and we close it idempotently.
+    if last_tool_name.is_some() || *tool_chamber_open {
         let (frame_w, inner) = chamber_widths(renderer);
         // Abnormal close: this helper is only called when the tool's
         // chamber is closing without a `ToolResult` (permission
         // denied, interjected mid-execution, agent error, fresh tool
-        // call before the previous one finished). Previously we
-        // painted CRT-static dither rows here, but those used
-        // `static_row()` which was 2 chars narrower than the chamber
-        // frame so the right border never lined up, and the dithered
-        // noise was visually loud for a state the user just needs to
-        // SEE quickly. Now we emit a single centered alert row in
-        // the perm/error color (same orange tone as the permission
-        // ask), which lines up with the chamber border and reads at
-        // a glance.
+        // call before the previous one finished).
         renderer.write_line(
             &chamber_row_centered("⚠ tool denied · aborted · no result", inner),
             theme::perm(),
         )?;
         renderer.write_line(&chamber_bottom(frame_w), theme::dim())?;
         *last_tool_name = None;
+        *tool_chamber_open = false;
     }
     Ok(())
 }
