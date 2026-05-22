@@ -89,11 +89,34 @@ where
     M: CompletionModel + Clone + Send + Sync + 'static,
     M::StreamingResponse: Clone + Unpin + Send + Sync + GetTokenUsage + 'static,
 {
+    rig_stream_fn_from_model_with_provider(model, tools, chunk_timeout, None)
+}
+
+/// Provider-aware variant: takes the provider name (e.g.
+/// "anthropic", "openai") so reasoning options get mapped to the
+/// shape the specific provider expects. When `provider_name`
+/// is `None`, falls back to generic additional_params keys
+/// (which most providers will ignore — useful for tests or
+/// debugging only).
+///
+/// Production callers should always pass `Some(name)`.
+pub fn rig_stream_fn_from_model_with_provider<M>(
+    model: M,
+    tools: Vec<ToolDefinition>,
+    chunk_timeout: Option<std::time::Duration>,
+    provider_name: Option<String>,
+) -> StreamFn
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+    M::StreamingResponse: Clone + Unpin + Send + Sync + GetTokenUsage + 'static,
+{
     let tools = Arc::new(tools);
+    let provider_name = Arc::new(provider_name);
     Arc::new(move |ctx: LlmContext, opts: super::stream::StreamOptions| {
         let model = model.clone();
         let tools = tools.clone();
-        invoke_one_stream(model, tools, ctx, chunk_timeout, opts)
+        let provider_name = provider_name.clone();
+        invoke_one_stream(model, tools, ctx, chunk_timeout, opts, provider_name)
     })
 }
 
@@ -112,6 +135,7 @@ fn invoke_one_stream<M>(
     ctx: LlmContext,
     chunk_timeout: Option<std::time::Duration>,
     opts: super::stream::StreamOptions,
+    provider_name: Arc<Option<String>>,
 ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>>
 where
     M: CompletionModel + Clone + Send + Sync + 'static,
@@ -151,40 +175,18 @@ where
         if !tools.is_empty() {
             builder = builder.tools((*tools).clone());
         }
-        // Build additional_params from opts.reasoning + headers +
-        // metadata. Provider-specific mapping for reasoning lives
-        // in `provider::AnyAgent::build_stream_fn` — the mapper
-        // is captured in this closure's environment by the time
-        // we get here. For phase 4.6's initial implementation we
-        // pass the raw fields under conventional keys; downstream
-        // commits add per-provider transformers if needed.
-        let mut additional = serde_json::Map::new();
-        if let Some(reasoning) = opts.reasoning {
-            additional.insert(
-                "reasoning_level".to_string(),
-                serde_json::to_value(reasoning).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        if let Some(budgets) = &opts.thinking_budgets {
-            if let Ok(v) = serde_json::to_value(budgets) {
-                additional.insert("thinking_budgets".to_string(), v);
-            }
-        }
-        if !opts.headers.is_empty() {
-            if let Ok(v) = serde_json::to_value(&opts.headers) {
-                additional.insert("headers".to_string(), v);
-            }
-        }
-        if !opts.metadata.is_empty() {
-            additional.insert(
-                "metadata".to_string(),
-                serde_json::Value::Object(
-                    opts.metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                ),
-            );
-        }
-        if !additional.is_empty() {
-            builder = builder.additional_params(serde_json::Value::Object(additional));
+        // Build additional_params using a per-provider mapper
+        // (phase 4.6 follow-up). Each provider has its own
+        // shape for reasoning configuration — Anthropic wants
+        // `thinking: { type: "enabled", budget_tokens | effort }`,
+        // OpenAI Responses wants `reasoning: { effort }`, etc.
+        // The mapper produces the right shape; rig's
+        // additional_params is opaque so it forwards whatever
+        // we give it.
+        let provider: Option<&str> = provider_name.as_ref().as_deref();
+        let additional = build_provider_additional_params(provider, &opts);
+        if let Some(v) = additional {
+            builder = builder.additional_params(v);
         }
         let request = builder.build();
 
@@ -307,6 +309,170 @@ pub fn loop_tool_to_rig_definition(tool: &dyn LoopTool) -> ToolDefinition {
         name: tool.name().to_string(),
         description: tool.description().to_string(),
         parameters: tool.parameters().clone(),
+    }
+}
+
+/// Build the provider-specific `additional_params` Value for a
+/// `CompletionRequest` from the user's StreamOptions. Per-provider
+/// mapping covers the SHAPE differences between Anthropic
+/// (`thinking: { ... }`), OpenAI Responses (`reasoning: {
+/// effort }`), and others.
+///
+/// Returns `None` when there's nothing to send (no reasoning
+/// requested, no headers, no metadata) — caller skips
+/// `additional_params(...)` to keep the request minimal.
+///
+/// **Provider mappings**:
+///   - "anthropic": `{ "thinking": { "type": "enabled",
+///     "budget_tokens": N } }` for budget-based reasoning. Pi's
+///     adaptive-thinking effort mode (Opus 4.6+, Sonnet 4.6) is
+///     a follow-up — needs model-id sniffing.
+///   - "openai" / "deepseek" / "glm" / "custom" (all
+///     openai-shaped): `{ "reasoning": { "effort": "low" |
+///     "medium" | "high" } }` per OpenAI Responses spec. Maps
+///     ThinkingLevel:
+///       - Off / Minimal / Low → "low"
+///       - Medium → "medium"
+///       - High / Xhigh → "high"
+///   - "openrouter": same as openai (openrouter forwards
+///     OpenAI-shape options to the upstream provider).
+///   - "gemini": `{ "thinking_config": { "thinking_budget":
+///     N } }` (Gemini 2.x). Budget-based.
+///   - "ollama": no reasoning config — local models vary; pass
+///     through generic `reasoning_level` key.
+///   - None: generic `reasoning_level` key for debugging /
+///     ad-hoc consumers.
+///
+/// **Headers and metadata** are passed through under
+/// conventional keys (`headers`, `metadata`) regardless of
+/// provider — rig's openai-shaped clients merge `metadata`
+/// into the request body; headers are honored where the
+/// provider impl reads them.
+pub fn build_provider_additional_params(
+    provider_name: Option<&str>,
+    opts: &super::stream::StreamOptions,
+) -> Option<serde_json::Value> {
+    use super::types::ThinkingLevel;
+    let mut additional = serde_json::Map::new();
+
+    // ----- reasoning per provider -----
+    if let Some(level) = opts.reasoning {
+        match provider_name {
+            Some("anthropic") => {
+                // Budget-based thinking. Pi uses adaptive-effort
+                // for Opus 4.6+ and Sonnet 4.6; we'd need model-
+                // id sniffing to dispatch. For now use budget
+                // mode with sensible per-level defaults that
+                // adaptive-thinking models also accept.
+                let budget = budget_for_level(level, opts.thinking_budgets.as_ref());
+                if budget > 0 {
+                    additional.insert(
+                        "thinking".to_string(),
+                        serde_json::json!({
+                            "type": "enabled",
+                            "budget_tokens": budget,
+                        }),
+                    );
+                }
+            }
+            Some("openai" | "deepseek" | "glm" | "custom" | "openrouter") => {
+                // OpenAI Responses / openai-compat reasoning.
+                if let Some(effort) = thinking_level_to_openai_effort(level) {
+                    additional.insert(
+                        "reasoning".to_string(),
+                        serde_json::json!({ "effort": effort }),
+                    );
+                }
+            }
+            Some("gemini") => {
+                let budget = budget_for_level(level, opts.thinking_budgets.as_ref());
+                if budget > 0 {
+                    additional.insert(
+                        "thinking_config".to_string(),
+                        serde_json::json!({ "thinking_budget": budget }),
+                    );
+                }
+            }
+            Some("ollama") | None => {
+                // Generic fallback. Local Ollama models vary;
+                // pass the level under a conventional key.
+                additional.insert(
+                    "reasoning_level".to_string(),
+                    serde_json::to_value(level).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Some(_) => {
+                // Unknown provider — fall back to generic key.
+                additional.insert(
+                    "reasoning_level".to_string(),
+                    serde_json::to_value(level).unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+    }
+
+    // ----- headers (provider-agnostic) -----
+    if !opts.headers.is_empty() {
+        if let Ok(v) = serde_json::to_value(&opts.headers) {
+            additional.insert("headers".to_string(), v);
+        }
+    }
+
+    // ----- metadata (provider-agnostic) -----
+    if !opts.metadata.is_empty() {
+        additional.insert(
+            "metadata".to_string(),
+            serde_json::Value::Object(
+                opts.metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
+    }
+
+    if additional.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(additional))
+    }
+}
+
+/// Map our `ThinkingLevel` enum to OpenAI Responses `reasoning.
+/// effort` strings ("low" | "medium" | "high"). `Off` → None
+/// (no reasoning key in the request).
+///
+/// Pi's `Minimal` / `Xhigh` are clamped to the nearest OpenAI
+/// effort since OpenAI's API only accepts the three.
+fn thinking_level_to_openai_effort(level: super::types::ThinkingLevel) -> Option<&'static str> {
+    use super::types::ThinkingLevel as TL;
+    match level {
+        TL::Off => None,
+        TL::Minimal | TL::Low => Some("low"),
+        TL::Medium => Some("medium"),
+        TL::High | TL::Xhigh => Some("high"),
+    }
+}
+
+/// Token budget for a thinking level. Reads from the caller's
+/// `ThinkingBudgets` if provided, falling back to defaults
+/// reasonable for token-budget reasoning models (Anthropic
+/// budget mode, Gemini 2.x).
+///
+/// Defaults match the rough scale pi uses (`providers/simple-
+/// options.ts:33-...`): minimal 1024, low 2048, medium 4096,
+/// high 16384. `Off` returns 0 — caller skips the key entirely.
+fn budget_for_level(
+    level: super::types::ThinkingLevel,
+    budgets: Option<&super::types::ThinkingBudgets>,
+) -> u32 {
+    use super::types::ThinkingLevel as TL;
+    match level {
+        TL::Off => 0,
+        TL::Minimal => budgets.and_then(|b| b.minimal).unwrap_or(1024),
+        TL::Low => budgets.and_then(|b| b.low).unwrap_or(2048),
+        TL::Medium => budgets.and_then(|b| b.medium).unwrap_or(4096),
+        TL::High | TL::Xhigh => budgets.and_then(|b| b.high).unwrap_or(16384),
     }
 }
 
@@ -617,5 +783,148 @@ mod tests {
             }
         }
         assert!(found_error, "empty messages must produce an Error event");
+    }
+
+    // ============================================================
+    // Per-provider reasoning mapper tests
+    // ============================================================
+
+    use crate::agent::agent_loop::stream::StreamOptions;
+    use crate::agent::agent_loop::tool::AbortSignal;
+    use crate::agent::agent_loop::types::{ThinkingBudgets, ThinkingLevel};
+
+    fn opts_with_reasoning(level: ThinkingLevel) -> StreamOptions {
+        let mut o = StreamOptions::from_signal(AbortSignal::new());
+        o.reasoning = Some(level);
+        o
+    }
+
+    /// Anthropic gets `thinking: { type: "enabled", budget_tokens
+    /// }`. Verifies the budget defaults are sane for each level.
+    #[test]
+    fn anthropic_reasoning_maps_to_thinking_budget() {
+        let opts = opts_with_reasoning(ThinkingLevel::Medium);
+        let v = build_provider_additional_params(Some("anthropic"), &opts).unwrap();
+        assert_eq!(v["thinking"]["type"], "enabled");
+        assert_eq!(v["thinking"]["budget_tokens"], 4096);
+    }
+
+    /// Off level → no thinking key at all (Anthropic).
+    #[test]
+    fn anthropic_off_omits_thinking_key() {
+        let opts = opts_with_reasoning(ThinkingLevel::Off);
+        let v = build_provider_additional_params(Some("anthropic"), &opts);
+        assert!(v.is_none(), "Off should produce empty additional_params");
+    }
+
+    /// Caller-supplied budgets override the defaults.
+    #[test]
+    fn anthropic_respects_caller_budget_override() {
+        let mut opts = opts_with_reasoning(ThinkingLevel::High);
+        opts.thinking_budgets = Some(ThinkingBudgets {
+            high: Some(32_000),
+            ..Default::default()
+        });
+        let v = build_provider_additional_params(Some("anthropic"), &opts).unwrap();
+        assert_eq!(v["thinking"]["budget_tokens"], 32_000);
+    }
+
+    /// OpenAI Responses (and openai-compat: deepseek/glm/custom)
+    /// get `reasoning: { effort: low|medium|high }`.
+    #[test]
+    fn openai_reasoning_maps_to_effort() {
+        for (level, expected) in [
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+        ] {
+            let opts = opts_with_reasoning(level);
+            let v = build_provider_additional_params(Some("openai"), &opts).unwrap();
+            assert_eq!(
+                v["reasoning"]["effort"], expected,
+                "level {level:?} should map to {expected}"
+            );
+        }
+    }
+
+    /// DeepSeek, GLM, OpenRouter, Custom share OpenAI's
+    /// effort-based reasoning shape.
+    #[test]
+    fn openai_compat_providers_share_effort_shape() {
+        let opts = opts_with_reasoning(ThinkingLevel::Medium);
+        for provider in ["deepseek", "glm", "custom", "openrouter"] {
+            let v = build_provider_additional_params(Some(provider), &opts).unwrap();
+            assert_eq!(
+                v["reasoning"]["effort"], "medium",
+                "provider {provider} should use effort=medium"
+            );
+        }
+    }
+
+    /// Minimal clamps to "low"; Xhigh clamps to "high" (OpenAI
+    /// API only accepts 3 levels).
+    #[test]
+    fn openai_clamps_unsupported_levels() {
+        let opts_min = opts_with_reasoning(ThinkingLevel::Minimal);
+        let v = build_provider_additional_params(Some("openai"), &opts_min).unwrap();
+        assert_eq!(v["reasoning"]["effort"], "low");
+
+        let opts_x = opts_with_reasoning(ThinkingLevel::Xhigh);
+        let v = build_provider_additional_params(Some("openai"), &opts_x).unwrap();
+        assert_eq!(v["reasoning"]["effort"], "high");
+    }
+
+    /// OpenAI Off → omits the reasoning key entirely.
+    #[test]
+    fn openai_off_omits_reasoning_key() {
+        let opts = opts_with_reasoning(ThinkingLevel::Off);
+        let v = build_provider_additional_params(Some("openai"), &opts);
+        assert!(v.is_none());
+    }
+
+    /// Gemini uses `thinking_config: { thinking_budget }`
+    /// (token-budget shape).
+    #[test]
+    fn gemini_reasoning_maps_to_thinking_config() {
+        let opts = opts_with_reasoning(ThinkingLevel::High);
+        let v = build_provider_additional_params(Some("gemini"), &opts).unwrap();
+        assert_eq!(v["thinking_config"]["thinking_budget"], 16384);
+    }
+
+    /// Headers and metadata pass through under conventional
+    /// keys regardless of provider.
+    #[test]
+    fn headers_and_metadata_pass_through_for_all_providers() {
+        let mut opts = StreamOptions::from_signal(AbortSignal::new());
+        opts.headers
+            .insert("X-Tenant".to_string(), "acme".to_string());
+        opts.metadata
+            .insert("user_id".to_string(), serde_json::json!("u-42"));
+        for provider in ["anthropic", "openai", "gemini", "ollama", "unknown"] {
+            let v = build_provider_additional_params(Some(provider), &opts).unwrap();
+            assert_eq!(v["headers"]["X-Tenant"], "acme", "provider {provider}");
+            assert_eq!(v["metadata"]["user_id"], "u-42", "provider {provider}");
+        }
+    }
+
+    /// No reasoning, no headers, no metadata → None (caller
+    /// skips additional_params entirely).
+    #[test]
+    fn empty_options_produces_none() {
+        let opts = StreamOptions::from_signal(AbortSignal::new());
+        assert!(build_provider_additional_params(Some("anthropic"), &opts).is_none());
+        assert!(build_provider_additional_params(None, &opts).is_none());
+    }
+
+    /// Unknown provider falls back to the generic
+    /// `reasoning_level` key (debugging aid; rig provider impl
+    /// may or may not honor).
+    #[test]
+    fn unknown_provider_uses_generic_key() {
+        let opts = opts_with_reasoning(ThinkingLevel::High);
+        let v = build_provider_additional_params(Some("future-provider"), &opts).unwrap();
+        assert!(v.get("reasoning_level").is_some());
+        assert!(v.get("reasoning").is_none());
+        assert!(v.get("thinking").is_none());
     }
 }

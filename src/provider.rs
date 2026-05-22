@@ -640,33 +640,58 @@ impl AnyAgent {
         &self,
         tools: Vec<rig::completion::ToolDefinition>,
     ) -> crate::agent::agent_loop::StreamFn {
-        use crate::agent::agent_loop::rig_stream_fn_from_model;
+        use crate::agent::agent_loop::rig_stream_fn_from_model_with_provider;
         let chunk_timeout = self.chunk_timeout;
+        let provider = Some(self.provider_name().to_string());
         match &self.inner {
-            AnyAgentInner::OpenRouter(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::OpenAI(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::Anthropic(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::Gemini(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::DeepSeek(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::Glm(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::Ollama(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
-            AnyAgentInner::Custom(a) => {
-                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
-            }
+            AnyAgentInner::OpenRouter(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::OpenAI(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::Anthropic(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::Gemini(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::DeepSeek(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::Glm(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::Ollama(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
+            AnyAgentInner::Custom(a) => rig_stream_fn_from_model_with_provider(
+                (*a.model).clone(),
+                tools.clone(),
+                Some(chunk_timeout),
+                provider,
+            ),
         }
     }
 }

@@ -64,7 +64,8 @@ pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 pub use retry::retrying_stream_fn;
 pub use rig_stream::{wrap_rig_stream, wrap_streamed_assistant};
 pub use rig_stream_factory::{
-    loop_tool_to_rig_definition, rig_stream_fn_from_model, value_to_rig_message,
+    build_provider_additional_params, loop_tool_to_rig_definition, rig_stream_fn_from_model,
+    rig_stream_fn_from_model_with_provider, value_to_rig_message,
 };
 pub use rig_tool::RigToolAdapter;
 pub use run::{LoopError, run_agent_loop, run_agent_loop_continue, run_loop};
