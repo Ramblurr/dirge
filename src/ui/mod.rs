@@ -3422,48 +3422,36 @@ pub async fn run_interactive(
                 // (MCP server stderr, future plugin warnings,
                 // etc.). Render through the standard pipeline so
                 // it inherits wrap / scroll / theming semantics.
+                // Single chokepoint: write_outside_chamber closes
+                // any open tool chamber first, then writes. Review
+                // #7: sanitize control bytes at the receiver too
+                // so a future producer that forgets can't smuggle
+                // ANSI into the chat.
                 use crate::ui::notifications::Notification;
-                close_tool_chamber_if_open(
-                    &mut renderer,
-                    &mut last_tool_name,
-                    &mut tool_chamber_open,
-                )?;
-                // Review #7: sanitize at the RECEIVER, not just at
-                // the producer. The MCP forwarder already strips
-                // controls before sending, but future producers
-                // (plugin notifications, background-task warnings)
-                // may forget. One sanitize call here makes the
-                // contract un-bypassable: nothing leaves this arm
-                // to `write_line` carrying escape bytes.
                 let policy = crate::ui::ansi::StripPolicy::KEEP_NEWLINE;
-                match notif {
+                let (text, color) = match notif {
                     Notification::McpLog { server, line } => {
                         let safe_server = crate::ui::ansi::strip_controls(&server, policy);
                         let safe_line = crate::ui::ansi::strip_controls(&line, policy);
-                        renderer.write_line(
-                            &format!("[mcp:{}] {}", safe_server, safe_line),
-                            theme::dim(),
-                        )?;
+                        (format!("[mcp:{}] {}", safe_server, safe_line), theme::dim())
                     }
                     Notification::Info(line) => {
-                        renderer.write_line(
-                            &crate::ui::ansi::strip_controls(&line, policy),
-                            c_agent(),
-                        )?;
+                        (crate::ui::ansi::strip_controls(&line, policy), c_agent())
                     }
                     Notification::Warn(line) => {
-                        renderer.write_line(
-                            &crate::ui::ansi::strip_controls(&line, policy),
-                            theme::warn(),
-                        )?;
+                        (crate::ui::ansi::strip_controls(&line, policy), theme::warn())
                     }
                     Notification::Error(line) => {
-                        renderer.write_line(
-                            &crate::ui::ansi::strip_controls(&line, policy),
-                            c_error(),
-                        )?;
+                        (crate::ui::ansi::strip_controls(&line, policy), c_error())
                     }
-                }
+                };
+                write_outside_chamber(
+                    &mut renderer,
+                    &mut last_tool_name,
+                    &mut tool_chamber_open,
+                    &text,
+                    color,
+                )?;
                 renderer.render_viewport()?;
                 renderer.draw_bottom(
                     &input,
@@ -3520,21 +3508,19 @@ pub async fn run_interactive(
                     renderer.write_line("", Color::White)?;
                     agent_line_started = false;
                 }
-                // Close any open tool chamber FIRST so the lifecycle
-                // trailer doesn't land between the chamber TOP and
-                // its body — the same shape of bug fixed earlier
-                // for permission alerts + `allowed …` confirmation
-                // lines. A `task` ToolCall paints the chamber TOP,
-                // the background runner fires `LifecycleEvent::
-                // Started` almost immediately, and without this
-                // close the `[task abcd1234 started]` row appeared
-                // INSIDE the open chamber rather than after it.
-                close_tool_chamber_if_open(
+                // Use the single chokepoint so the lifecycle
+                // trailer can't land inside an open chamber
+                // (a `task` ToolCall paints chamber TOP, then
+                // the runner fires `LifecycleEvent::Started`
+                // almost immediately — write_line directly would
+                // paint between the TOP and the body).
+                write_outside_chamber(
                     &mut renderer,
                     &mut last_tool_name,
                     &mut tool_chamber_open,
+                    &label,
+                    resolve_color(color, cli.no_color),
                 )?;
-                renderer.write_line(&label, resolve_color(color, cli.no_color))?;
                 renderer.render_viewport()?;
                 renderer.draw_bottom(
                     &input,
@@ -4137,12 +4123,50 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
     }
 }
 
+/// Write a line of text that must NOT land inside an open tool
+/// chamber. Closes the chamber first if any signal indicates one
+/// is open. This is the ONE entry point every tokio::select! arm
+/// should use when its output belongs "around" tool execution
+/// rather than "inside" it: lifecycle trailers, notifications,
+/// permission alerts, errors, interjection markers, "allowed …"
+/// confirmations, agent text that's not part of a tool result.
+///
+/// Structural intent — the X-inside-chamber bug has shipped at
+/// least four times (alert-in-chamber, allowed-line-in-chamber,
+/// banner-in-chamber, lifecycle-in-chamber). Each fix added
+/// `close_tool_chamber_if_open(…)` + `renderer.write_line(…)`
+/// at one specific site. This helper bundles both into one call
+/// so a NEW arm that wants to print text outside the chamber
+/// can't forget the close — using `renderer.write_line` directly
+/// inside an arm is now the suspicious choice, not the default.
+///
+/// Chamber-row paint paths (`render_tool_output`, alert frame
+/// rows, chamber TOP banner, panel sections) deliberately paint
+/// INSIDE a chamber/box and continue to call
+/// `renderer.write_line` directly. The distinction is whether
+/// the caller WANTS the chamber to be closed first.
+pub(crate) fn write_outside_chamber(
+    renderer: &mut Renderer,
+    last_tool_name: &mut Option<String>,
+    tool_chamber_open: &mut bool,
+    text: &str,
+    color: Color,
+) -> anyhow::Result<()> {
+    close_tool_chamber_if_open(renderer, last_tool_name, tool_chamber_open)?;
+    renderer.write_line(text, color)?;
+    Ok(())
+}
+
 /// Close the in-flight tool chamber if one is open. Used at every
 /// site that fires without going through `render_tool_output` (which
 /// closes the chamber itself): permission alerts, agent errors,
 /// interjections, fresh `ToolCall` events when the previous chamber
 /// wasn't terminated by a `ToolResult`. Idempotent — calling twice
 /// emits one bottom border at most.
+///
+/// Prefer `write_outside_chamber` for the common case of "close
+/// chamber, then write one line"; that helper bundles both steps
+/// so the close can't be forgotten.
 fn close_tool_chamber_if_open(
     renderer: &mut Renderer,
     last_tool_name: &mut Option<String>,
@@ -4809,6 +4833,40 @@ mod tests {
         close_tool_chamber_if_open(&mut renderer, &mut name, &mut open).unwrap();
         assert!(name.is_none());
         assert!(!open);
+    }
+
+    /// Structural test: `write_outside_chamber` closes any open
+    /// chamber FIRST, then writes the requested line. The chamber
+    /// state flags are cleared regardless of which signal was
+    /// raised — same semantics as a manual `close_tool_chamber_if_open`
+    /// followed by `renderer.write_line`, just bundled so future
+    /// tokio::select! arms can't ship the X-inside-chamber bug by
+    /// forgetting the close call.
+    #[test]
+    fn write_outside_chamber_closes_chamber_first() {
+        let mut renderer = Renderer::new().expect("renderer");
+        // Flag-only open (the regression case from past bug
+        // reports).
+        let mut name: Option<String> = None;
+        let mut open = true;
+        write_outside_chamber(&mut renderer, &mut name, &mut open, "hello", Color::White).unwrap();
+        assert!(!open, "chamber must be closed");
+        assert!(name.is_none());
+
+        // Name-only open (legacy signal).
+        let mut name: Option<String> = Some("read".to_string());
+        let mut open = false;
+        write_outside_chamber(&mut renderer, &mut name, &mut open, "hi", Color::White).unwrap();
+        assert!(name.is_none());
+        assert!(!open);
+
+        // No chamber open — write_outside_chamber still works
+        // (idempotent close, then write).
+        let mut name: Option<String> = None;
+        let mut open = false;
+        write_outside_chamber(&mut renderer, &mut name, &mut open, "plain", Color::White).unwrap();
+        // No assertion on state — just verifying it doesn't panic
+        // / error.
     }
 
     /// Tool-result body collapse: long output truncates at
