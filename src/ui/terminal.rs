@@ -18,13 +18,22 @@ use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen};
 /// them, but the race is real and the outcome is timing-dependent.
 pub(crate) static EVENT_READER_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Set by the input-reader background thread immediately before it
+/// exits its loop. `TerminalGuard::drop` polls this so it can
+/// proceed to the CPR-sync sentinel the moment the reader is gone,
+/// rather than waiting on a hardcoded sleep that under-estimates
+/// the worst case (reader stuck in `event::poll`) and over-estimates
+/// the common case (reader exits within a few ms).
+pub(crate) static EVENT_READER_EXITED: AtomicBool = AtomicBool::new(false);
+
 pub struct TerminalGuard;
 
 impl TerminalGuard {
     pub fn new() -> std::io::Result<Self> {
-        // Reset the shutdown flag in case the binary previously held a
+        // Reset both flags in case the binary previously held a
         // guard in the same process (test harness, embedded use).
         EVENT_READER_SHUTDOWN.store(false, Ordering::Relaxed);
+        EVENT_READER_EXITED.store(false, Ordering::Relaxed);
         let mut stdout = std::io::stdout();
         stdout.execute(EnterAlternateScreen)?;
         stdout.execute(Clear(ClearType::All))?;
@@ -46,14 +55,15 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        // Signal the background event-reader thread to exit. It picks
-        // this up at the next `event::poll` tick (50ms) and releases
-        // crossterm's internal mutex. Wait briefly for the reader to
-        // actually quiesce — otherwise it races with our CPR sync
-        // for stdin bytes (crossterm's parser silently consumes the
-        // reply, our libc::read times out waiting for it).
+        // Signal the background event-reader thread to exit. It
+        // picks this up at the next `event::poll` tick (50ms) and
+        // sets `EVENT_READER_EXITED` immediately before returning.
+        // Wait on that flag (tight poll, 2ms granularity) so we
+        // proceed to the CPR sync the moment the reader is gone —
+        // not before (would race for stdin bytes) and not after
+        // (would burn unnecessary shutdown time on a fast path).
         EVENT_READER_SHUTDOWN.store(true, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(60));
+        wait_for_reader_exit(Duration::from_millis(200));
         let mut stdout = std::io::stdout();
 
         // === Phase 1: tell the terminal to stop reporting things ===
@@ -109,6 +119,22 @@ impl Drop for TerminalGuard {
         // theme depended on it being visible.
         let _ = stdout.write_all(b"\x1b[?25h");
         let _ = stdout.flush();
+    }
+}
+
+/// Block until the input-reader background thread sets
+/// `EVENT_READER_EXITED`, or `budget` expires. Tight-poll (2ms
+/// granularity) so the common case — reader exits within a few ms
+/// of seeing the shutdown flag — incurs near-zero shutdown latency,
+/// while the worst case (reader stuck somewhere in crossterm
+/// internals, OS scheduling delay) is bounded.
+fn wait_for_reader_exit(budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    while !EVENT_READER_EXITED.load(Ordering::Acquire) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 

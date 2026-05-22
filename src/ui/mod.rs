@@ -839,6 +839,14 @@ pub async fn run_interactive(
                 _ => {}
             }
         }
+        // Tell `TerminalGuard::drop` we've actually exited so it can
+        // proceed past the wait barrier without sleeping on a
+        // timeout. Release-store paired with the guard's
+        // Acquire-load gives a clean happens-before relationship —
+        // by the time the guard observes `true`, every byte this
+        // thread consumed from crossterm's internal buffer is
+        // visible to subsequent reads.
+        crate::ui::terminal::EVENT_READER_EXITED.store(true, std::sync::atomic::Ordering::Release);
     });
 
     loop {
