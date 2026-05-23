@@ -100,6 +100,53 @@ pub fn strip_controls_compact(s: &str, policy: StripPolicy) -> CompactString {
     CompactString::from(out)
 }
 
+/// Strip ANSI CSI escape sequences (`\x1b[…m` and friends) from `s`,
+/// returning a clean printable string. Used by clipboard / selection
+/// paths: the renderer bakes SGR codes into `LineEntry::text` for
+/// inline-styled markdown (see markdown.rs:291), and we don't want
+/// the user copying `\x1b[31mbold\x1b[0m` into their clipboard.
+///
+/// Mirrors the CSI-skip loop in `wrap::visible_width` (line 37) so
+/// the two stay consistent. Final-byte range matches the ECMA-48 CSI
+/// terminator set (0x40..=0x7E) so non-SGR sequences (cursor moves,
+/// scroll regions) also strip cleanly — anything a misbehaving
+/// producer might leave behind in the buffer.
+pub fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // CSI introducer. Skip to (and past) the final byte in
+            // the 0x40..=0x7E range.
+            let mut j = i + 2;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            i = j.saturating_add(1).min(bytes.len());
+            continue;
+        }
+        // Single ESC not followed by `[` — drop it alone to be
+        // safe (could be an OSC/DCS start; better not to copy).
+        if bytes[i] == 0x1b {
+            i += 1;
+            continue;
+        }
+        // UTF-8 step.
+        let step = match bytes[i] {
+            b if b < 0x80 => 1,
+            b if b < 0xC0 => 1,
+            b if b < 0xE0 => 2,
+            b if b < 0xF0 => 3,
+            _ => 4,
+        };
+        let end = (i + step).min(bytes.len());
+        out.push_str(&s[i..end]);
+        i = end;
+    }
+    out
+}
+
 fn keep_char(c: char, policy: StripPolicy) -> bool {
     let cp = c as u32;
     if cp == 0x0A {
@@ -155,6 +202,49 @@ mod tests {
                 "C1 CSI survived policy {policy:?}: {out:?}"
             );
         }
+    }
+
+    #[test]
+    fn strip_ansi_removes_sgr_sequences_keeps_payload() {
+        let s = "hello \x1b[31mred\x1b[0m world";
+        assert_eq!(strip_ansi(s), "hello red world");
+    }
+
+    #[test]
+    fn strip_ansi_handles_consecutive_and_nested_escapes() {
+        let s = "\x1b[1m\x1b[31mbold-red\x1b[0m\x1b[0m";
+        assert_eq!(strip_ansi(s), "bold-red");
+    }
+
+    #[test]
+    fn strip_ansi_drops_lone_esc() {
+        // ESC not followed by `[` — drop it on its own to keep the
+        // clipboard payload safe (could be the head of an OSC/DCS).
+        let s = "a\x1bb";
+        assert_eq!(strip_ansi(s), "ab");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_unicode_payload() {
+        let s = "\x1b[32m日本語\x1b[0m 🚀";
+        assert_eq!(strip_ansi(s), "日本語 🚀");
+    }
+
+    #[test]
+    fn strip_ansi_handles_non_sgr_csi() {
+        // Cursor moves and scroll regions also end in a 0x40..=0x7E
+        // final byte; the helper handles them too.
+        let s = "before\x1b[2;5Hafter\x1b[Kend";
+        assert_eq!(strip_ansi(s), "beforeafterend");
+    }
+
+    #[test]
+    fn strip_ansi_handles_truncated_escape() {
+        // Trailing ESC with nothing after it (truncated stream).
+        // Drop trailing bytes safely.
+        let s = "abc\x1b[31";
+        // No final byte → we consume to end of input.
+        assert_eq!(strip_ansi(s), "abc");
     }
 
     #[test]

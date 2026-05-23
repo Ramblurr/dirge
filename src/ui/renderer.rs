@@ -307,11 +307,22 @@ impl Renderer {
             (Some(s), Some(e)) => (e, s),
             _ => return None,
         };
+        // Markdown rendering bakes SGR escapes into `LineEntry::text`
+        // (see markdown.rs:291 — inline emphasis / code spans embed
+        // `\x1b[…m` directly in the line text). The selection
+        // columns are user-perceived character offsets, NOT byte
+        // offsets into the escape-laden source — slicing the raw
+        // text would either land mid-escape or include the escape
+        // in the clipboard. Strip per-row first, then index into
+        // the cleaned form.
+        let row_clean = |i: usize| -> Option<Vec<char>> {
+            self.buffer
+                .get(i)
+                .map(|e| crate::ui::ansi::strip_ansi(&e.text).chars().collect())
+        };
         let mut result = String::new();
         if start.0 == end.0 {
-            // Single-row selection: substring from start.1 to end.1.
-            if let Some(entry) = self.buffer.get(start.0) {
-                let chars: Vec<char> = entry.text.chars().collect();
+            if let Some(chars) = row_clean(start.0) {
                 let lo = start.1.min(chars.len());
                 let hi = end.1.min(chars.len());
                 if lo < hi {
@@ -319,21 +330,19 @@ impl Renderer {
                 }
             }
         } else {
-            // Multi-row: tail of start row, full middle rows, head of end row.
-            if let Some(entry) = self.buffer.get(start.0) {
-                let chars: Vec<char> = entry.text.chars().collect();
+            if let Some(chars) = row_clean(start.0) {
                 let lo = start.1.min(chars.len());
                 result.extend(&chars[lo..]);
             }
             for i in (start.0 + 1)..end.0 {
                 result.push('\n');
-                if let Some(entry) = self.buffer.get(i) {
-                    result.push_str(&entry.text);
+                if let Some(chars) = row_clean(i) {
+                    let s: String = chars.into_iter().collect();
+                    result.push_str(&s);
                 }
             }
             result.push('\n');
-            if let Some(entry) = self.buffer.get(end.0) {
-                let chars: Vec<char> = entry.text.chars().collect();
+            if let Some(chars) = row_clean(end.0) {
                 let hi = end.1.min(chars.len());
                 result.extend(&chars[..hi]);
             }
@@ -1805,6 +1814,34 @@ mod tests {
         r.selection_start = Some((0, 0));
         r.selection_end = Some((0, 6)); // "café 🦀"
         assert_eq!(r.selected_text(), Some("café 🦀".to_string()));
+    }
+
+    /// Markdown rendering bakes SGR escapes into LineEntry::text;
+    /// the selection path must strip them before handing the
+    /// string to the clipboard. Columns reflect user-perceived
+    /// character offsets in the visible glyphs, not the
+    /// escape-laden source.
+    #[test]
+    fn selected_text_strips_ansi_escapes() {
+        // Visible text is "hello red world" (15 chars). The buffer
+        // line carries `\x1b[31m` around "red".
+        let mut r = fresh_with_text(&[]);
+        r.buffer.clear();
+        r.buffer.push(LineEntry {
+            text: CompactString::from("hello \x1b[31mred\x1b[0m world"),
+            color: Color::Reset,
+        });
+        r.selection_active = true;
+        // Select the full visible content (cols 0..15).
+        r.selection_start = Some((0, 0));
+        r.selection_end = Some((0, 15));
+        assert_eq!(r.selected_text(), Some("hello red world".to_string()));
+
+        // Substring selection lands on clean chars too —
+        // "red world" is cols 6..15 of the stripped text.
+        r.selection_end = Some((0, 15));
+        r.selection_start = Some((0, 6));
+        assert_eq!(r.selected_text(), Some("red world".to_string()));
     }
 
     /// `buffer_pos_at` clamps char_col to the line's length so dragging
