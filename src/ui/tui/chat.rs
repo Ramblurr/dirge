@@ -90,17 +90,39 @@ impl<'a> Widget for ChatPane<'a> {
 }
 
 /// Write `entry.text` into the chat row at `(x, y)`, clipped to
-/// `width` cells, styled with the entry's color.
+/// `width` cells, styled with the entry's color as a base. SGR
+/// escape sequences embedded in the text (bold / italic / inline
+/// colors emitted by markdown.rs) are parsed into ratatui Spans
+/// via the `ansi-to-tui` crate so they render with the right
+/// styling instead of appearing as literal `\x1b[1m...` text.
 fn paint_line(buf: &mut Buffer, x: u16, y: u16, width: u16, entry: &LineEntry) {
+    use ansi_to_tui::IntoText;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Widget;
+
     if width == 0 {
         return;
     }
-    let style = Style::default().fg(crossterm_to_ratatui(entry.color));
-    // ratatui's `set_stringn` clips at the requested width and
-    // returns the actual end position — exactly the semantics we
-    // need to keep the chat content from spilling into the ║
-    // border.
-    buf.set_stringn(x, y, entry.text.as_str(), width as usize, style);
+    let base_style = Style::default().fg(crossterm_to_ratatui(entry.color));
+
+    // Try to parse SGR escapes. On parse error (malformed input)
+    // fall back to plain set_stringn — better to show raw text
+    // than to drop the line silently.
+    match entry.text.as_str().into_text() {
+        Ok(text) => {
+            if let Some(line) = text.lines.into_iter().next() {
+                // Apply base style — Spans without their own fg
+                // inherit it; spans with fg keep theirs (patch is
+                // a merge, not an override).
+                let line = line.style(base_style);
+                let area = Rect::new(x, y, width, 1);
+                line.render(area, buf);
+            }
+        }
+        Err(_) => {
+            buf.set_stringn(x, y, entry.text.as_str(), width as usize, base_style);
+        }
+    }
 }
 
 /// Translate a crossterm color into ratatui's equivalent.
@@ -320,6 +342,44 @@ mod tests {
         };
         assert_eq!(read(row_top, 3), "L1 ", "top visible row should be L1");
         assert_eq!(read(row_bot, 3), "L24", "bottom visible row should be L24");
+    }
+
+    /// Lines containing SGR escapes (markdown's bold/italic/inline
+    /// colors) render as styled spans — not as raw `\x1b[1m...` chars.
+    #[test]
+    fn ansi_escapes_render_as_styled_spans() {
+        let layout = Layout::new(160, 30, 1);
+        let mut backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend.clone()).unwrap();
+        // markdown.rs emits this shape for inline emphasis.
+        let lines = vec![LineEntry {
+            text: "hello \x1b[1mbold\x1b[22m world".into(),
+            color: CC::White,
+        }];
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                f.render_widget(ChatPane::new(&layout, &lines, 0), area);
+            })
+            .unwrap();
+        backend = terminal.backend().clone();
+
+        // First chat row: read 17 chars starting at chat.x. Expect
+        // "hello bold world" — escape bytes stripped, NO raw \x1b
+        // appearing.
+        let row: String = (0..17)
+            .map(|i| {
+                backend
+                    .buffer()
+                    .cell((layout.chat.x + i, layout.chat.y))
+                    .unwrap()
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(row, "hello bold world ", "got {:?}", row);
+        // No literal escape chars survived.
+        assert!(!row.contains('\x1b'), "raw ESC bytes leaked into buffer");
     }
 
     /// crossterm → ratatui color translation preserves brightness.

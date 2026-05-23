@@ -67,6 +67,11 @@ crossterm = "0.29"
 # `default-features = false` + `crossterm` backend to share the
 # crossterm version already in this tree.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# Convert the embedded SGR escapes that markdown.rs bakes into chat
+# lines (\x1b[1m bold, \x1b[31m colored, etc.) into ratatui Spans at
+# paint time. Without this, ratatui's Buffer would render the escape
+# sequences as literal characters.
+ansi-to-tui = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "process", "fs", "io-util"] }
