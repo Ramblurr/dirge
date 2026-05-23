@@ -52,27 +52,37 @@ impl McpClientManager {
     }
 
     /// Reconnect a single MCP server by name using its original
-    /// config. Replaces any existing handle for that server. Returns
-    /// Err if the server isn't in the manager's config map or the
-    /// fresh connect attempt fails. McpTool instances already handed
-    /// out hold a `Peer<RoleClient>` clone that will continue
-    /// pointing at the dead transport — they need to be rebuilt
-    /// via a fresh `collect_tools` call after a successful
-    /// reconnect.
+    /// config. Updates the shared peer ref in place so existing
+    /// McpTool clones from that server pick up the new transport
+    /// transparently — no need to rebuild the tool registry.
+    /// Returns Err if the server isn't in the manager's config map
+    /// or the fresh connect attempt fails.
     ///
-    /// Wired by `/mcp reconnect <name>` (UI slash); auto-reconnect on
-    /// tool-call failure is a follow-up that requires sharing a
-    /// swappable Peer across handed-out McpTool instances.
+    /// Wired by `/mcp reconnect <name>` (UI slash) for the manual
+    /// case. McpTool also calls this implicitly on transport-class
+    /// failures (audit dirge-dvi auto-reconnect).
     #[allow(dead_code)]
     pub async fn reconnect(&mut self, name: &str) -> anyhow::Result<()> {
         let cfg = self.configs.get(name).cloned().ok_or_else(|| {
             anyhow::anyhow!("no config for MCP server '{name}' — was it registered at startup?")
         })?;
-        self.handles.retain(|h| h.server_name != name);
-        let handle = client::McpClientHandle::connect(name.to_string(), &cfg)
+        // Spawn the new connection BEFORE dropping the old handle so
+        // a connection failure leaves the old (dead) handle in place
+        // rather than orphaning the slot entirely.
+        let new_handle = client::McpClientHandle::connect(name.to_string(), &cfg)
             .await
             .map_err(|e| anyhow::anyhow!("reconnect to '{name}' failed: {e}"))?;
-        self.handles.push(handle);
+        let new_peer = new_handle.shared_peer().read().await.clone();
+
+        // Find the existing handle (if any) and update its shared
+        // peer in place so previously-handed-out McpTool clones see
+        // the new transport. Then replace the RunningService so the
+        // old child process is dropped.
+        if let Some(existing) = self.handles.iter().find(|h| h.server_name == name) {
+            existing.replace_peer(new_peer).await;
+        }
+        self.handles.retain(|h| h.server_name != name);
+        self.handles.push(new_handle);
         Ok(())
     }
 
@@ -83,8 +93,17 @@ impl McpClientManager {
     ) -> Vec<McpTool> {
         let mut all_tools = Vec::new();
         for handle in &self.handles {
-            let peer = handle.peer();
+            let peer = handle.shared_peer();
             let server_name = handle.server_name.clone();
+            let cfg = self
+                .configs
+                .get(&server_name)
+                .cloned()
+                .map(std::sync::Arc::new);
+            // Per-server reconnect lock — serializes self-reconnect
+            // attempts when multiple tool calls fail concurrently.
+            // Cloned across all McpTools for the same server.
+            let reconnect_lock = std::sync::Arc::new(tokio::sync::Mutex::new(0u64));
             match handle.list_tools().await {
                 Ok(tools) => {
                     for definition in tools {
@@ -92,6 +111,8 @@ impl McpClientManager {
                             server_name: server_name.clone(),
                             definition,
                             peer: peer.clone(),
+                            config: cfg.clone(),
+                            reconnect_lock: reconnect_lock.clone(),
                             permission: permission.clone(),
                             ask_tx: ask_tx.clone(),
                         });

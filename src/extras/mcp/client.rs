@@ -1,14 +1,28 @@
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 
-use rmcp::service::{RoleClient, RunningService, serve_client};
+use rmcp::service::{Peer, RoleClient, RunningService, serve_client};
 use tokio::process::{ChildStderr, Command};
+use tokio::sync::RwLock;
 
 use super::config::McpServerConfig;
+
+/// Shared, swappable peer reference for an MCP server. Cloned by
+/// every `McpTool` from the same server so that an auto-reconnect
+/// triggered by ANY tool call updates the peer for ALL tools.
+/// Previously each `McpTool` stored a direct `Peer<RoleClient>`
+/// clone, leaving them orphaned the moment the underlying transport
+/// died (audit dirge-dvi).
+pub type SharedPeer = Arc<RwLock<Peer<RoleClient>>>;
 
 pub struct McpClientHandle {
     pub server_name: String,
     pub running_service: RunningService<RoleClient, ()>,
+    /// The shared peer ref. Updated in place by `replace_peer`
+    /// when the manager reconnects, so already-handed-out McpTool
+    /// instances pick up the new peer transparently.
+    peer_ref: SharedPeer,
 }
 
 /// Upper bound on how long we'll wait for an MCP server to complete
@@ -72,9 +86,11 @@ impl McpClientHandle {
                 let running_service = serve_client((), transport).await.map_err(|e| {
                     anyhow::anyhow!("MCP connection failed for '{server_name}': {e}")
                 })?;
+                let peer = running_service.peer().clone();
                 Ok(Self {
                     server_name,
                     running_service,
+                    peer_ref: Arc::new(RwLock::new(peer)),
                 })
             }
             McpServerConfig::Url { url, headers } => {
@@ -86,21 +102,61 @@ impl McpClientHandle {
                 let running_service = serve_client((), transport).await.map_err(|e| {
                     anyhow::anyhow!("MCP HTTP connection failed for '{server_name}': {e}")
                 })?;
+                let peer = running_service.peer().clone();
                 Ok(Self {
                     server_name,
                     running_service,
+                    peer_ref: Arc::new(RwLock::new(peer)),
                 })
             }
         }
     }
 
+    /// Direct peer clone (legacy path). Prefer [`shared_peer`] in
+    /// new code so auto-reconnect updates flow through.
+    #[allow(dead_code)]
     pub fn peer(&self) -> rmcp::service::Peer<RoleClient> {
         self.running_service.peer().clone()
+    }
+
+    /// Shared, swappable peer ref. Cloning this `Arc` is cheap; the
+    /// inner peer is mutated in place when the server is
+    /// reconnected, so every cloned holder sees the fresh peer
+    /// on its next read.
+    pub fn shared_peer(&self) -> SharedPeer {
+        Arc::clone(&self.peer_ref)
+    }
+
+    /// Replace the inner peer with a fresh one. Called when the
+    /// manager (or a self-reconnecting McpTool) builds a new
+    /// connection — write-locks briefly, swaps, drops the lock.
+    /// Existing McpTool clones holding the same Arc see the new
+    /// peer on their next read.
+    pub async fn replace_peer(&self, new_peer: Peer<RoleClient>) {
+        let mut guard = self.peer_ref.write().await;
+        *guard = new_peer;
     }
 
     pub async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>, rmcp::ServiceError> {
         self.running_service.peer().list_all_tools().await
     }
+}
+
+/// Build a fresh `RunningService` for an existing server using its
+/// config. Used by the McpTool auto-reconnect path on transport
+/// failure: returns just the new peer; the caller swaps it into a
+/// `SharedPeer` and drops the old RunningService.
+///
+/// This is `pub` so the tool side can call it without owning a full
+/// `McpClientHandle`. Wraps `connect_inner` directly to skip the
+/// init-timeout layer (caller already times out the whole reconnect).
+pub async fn fresh_peer_for(
+    server_name: &str,
+    config: &McpServerConfig,
+) -> anyhow::Result<(Peer<RoleClient>, RunningService<RoleClient, ()>)> {
+    let handle = McpClientHandle::connect(server_name.to_string(), config).await?;
+    let peer = handle.running_service.peer().clone();
+    Ok((peer, handle.running_service))
 }
 
 /// Forward an MCP child's stderr line-by-line to dirge's tracing
