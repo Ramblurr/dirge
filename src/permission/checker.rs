@@ -100,10 +100,100 @@ impl PermissionChecker {
         mode: SecurityMode,
         working_dir: Option<std::path::PathBuf>,
     ) -> Self {
-        let default_action = config.default.unwrap_or(Action::Allow);
+        // M4 (dirge-ojn): default flipped Allow → Ask. Unconfigured
+        // tools now prompt the user instead of silently executing.
+        // Read-only tools that should NOT prompt get explicit Allow
+        // rules installed below (see `install_default_allow_rules`).
+        //
+        // Why: dirge previously defaulted every unmatched tool to
+        // Allow — e.g. `write` had no rules installed, so write to
+        // any cwd path executed silently. Combined with the bash
+        // redirect-target bug closed in M3 (fbcc09b), the practical
+        // posture was "anything runs unless an explicit rule says no",
+        // the opposite of what users expect from a coding agent.
+        //
+        // Mirrors maki's posture (`maki-agent/src/permissions.rs:199`:
+        // bash, write, edit, MCP all default to Ask; an explicit
+        // BUILTIN_ALLOW_RULES list opens specific safe tools) and
+        // opencode's (`evaluate.ts:14`: `return match ?? { action:
+        // "ask" }` — Ask is the universal fallback).
+        let default_action = config.default.unwrap_or(Action::Ask);
         let doom_loop_action = config.doom_loop.unwrap_or(Action::Ask);
 
         let mut rules: HashMap<String, Vec<(Pattern, Action)>> = HashMap::new();
+
+        // M4 (dirge-ojn): install the builtin-allow list FIRST so user
+        // rules added later (last-match-wins per check_path's
+        // `matched.last()`) can override specific patterns while the
+        // tool's overall posture stays Allow-by-default for safety.
+        //
+        // Example: user writes `read: { "/etc/**": "deny" }`. With the
+        // builtin already installed as `read: { "**": allow }`, the
+        // user's specific deny appends to the same Vec. On lookup the
+        // last matching pattern wins:
+        //   - `/etc/passwd` → both rules match → user's deny wins ✓
+        //   - `/tmp/safe.txt` → only `**` matches → builtin allow ✓
+        //
+        // Tools NOT in this list (write/edit/apply_patch/bash/webfetch/
+        // websearch/task/skill/memory) fall to the global default Ask
+        // unless the user installs explicit rules.
+        //
+        // Adapts maki's `BUILTIN_ALLOW_RULES`
+        // (`maki-agent/src/permissions.rs:16-24`) for dirge's tool set.
+        // Maki includes write/edit/multiedit in its allow list — a
+        // different posture choice that doesn't suit dirge given the
+        // audit history (C1/C8/etc.).
+        for tool in [
+            "read",
+            "glob",
+            "grep",
+            "find_files",
+            "list_dir",
+            "list_symbols",
+            "find_definition",
+            "find_callers",
+            "find_callees",
+            "get_symbol_body",
+            "repo_overview",
+            "lsp",
+            "write_todo_list", // Internal-only TODO tracking; no side effects
+            "task_status",     // Read-only status query for background tasks
+            "question",        // Interactive by definition; gating it just adds friction
+        ] {
+            rules
+                .entry(tool.to_string())
+                .or_default()
+                .push((pattern_for_tool(tool, "**"), Action::Allow));
+        }
+
+        // Helper: append a `ToolPerm` (Simple or Granular) onto a
+        // tool's rule vec. Used by both the legacy per-tool fields and
+        // the M2 `tools` map. The legacy fields are syntactic sugar
+        // for `tools.{name}` — same code path.
+        fn append_tool_perm(
+            rules: &mut HashMap<String, Vec<(Pattern, Action)>>,
+            tool_name: &str,
+            tp: &ToolPerm,
+        ) {
+            let entries = rules.entry(tool_name.to_string()).or_default();
+            match tp {
+                ToolPerm::Simple(action) => {
+                    entries.push((pattern_for_tool(tool_name, "*"), *action));
+                }
+                ToolPerm::Granular(map) => {
+                    for (pat, action) in map {
+                        entries.push((pattern_for_tool(tool_name, pat), *action));
+                    }
+                }
+            }
+        }
+
+        // Track which tools the user explicitly configured (legacy
+        // OR via `tools` map) so the bash / MCP default-installers
+        // below can decide whether to skip themselves.
+        let mut user_configured: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+
         for (tool_name, tool_perm) in [
             ("bash", &config.bash),
             ("read", &config.read),
@@ -135,51 +225,50 @@ impl PermissionChecker {
             ("find_callees", &config.find_callees),
             ("mcp_tool", &config.mcp_tool),
         ] {
-            let Some(tp) = tool_perm else { continue };
-            let mut entries = Vec::new();
-            match tp {
-                ToolPerm::Simple(action) => {
-                    entries.push((pattern_for_tool(tool_name, "*"), *action));
-                }
-                ToolPerm::Granular(map) => {
-                    for (pat, action) in map {
-                        entries.push((pattern_for_tool(tool_name, pat), *action));
-                    }
-                }
+            if let Some(tp) = tool_perm {
+                append_tool_perm(&mut rules, tool_name, tp);
+                user_configured.insert(tool_name);
             }
-            rules.insert(tool_name.to_string(), entries);
         }
 
         // M2 (dirge-cep): merge the unified `tools` map. New configs
-        // can declare rules for ANY tool name (including plugin / MCP
-        // / future tools) without extending `PermissionConfig`. If a
-        // tool is named in both the legacy per-field surface and the
-        // `tools` map, the map wins — it's the explicit, newer shape
-        // and the migration path is "move per-tool fields into
-        // tools". `mcp_tool` (and the other umbrella names) take the
-        // same syntax: `tools: { mcp_tool: { "mcp_tool:fs:*": "deny" } }`.
+        // declare rules for ANY tool name (including plugin / MCP /
+        // future tools) without extending `PermissionConfig`. Same
+        // append semantics as the legacy fields: tools-map rules are
+        // pushed after legacy rules so last-match-wins.
         if let Some(tools_map) = &config.tools {
             for (tool_name, tp) in tools_map {
-                let mut entries = Vec::new();
-                match tp {
-                    ToolPerm::Simple(action) => {
-                        entries.push((pattern_for_tool(tool_name, "*"), *action));
-                    }
-                    ToolPerm::Granular(map) => {
-                        for (pat, action) in map {
-                            entries.push((pattern_for_tool(tool_name, pat), *action));
-                        }
-                    }
+                append_tool_perm(&mut rules, tool_name, tp);
+                // Static lifetime needed for HashSet entry —
+                // restrict to the known tool name set; unknown tool
+                // names (plugin/MCP) don't gate the bash/MCP
+                // defaults below anyway.
+                if matches!(
+                    tool_name.as_str(),
+                    "bash" | "mcp_tool"
+                ) {
+                    user_configured.insert(match tool_name.as_str() {
+                        "bash" => "bash",
+                        "mcp_tool" => "mcp_tool",
+                        _ => unreachable!(),
+                    });
                 }
-                rules.insert(tool_name.clone(), entries);
             }
         }
 
-        if !rules.contains_key("bash") {
+        // Bash defaults: only install if the user didn't supply ANY
+        // bash rules (legacy or `tools` map). Bash's defaults are
+        // specific allow + deny patterns that don't compose well
+        // with arbitrary user rules — a `cargo *: deny` from the
+        // user shouldn't have to co-exist with the default
+        // `cargo build: allow`.
+        if !user_configured.contains("bash") {
             let mut defaults = Vec::new();
             for (pat, action) in crate::permission::default_bash_rules() {
                 defaults.push((pattern_for_tool("bash", pat), action));
             }
+            // Replace any builtin-allow entry (bash isn't in the
+            // builtin-allow list anyway, but be explicit).
             rules.insert("bash".to_string(), defaults);
         }
 
@@ -203,7 +292,7 @@ impl PermissionChecker {
         //
         // …or accept once and pick "allow always" for the same
         // effect via the session allowlist.
-        if !rules.contains_key("mcp_tool") {
+        if !user_configured.contains("mcp_tool") {
             rules.insert(
                 "mcp_tool".to_string(),
                 vec![(pattern_for_tool("mcp_tool", "*"), Action::Ask)],
@@ -825,6 +914,96 @@ mod tests {
         }
     }
 
+    /// M4 (dirge-ojn): the post-flip defaults.
+    /// - Read-only tools in the builtin-allow list don't prompt.
+    /// - Mutating / network / code-execution tools fall to the new
+    ///   global Ask default.
+    /// - The `--yolo` mode bypass (via `SecurityMode::Yolo`) still
+    ///   short-circuits everything (line 362 of `check_path`).
+    /// - An explicit user rule overrides the builtin-allow.
+    #[test]
+    fn m4_defaults_allow_safe_ask_dangerous() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp")),
+        );
+
+        // Builtin-allow: read-only tools don't prompt.
+        for tool in [
+            "read",
+            "glob",
+            "grep",
+            "find_files",
+            "list_dir",
+            "list_symbols",
+            "find_definition",
+            "find_callers",
+            "find_callees",
+            "get_symbol_body",
+            "repo_overview",
+            "lsp",
+            "write_todo_list",
+            "task_status",
+            "question",
+        ] {
+            let result = checker.check_path(tool, "/tmp/anything.rs");
+            assert!(
+                matches!(result, CheckResult::Allowed),
+                "builtin-allow tool {tool} should Allow without prompting; got {result:?}",
+            );
+        }
+
+        // Mutating / network / code-execution tools fall to Ask.
+        for tool in [
+            "write",
+            "edit",
+            "apply_patch",
+            "webfetch",
+            "websearch",
+            "task",
+            "skill",
+            "memory",
+        ] {
+            let result = checker.check_path(tool, "/tmp/anything.rs");
+            assert!(
+                matches!(result, CheckResult::Ask | CheckResult::Denied(_)),
+                "dangerous tool {tool} should Ask or Deny by default; got {result:?}",
+            );
+        }
+    }
+
+    /// Explicit user rules override the M4 builtin-allow list.
+    #[test]
+    fn m4_user_rule_overrides_builtin_allow() {
+        use crate::permission::ToolPerm;
+        use std::collections::HashMap;
+
+        let mut read_rules = HashMap::new();
+        read_rules.insert("/etc/**".to_string(), Action::Deny);
+        let config = PermissionConfig {
+            read: Some(ToolPerm::Granular(read_rules)),
+            ..Default::default()
+        };
+
+        let mut checker = PermissionChecker::new(
+            &config,
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp")),
+        );
+
+        // User's explicit deny wins over builtin Allow.
+        assert!(matches!(
+            checker.check_path("read", "/etc/passwd"),
+            CheckResult::Denied(_)
+        ));
+        // Other paths still hit builtin Allow.
+        assert!(matches!(
+            checker.check_path("read", "/tmp/safe.txt"),
+            CheckResult::Allowed
+        ));
+    }
+
     /// M2 (dirge-cep): the unified `tools` map at the top of
     /// `PermissionConfig` lets rules be declared for ANY tool name
     /// (including ones dirge doesn't ship per-tool struct fields
@@ -1264,15 +1443,22 @@ mod tests {
             SecurityMode::Standard,
             Some(std::path::PathBuf::from("/tmp")),
         );
-        checker.add_session_allowlist("read".to_string(), "src/*");
+        // M4 (dirge-ojn): `read` now has a builtin-allow rule
+        // (`**: allow`), so it'd match the nested path too and
+        // bypass the test's session-allowlist semantics. Use
+        // `write` instead — no builtin-allow, falls to the
+        // default Ask, so the session-allowlist contribution can
+        // be tested in isolation. The pattern semantics are
+        // identical between the two tools (both `is_path_tool`).
+        checker.add_session_allowlist("write".to_string(), "src/*");
 
         // One-segment hit from the session allowlist.
         assert!(matches!(
-            checker.check_path("read", "src/main.rs"),
+            checker.check_path("write", "src/main.rs"),
             CheckResult::Allowed
         ));
         // Nested path: not in allowlist, falls through to default Ask.
-        let nested = checker.check_path("read", "src/agent/main.rs");
+        let nested = checker.check_path("write", "src/agent/main.rs");
         assert!(
             matches!(nested, CheckResult::Ask),
             "src/* must not match nested path; got {:?}",

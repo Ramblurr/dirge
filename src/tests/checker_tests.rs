@@ -26,10 +26,14 @@ fn restrictive_makes_unconfigured_tool_ask() {
 }
 
 #[test]
-fn standard_allows_unknown_tool_with_default() {
+fn standard_asks_unknown_tool_with_default() {
+    // M4 (dirge-ojn): unconfigured tools now Ask by default (was
+    // Allow). The renamed test pins the new contract — anything
+    // dirge doesn't ship a builtin-allow rule for AND the user
+    // hasn't configured prompts the user.
     let mut checker = make_checker(SecurityMode::Standard);
     let result = checker.check("some_tool", "any input");
-    assert!(matches!(result, CheckResult::Allowed));
+    assert!(matches!(result, CheckResult::Ask));
 }
 
 #[test]
@@ -145,8 +149,12 @@ fn doom_loop_triggers_after_three_repeated_calls() {
 #[test]
 fn doom_loop_does_not_trigger_before_three() {
     let mut checker = make_checker(SecurityMode::Standard);
-    checker.check("bash", "ls");
-    let result = checker.check("bash", "ls");
+    // M4 (dirge-ojn): bare `ls` no longer matches the `ls **`
+    // default rule (which requires args) and falls to the new
+    // default Ask. Use a form that matches the allow rule so the
+    // doom-loop count, not the underlying action, drives the test.
+    checker.check("bash", "ls -la");
+    let result = checker.check("bash", "ls -la");
     assert!(matches!(result, CheckResult::Allowed));
 }
 
@@ -226,15 +234,21 @@ fn relative_path_escaping_cwd_is_external() {
     let escaped_file = escaped_dir.join("file.rs");
     std::fs::write(&escaped_file, "").unwrap();
 
+    // M4 (dirge-ojn): `read` has a builtin `**: allow` now, so the
+    // escape upgrade can't be tested through it (the builtin matches
+    // before the catch-all condition checks for `matched.is_empty()`).
+    // Use `write` instead — no builtin-allow, so the original F18
+    // semantics apply: in-tree write is Ask→Allow under Accept,
+    // external write is Ask (no ext_dir rule installed).
     let config = PermissionConfig {
-        read: Some(ToolPerm::Simple(Action::Ask)),
+        write: Some(ToolPerm::Simple(Action::Ask)),
         ..PermissionConfig::default()
     };
     let mut checker = PermissionChecker::new(&config, SecurityMode::Accept, Some(cwd.clone()));
 
     // In-tree relative path → still internal → auto-allow in Accept.
     std::fs::write(cwd.join("local.rs"), "").unwrap();
-    let internal = checker.check_path("read", "local.rs");
+    let internal = checker.check_path("write", "local.rs");
     assert!(
         matches!(internal, CheckResult::Allowed),
         "in-tree path should auto-allow in Accept: got {:?}",
@@ -243,7 +257,7 @@ fn relative_path_escaping_cwd_is_external() {
 
     // `../../../escaped/file.rs` escapes cwd → external → Ask
     // (no external_directory rule configured to allow it).
-    let escape = checker.check_path("read", "../../../escaped/file.rs");
+    let escape = checker.check_path("write", "../../../escaped/file.rs");
     assert!(
         matches!(escape, CheckResult::Ask),
         "escape attempt must surface as Ask in Accept; got {:?}",

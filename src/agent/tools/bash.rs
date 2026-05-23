@@ -787,12 +787,21 @@ mod tests {
     #[cfg(feature = "semantic-bash")]
     #[tokio::test]
     async fn redirect_target_allowed_when_write_permits() {
-        use crate::permission::{PermissionConfig, SecurityMode, checker::PermissionChecker};
+        use crate::permission::{
+            Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+        };
+        use std::collections::HashMap;
 
-        let config = PermissionConfig::default();
-        // Use the cwd-relative target so the external-path Ask
-        // upgrade doesn't fire. `target/test-out.txt` is inside
-        // any cargo-test invocation's working directory.
+        // M4 (dirge-ojn): `write` no longer defaults to Allow; it
+        // falls to the new global Ask. Install an explicit write
+        // allow rule for the test target so the post-M4 default
+        // doesn't turn this into a "no ask_tx → denied" failure.
+        let mut write_rules = HashMap::new();
+        write_rules.insert("**".to_string(), Action::Allow);
+        let config = PermissionConfig {
+            write: Some(ToolPerm::Granular(write_rules)),
+            ..Default::default()
+        };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
         let perm = std::sync::Arc::new(std::sync::Mutex::new(checker));
 
@@ -800,7 +809,7 @@ mod tests {
             check_bash_segments(&Some(perm), &None, "echo hi > target/test-out.txt").await;
         assert!(
             result.is_ok(),
-            "redirect to in-cwd target should pass; got {result:?}",
+            "redirect to an explicitly-allowed target should pass; got {result:?}",
         );
     }
 }
