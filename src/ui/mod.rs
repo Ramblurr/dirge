@@ -3974,6 +3974,42 @@ pub async fn run_interactive(
                 )?;
                 renderer.write_line(&format!("╰{}╯", bot_bar), c_perm())?;
 
+                // ui-redesign Phase 6: push the same prompt content
+                // into the [ALERT] frame at the bottom of the
+                // screen so the user sees the decision needed
+                // without having to scroll. The scroll-area chamber
+                // above stays for audit/history; this overlay is
+                // the actionable inline view.
+                {
+                    let safe_tool = sanitize_output(&ask_req.tool);
+                    let safe_input = sanitize_output(&ask_req.input);
+                    let mut overlay: Vec<(String, Color)> = Vec::new();
+                    overlay.push(("⚠ PERMISSION REQUIRED".to_string(), theme::perm()));
+                    overlay.push((format!("tool: {}", safe_tool), theme::perm()));
+                    overlay.push((format!("args: {}", safe_input), theme::perm()));
+                    overlay.push((
+                        "[y] allow once  [a] allow always  [n] deny  [ESC] abort"
+                            .to_string(),
+                        theme::accent(),
+                    ));
+                    renderer.set_alert_overlay(overlay);
+                    renderer.draw_bottom(
+                        &input,
+                        &with_queue(
+                            StatusLine::render(
+                                session,
+                                is_running,
+                                0,
+                                loop_label.as_deref(),
+                                context.current_prompt_name.as_deref(),
+                                perm_mode().as_deref(),
+                            ),
+                            interjection_queue.len(),
+                        ),
+                        is_running,
+                    )?;
+                }
+
                 let decision = loop {
                     tokio::select! {
                         Some(ev) = user_rx.recv() => {
@@ -4054,6 +4090,10 @@ pub async fn run_interactive(
                     _ => None,
                 };
                 let was_denied = matches!(decision, UserDecision::Deny);
+                // ui-redesign Phase 6: alert decided — clear the
+                // overlay so the [ALERT] frame swaps back to the
+                // input editor for the next user interaction.
+                renderer.clear_alert_overlay();
                 let _ = ask_req.reply.send(decision);
 
                 // Audit H10: cascading reject. When the user denies

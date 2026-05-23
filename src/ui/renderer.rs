@@ -160,6 +160,14 @@ pub struct Renderer {
     /// ui-redesign: idle-state info for the left panel. Painted when
     /// `subagent_status` is empty so the gutter never looks dead.
     left_panel_info: LeftPanelInfo,
+    /// ui-redesign Phase 6: when set, `draw_bottom` paints these
+    /// lines inside the [ALERT] frame INSTEAD of the input editor.
+    /// Used by permission prompts and questionnaire prompts so the
+    /// user can see the prompt without the input box obscuring it.
+    /// Cleared after the ask handler resolves. Each entry is
+    /// (text, color); painter centers text horizontally within the
+    /// frame's inner band.
+    alert_overlay: Option<Vec<(String, Color)>>,
     /// What the agent is doing — drives the bottom-left ASCII avatar.
     avatar_state: crate::ui::avatar::AvatarState,
     /// Animation flip; toggled by `tick_avatar()` so the avatar's
@@ -191,6 +199,7 @@ impl Renderer {
             panel_data: PanelData::default(),
             subagent_status: Vec::new(),
             left_panel_info: LeftPanelInfo::default(),
+            alert_overlay: None,
             avatar_state: crate::ui::avatar::AvatarState::Idle,
             avatar_tick: false,
         })
@@ -348,6 +357,27 @@ impl Renderer {
     /// gutter stays current.
     pub fn set_left_panel_info(&mut self, info: LeftPanelInfo) {
         self.left_panel_info = info;
+    }
+
+    /// ui-redesign Phase 6: set the alert overlay. While `Some`, the
+    /// `[ALERT]` frame contains the supplied lines instead of the
+    /// input editor. The ask handler builds the lines, pushes them
+    /// here on prompt-open, and calls `clear_alert_overlay` on
+    /// response.
+    ///
+    /// Lines are painted centered horizontally within the frame's
+    /// inner band. Caller is responsible for keeping line count
+    /// within `MAX_INPUT_VISIBLE_LINES` — taller overlays clip.
+    pub fn set_alert_overlay(&mut self, rows: Vec<(String, Color)>) {
+        self.alert_overlay = Some(rows);
+    }
+
+    pub fn clear_alert_overlay(&mut self) {
+        self.alert_overlay = None;
+    }
+
+    pub fn alert_overlay_active(&self) -> bool {
+        self.alert_overlay.is_some()
     }
 
     pub fn set_panel_data(&mut self, data: PanelData) {
@@ -1490,6 +1520,72 @@ impl Renderer {
         let display_chars: Vec<Vec<char>> =
             display_lines.iter().map(|s| s.chars().collect()).collect();
 
+        // ui-redesign Phase 6: when an alert overlay is active,
+        // paint its lines inside the frame's inner band instead of
+        // the input editor. The overlay covers `input_rows` rows
+        // (same vertical real estate as the input would have used);
+        // each line is centered horizontally between the side
+        // borders. The input area shows behind ║ ... ║ side borders
+        // either way — painter doesn't touch the editor itself.
+        if let Some(overlay) = &self.alert_overlay {
+            for row_offset in 0..visible_input_rows {
+                let row = input_top + row_offset as u16;
+                stdout.execute(MoveTo(0, row))?;
+                write!(stdout, "{}", " ".repeat(cols as usize))?;
+                // Side borders flush against the terminal edges.
+                stdout.execute(MoveTo(0, row))?;
+                write!(stdout, "{}", SetForegroundColor(dim_color))?;
+                write!(stdout, "║")?;
+                stdout.execute(MoveTo(cols.saturating_sub(1), row))?;
+                write!(stdout, "║")?;
+                write!(stdout, "{}", ResetColor)?;
+                // Overlay line for this row (if any).
+                if let Some((text, color)) = overlay.get(row_offset) {
+                    let inner_w = (cols as usize).saturating_sub(4);
+                    use unicode_width::UnicodeWidthStr;
+                    let dw = UnicodeWidthStr::width(text.as_str()).min(inner_w);
+                    let fill = inner_w.saturating_sub(dw);
+                    let left = fill / 2;
+                    stdout.execute(MoveTo(2 + left as u16, row))?;
+                    write!(stdout, "{}", SetForegroundColor(self.color(*color)))?;
+                    // Truncate text to inner_w by char-walking
+                    // display widths.
+                    use unicode_width::UnicodeWidthChar;
+                    let mut out = String::with_capacity(text.len());
+                    let mut used = 0usize;
+                    for ch in text.chars() {
+                        let w = ch.width().unwrap_or(0);
+                        if used + w > inner_w {
+                            break;
+                        }
+                        out.push(ch);
+                        used += w;
+                    }
+                    write!(stdout, "{}", out)?;
+                    write!(stdout, "{}", ResetColor)?;
+                }
+            }
+            // Paint avatar + status; skip the normal input render.
+            // Status row painter still runs below this guard.
+            stdout.execute(MoveTo(0, status_row))?;
+            stdout.flush()?;
+            // Avatar painted via existing path on next redraw cycle.
+            // For now skip the rest of draw_bottom and just paint
+            // status at the very end so callers' status text shows.
+            // Bail out of input painting + drop straight to status.
+            // We still need to paint status.
+            // Return after status paint below.
+            write!(stdout, "{}", " ".repeat(cols as usize))?;
+            stdout.execute(MoveTo(0, status_row))?;
+            write!(stdout, "{}", SetForegroundColor(dim_color))?;
+            // Truncate status to terminal width.
+            let status_trimmed: String = status.chars().take(cols as usize).collect();
+            write!(stdout, "{}", status_trimmed)?;
+            write!(stdout, "{}", ResetColor)?;
+            stdout.flush()?;
+            return Ok(());
+        }
+
         // Input rows + status row also center under the chat band so
         // the prompt + status visually align with the chat content
         // above.
@@ -1499,6 +1595,16 @@ impl Renderer {
             let vr_idx = first_visible_visual + row_offset;
             stdout.execute(MoveTo(0, row))?;
             write!(stdout, "{}", " ".repeat(cols as usize))?;
+            // ui-redesign: paint ║ side borders on every input row
+            // so the [ALERT] frame reads as a closed card. Borders
+            // are painted in theme dim so they recede behind the
+            // input text (theme accent / bold-glowed).
+            stdout.execute(MoveTo(0, row))?;
+            write!(stdout, "{}", SetForegroundColor(dim_color))?;
+            write!(stdout, "║")?;
+            stdout.execute(MoveTo(cols.saturating_sub(1), row))?;
+            write!(stdout, "║")?;
+            write!(stdout, "{}", ResetColor)?;
             stdout.execute(MoveTo(bottom_indent as u16, row))?;
             // Bold-glow the prompt indicator + input text so they
             // match the chat above. Without this the bottom area
