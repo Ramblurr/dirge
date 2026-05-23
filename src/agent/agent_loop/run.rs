@@ -1105,6 +1105,40 @@ mod tests {
         assert_eq!(user_message_ends, 0);
     }
 
+    /// Port of pi test 1291 ("should allow custom message types
+    /// as last message (caller responsibility)"). The
+    /// `run_agent_loop_continue` rejection is keyed on role ==
+    /// "assistant" only — any other role (user / toolResult /
+    /// custom / application-defined) is acceptable as the
+    /// continuation point. The caller's `convert_to_llm` is
+    /// responsible for translating non-LLM roles into something
+    /// the model can see (or filtering them).
+    #[tokio::test]
+    async fn test_continue_accepts_custom_last_message() {
+        // Pre-existing context with a custom-roled last message.
+        // run_agent_loop_continue should NOT error.
+        let mut ctx = empty_context();
+        ctx.messages.push(serde_json::json!({
+            "role": "custom",
+            "text": "Hook content",
+        }));
+
+        // Mock stream returns a final text response so the loop
+        // exits cleanly.
+        let factory = canned_factory(vec![text_response("ok")]);
+        let (tx, _rx) = mpsc::channel::<LoopEvent>(64);
+        let result =
+            run_agent_loop_continue(ctx, build_config(), AbortSignal::new(), &tx, &factory).await;
+
+        // Must NOT error — custom role is accepted.
+        let messages = result.expect("continue should accept custom last message");
+        // Only the new assistant turn is in new_messages
+        // (continue doesn't re-emit the existing context
+        // messages).
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role(), "assistant");
+    }
+
     // ============================================================
     // Phase 6 — regression tests for hardening paths
     // ============================================================

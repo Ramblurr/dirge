@@ -168,7 +168,7 @@ Each phase ships green tests + green build. Tests are ported directly
 from pi's `agent-loop.test.ts`. Each test name in this plan corresponds
 to a `it("should …")` in pi's file.
 
-### Phase 0 — Scaffolding (no behavior change)
+### Phase 0 — Scaffolding (no behavior change) ✅
 
 **Goal**: introduce the new types and the empty new-loop module
 behind a feature flag `new-loop`. Nothing uses them yet; default
@@ -190,7 +190,7 @@ build is unchanged.
 
 ---
 
-### Phase 1 — `streamAssistantResponse` analog
+### Phase 1 — `streamAssistantResponse` analog ✅
 
 **Goal**: single-turn LLM call wrapper around `rig::agent::Agent::prompt`
 that produces an `AssistantMessage`-equivalent + emits dirge events.
@@ -217,7 +217,7 @@ event vocabulary. Needs a mock rig agent for tests.
 
 ---
 
-### Phase 2 — Tool execution: sequential
+### Phase 2 — Tool execution: sequential ✅
 
 **Goal**: port `executeToolCallsSequential` + `prepareToolCall` +
 `executePreparedToolCall` + `finalizeExecutedToolCall`. Wires
@@ -242,7 +242,7 @@ validate → beforeToolCall → execute → afterToolCall).
 
 ---
 
-### Phase 3 — Tool execution: parallel + per-tool sequential override
+### Phase 3 — Tool execution: parallel + per-tool sequential override ✅
 
 **Goal**: port `executeToolCallsParallel`. Tools that declare
 `executionMode == "sequential"` (e.g. `bash`) force the whole batch
@@ -273,7 +273,7 @@ already are; verify).
 
 ---
 
-### Phase 4 — The loop itself (`runLoop`)
+### Phase 4 — The loop itself (`runLoop`) ✅
 
 **Goal**: port `runLoop` and `runAgentLoop` / `runAgentLoopContinue`.
 This is the keystone. After this phase the new-loop feature ships
@@ -308,7 +308,7 @@ phase 4.5 (separate commit) after baking.
 
 ---
 
-### Phase 4.5 — Integration: rig + dirge consumers → ported loop
+### Phase 4.5 — Integration: rig + dirge consumers → ported loop ✅
 
 **SCOPE CORRECTION**: The original 4.5 was wildly underscoped as
 "delete the old path." Flipping the default is actually a multi-
@@ -319,7 +319,7 @@ Each sub-phase ships green builds + green tests + a concrete
 integration validation. Order is roughly dependency-ordered;
 later ones can interleave once their inputs land.
 
-#### 4.5a — rig → StreamFn adapter
+#### 4.5a — rig → StreamFn adapter ✅
 
 **Goal**: build a `StreamFn` that wraps rig's single-turn API
 (`agent.prompt(history)` or equivalent) so the loop can drive a
@@ -337,7 +337,7 @@ own mock fixtures.
 **Risk**: medium. Rig's stream-event vocabulary needs mapping
 to our `StreamEvent` enum. Tool-call extraction is subtle.
 
-#### 4.5b — rig::Tool → LoopTool adapter
+#### 4.5b — rig::Tool → LoopTool adapter ✅
 
 **Goal**: a generic wrapper that takes any `Box<dyn rig::Tool>` and
 implements `LoopTool` on it. Every dirge tool (read / write / edit /
@@ -357,7 +357,7 @@ the LoopTool surface, verify identical output to the rig path.
 **Risk**: medium. rig::Tool's args/output types are generic;
 LoopTool uses `Value`. The adapter does the serde round-trip.
 
-#### 4.5c — LoopEvent → AgentEvent translation
+#### 4.5c — LoopEvent → AgentEvent translation ✅
 
 **Goal**: bridge the loop's event vocabulary to dirge's existing
 `AgentEvent`. The UI and ACP consume `AgentEvent`; until we
@@ -374,7 +374,7 @@ equivalent algorithmic input.
 
 **Risk**: low. Pure data translation. Easy to verify.
 
-#### 4.5d — Plugin slots → before/after tool hooks
+#### 4.5d — Plugin slots → before/after tool hooks ✅
 
 **Goal**: dirge's existing plugin hooks (`harness/block`,
 `harness/mutate-input`, `harness/replace-result`) become
@@ -391,7 +391,7 @@ tool sees mutated args end-to-end through the loop.
 **Risk**: medium. Plugin hooks fire from async closures; the
 PluginManager's locking pattern needs verification.
 
-#### 4.5e — interjection_queue → getSteeringMessages
+#### 4.5e — interjection_queue → getSteeringMessages ✅
 
 **Goal**: dirge's existing `interjection_queue` (in `ui/mod.rs`)
 becomes the source for `GetSteeringMessagesFn`.
@@ -406,7 +406,7 @@ the next turn boundary.
 
 **Risk**: low.
 
-#### 4.5f — runner.rs replacement (BEHIND a flag)
+#### 4.5f — runner.rs replacement (BEHIND a flag) ✅
 
 **Goal**: add a `--use-agent-loop` CLI flag (or config option) that
 routes a run through the new loop instead of the rig multi-turn
@@ -425,7 +425,7 @@ matches) for a canned scenario.
 Expected edge cases: agent_line_started state, chamber rendering,
 permission check signal threading.
 
-#### 4.5g — Recovery / retry under the new path
+#### 4.5g — Recovery / retry under the new path ✅
 
 **Goal**: wrap each `stream_assistant_response` call with the existing
 `recovery::classify_error` + Retry-After backoff. Verify auto-compact
@@ -439,7 +439,7 @@ on `ContextOverflow` works.
 
 **Risk**: medium.
 
-#### 4.5h — Flip default; delete old path
+#### 4.5h — Flip default; delete old path ✅
 
 **SCOPE CORRECTION (second pass)**: 4.5h-1 (ContextOverflow
 classification) shipped. The rest of "flip default" is genuinely
@@ -658,7 +658,7 @@ verification gate.
 
 ---
 
-### Phase 5 — Plugin hook wiring
+### Phase 5 — Plugin hook wiring ✅
 
 **Goal**: surface every pi hook to Janet plugins via the existing
 slot mechanism. Auto-applied at the right loop points.
@@ -688,7 +688,7 @@ on-tool-end hook → verify behavior on next turn).
 
 ---
 
-### Phase 6 — Recovery + interjection + abort under new loop
+### Phase 6 — Recovery + interjection + abort under new loop ✅
 
 **Goal**: make sure every existing dirge feature works under the new
 loop architecture. This is the long-tail hardening phase.
@@ -713,7 +713,7 @@ asserts identical observable behavior to the pre-port baseline.
 
 ---
 
-### Phase 7 — Custom message types (`CustomAgentMessages`)
+### Phase 7 — Custom message types (`CustomAgentMessages`) ✅
 
 **Goal**: pi allows app-defined non-LLM message variants
 (notifications, artifacts) that `convertToLlm` filters before sending
@@ -734,7 +734,7 @@ messages without polluting the LLM context.
 
 ---
 
-### Phase 8 — Polish, parity verification, deprecations
+### Phase 8 — Polish, parity verification, deprecations ✅
 
 **Goal**: every test in pi's `agent-loop.test.ts` passes its dirge
 counterpart. Deprecation cleanup.
