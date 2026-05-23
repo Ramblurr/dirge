@@ -423,8 +423,19 @@ impl LspManager {
             }
             if let TouchMode::AwaitPush { after, timeout } = mode {
                 let after = std::cmp::max(after, send_at);
-                if let Err(e) = entry.client.wait_for_push(path, after, timeout).await {
-                    tracing::debug!(server = %entry.server_id, path = %path.display(), "wait_for_push: {e}");
+                // B3-10 (audit fix): race push against textDocument/
+                // diagnostic pull so lazy servers (clojure-lsp,
+                // jdtls, clangd cold-start) still surface errors
+                // instead of reporting clean diagnostics on
+                // timeout. Pull silently falls back to push-only
+                // when unsupported; net behaviour for push-only
+                // servers is identical.
+                if let Err(e) = entry
+                    .client
+                    .wait_for_push_or_pull(path, after, timeout)
+                    .await
+                {
+                    tracing::debug!(server = %entry.server_id, path = %path.display(), "wait_for_push_or_pull: {e}");
                 }
             }
         }

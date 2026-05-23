@@ -288,6 +288,97 @@ impl LspClient {
         }
     }
 
+    /// B3-10 (audit fix): race the push-wait against a pull request to
+    /// `textDocument/diagnostic` (LSP 3.17). For servers that don't
+    /// push diagnostics on demand (clojure-lsp's lazy semantic check,
+    /// jdtls during cold-start, clangd before background indexing),
+    /// the push-only wait times out and the agent reports a clean
+    /// diagnostic block when errors actually exist. Pull diagnostics
+    /// give the agent an authoritative answer.
+    ///
+    /// On pull success the response's diagnostics are injected into
+    /// the same state.push that the notification handler uses, so
+    /// `diagnostics_for(path)` afterwards returns them transparently.
+    /// On pull failure (method not found, server doesn't support
+    /// 3.17, transport error) we fall back to the push-only wait —
+    /// no regression versus the prior behaviour. Opencode races the
+    /// same way (lsp/client.ts:540-582 `waitForDocumentDiagnostics`).
+    pub async fn wait_for_push_or_pull(
+        &self,
+        path: &Path,
+        after: Instant,
+        timeout: Duration,
+    ) -> Result<(), LspError> {
+        // Sequential: try the pull first with a short bound; if
+        // unsupported / transport error, fall back to push-only
+        // for the remaining time. Net behaviour for push-only
+        // servers is identical to the prior wait_for_push call.
+        // Pull-supporting servers (LSP 3.17) return an answer
+        // synchronously and we skip the push wait entirely.
+        let pull_started = Instant::now();
+        let pull_timeout = timeout.min(Duration::from_secs(3));
+        if let Ok(true) = self.try_pull_diagnostics(path, pull_timeout).await {
+            return Ok(());
+        }
+        // Pull either failed (method not found, transport error)
+        // or returned no useful info. Wait on push for whatever
+        // budget remains.
+        let elapsed = pull_started.elapsed();
+        let push_budget = timeout.saturating_sub(elapsed);
+        // If pull burned the full timeout, still give push at
+        // least a brief window (100ms) — better than instant-fail.
+        let push_budget = push_budget.max(Duration::from_millis(100));
+        self.wait_for_push(path, after, push_budget).await
+    }
+
+    /// Send a `textDocument/diagnostic` (LSP 3.17) pull request and
+    /// inject any returned items into the client's push state so
+    /// downstream callers see them via `diagnostics_for`. Returns
+    /// `Ok(true)` if the server responded with diagnostics (full or
+    /// unchanged), `Ok(false)` if the server responded with no items
+    /// or doesn't support pull. `Err` only for transport-level
+    /// failures the caller should surface.
+    async fn try_pull_diagnostics(&self, path: &Path, timeout: Duration) -> Result<bool, LspError> {
+        use serde_json::json;
+        let uri = crate::lsp::uri::path_to_file_uri_string(path);
+        let params = json!({
+            "textDocument": { "uri": uri },
+        });
+        // The reply shape can be one of several Document Diagnostic
+        // Report kinds; just deserialize to Value and pick `items`.
+        let resp: Result<serde_json::Value, _> = self
+            .rpc
+            .request("textDocument/diagnostic", params, timeout)
+            .await;
+        let value = match resp {
+            Ok(v) => v,
+            Err(_) => return Ok(false), // unsupported / errored — let push handle it
+        };
+        // Full report: { kind: "full", items: [...] }.
+        // Unchanged report: { kind: "unchanged", resultId: ... } —
+        // no new diagnostics, but successful response means "no
+        // errors right now" → return true so the caller doesn't
+        // block on push.
+        let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        if kind == "unchanged" {
+            return Ok(true);
+        }
+        let items: Vec<lsp_types::Diagnostic> = value
+            .get("items")
+            .and_then(|i| serde_json::from_value(i.clone()).ok())
+            .unwrap_or_default();
+        let abs = path.to_path_buf();
+        {
+            let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            state.push.insert(abs.clone(), items);
+            state.last_push_at.insert(abs, Instant::now());
+        }
+        // Wake any concurrent wait_for_push waiters since we just
+        // populated state — they'll detect a fresh push.
+        self.push_signal.send_modify(|v| *v = v.wrapping_add(1));
+        Ok(true)
+    }
+
     fn has_fresh_push(&self, path: &Path, after: Instant) -> bool {
         let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         state
