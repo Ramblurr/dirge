@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm_path};
+use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm_path_resolve};
 
 /// Max content size for a single create op (1 MiB). Audit L5 noted
 /// the dual cap with `MAX_APPLY_PATCH_BYTES` (100 MiB) — both apply
@@ -242,19 +242,37 @@ impl Tool for ApplyPatchTool {
             // entirely). The previous in-tool PLAN.md path gate is
             // gone.
 
-            // Permission check for the target path
-            match op {
+            // C1 (audit fix): resolve the path THROUGH the permission
+            // checker so symlinks are pinned to their canonical target.
+            // The check returns the canonical form; subsequent
+            // apply_create/update/delete/rename operate on that
+            // resolved path, defeating any symlink swap between
+            // check-time and open-time. Matches the H12 pattern
+            // already applied to read/write/edit.
+            let resolved_path = match op {
                 PatchOp::Create { path, .. }
                 | PatchOp::Update { path, .. }
                 | PatchOp::Delete { path }
                 | PatchOp::Rename { path, .. } => {
-                    check_perm_path(&self.permission, &self.ask_tx, "apply_patch", path).await?;
+                    check_perm_path_resolve(&self.permission, &self.ask_tx, "apply_patch", path)
+                        .await?
                 }
-            }
-            // Rename also requires permission on the new path
-            if let PatchOp::Rename { new_path, .. } = op {
-                check_perm_path(&self.permission, &self.ask_tx, "apply_patch", new_path).await?;
-            }
+            };
+            // Rename also requires permission on the new path; pin
+            // its canonical form too.
+            let resolved_new_path = if let PatchOp::Rename { new_path, .. } = op {
+                Some(
+                    check_perm_path_resolve(
+                        &self.permission,
+                        &self.ask_tx,
+                        "apply_patch",
+                        new_path,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             // Validate create content size
             if let PatchOp::Create { content, .. } = op {
                 if content.len() > MAX_CREATE_SIZE {
@@ -268,33 +286,41 @@ impl Tool for ApplyPatchTool {
             }
 
             let result = match op {
-                PatchOp::Create { path, content } => apply_create(path, content).await,
+                PatchOp::Create { content, .. } => apply_create(&resolved_path, content).await,
                 PatchOp::Update {
-                    path,
-                    old_text,
-                    new_text,
-                } => apply_update(path, old_text, new_text).await,
-                PatchOp::Delete { path } => apply_delete(path).await,
-                PatchOp::Rename { path, new_path } => apply_rename(path, new_path).await,
+                    old_text, new_text, ..
+                } => apply_update(&resolved_path, old_text, new_text).await,
+                PatchOp::Delete { .. } => apply_delete(&resolved_path).await,
+                PatchOp::Rename { .. } => {
+                    apply_rename(
+                        &resolved_path,
+                        resolved_new_path
+                            .as_deref()
+                            .expect("resolved_new_path set for Rename"),
+                    )
+                    .await
+                }
             };
 
             match result {
                 Ok(msg) => {
-                    // Record the touched path(s) for the info panel. Rename
-                    // adds the *new* path; delete still records the path the
-                    // user/agent operated on so the panel reflects the action.
+                    // Record the touched path(s) for the info panel.
+                    // Use the RESOLVED paths so info-panel state
+                    // matches what was actually written on disk.
                     match op {
-                        PatchOp::Create { path, .. }
-                        | PatchOp::Update { path, .. }
-                        | PatchOp::Delete { path } => {
+                        PatchOp::Create { .. }
+                        | PatchOp::Update { .. }
+                        | PatchOp::Delete { .. } => {
                             crate::agent::tools::modified::mark_modified(std::path::Path::new(
-                                path,
+                                &resolved_path,
                             ));
                         }
-                        PatchOp::Rename { new_path, .. } => {
-                            crate::agent::tools::modified::mark_modified(std::path::Path::new(
-                                new_path,
-                            ));
+                        PatchOp::Rename { .. } => {
+                            if let Some(ref np) = resolved_new_path {
+                                crate::agent::tools::modified::mark_modified(std::path::Path::new(
+                                    np,
+                                ));
+                            }
                         }
                     }
                     results.push(msg);

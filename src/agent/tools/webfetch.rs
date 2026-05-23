@@ -267,8 +267,29 @@ impl Tool for WebFetchTool {
         };
         check_perm(&self.permission, &self.ask_tx, "webfetch", &perm_summary).await?;
 
+        // C2 (audit fix): defend the SSRF host check across redirects.
+        // The default reqwest policy follows 30x up to 10 hops; the
+        // initial validate_url_host_safety only covers the first
+        // URL. An attacker-controlled public page can 302 to
+        // 169.254.169.254 (cloud metadata), RFC1918, loopback, etc.
+        // Install a custom policy that re-runs the host check on
+        // every hop and stops the redirect on failure.
         let client = reqwest::Client::builder()
             .user_agent("dirge/1.0")
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                // Bound the chain at the default-ish 10 hops so a
+                // pathological loop can't run forever even if every
+                // hop validates.
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("redirect chain exceeded 10 hops");
+                }
+                let next = attempt.url().as_str();
+                if let Err(reason) = validate_url_host_safety(next) {
+                    return attempt
+                        .error(format!("redirect target blocked by SSRF guard: {reason}"));
+                }
+                attempt.follow()
+            }))
             .build()
             .map_err(|e| ToolError::Msg(format!("client build error: {}", e)))?;
 
