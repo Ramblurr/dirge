@@ -17,9 +17,11 @@
 # that message renderers fire LIVE mid-conversation.
 
 (defn render-status [payload]
-  # `payload` is the raw JSON string. For demo purposes we just wrap it.
-  # Real renderers would parse with json/decode (when available) or
-  # extract fields via string manipulation.
+  # `payload` is the wrapper JSON string carrying customType, content,
+  # display. For demo purposes we just label and forward it. Real
+  # renderers would parse the JSON (json/decode is not bundled with
+  # the embedded Janet — extract fields via string ops or pass the
+  # data shape your plugin controls).
   (string "■ status from plugin: " payload))
 
 (harness/register-message-renderer "status" "render-status")
@@ -27,6 +29,8 @@
 # Emit a custom message every turn to demo the rendering path. This
 # uses `prepare-next-run` (fires after the LLM emits Done and before
 # the next user prompt is collected) so it doesn't spam mid-stream.
+# Three-arg form: customType, content, &opt display. `display=false`
+# would suppress the chat line while keeping the entry in the
+# transcript.
 (defn prepare-next-run [ctx]
-  (harness/add-custom-message
-    "{\"type\":\"status\",\"content\":\"another turn complete\"}"))
+  (harness/add-custom-message "status" "another turn complete"))

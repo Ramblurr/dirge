@@ -1033,13 +1033,118 @@ mod tests {
             renderers,
             vec![("status".to_string(), "render-status".to_string())]
         );
-        let rendered = mgr
-            .invoke_message_renderer("render-status", r#"{"type":"status","content":"ok"}"#)
+
+        // C1/C2 end-to-end: the plugin's prepare-next-run hook
+        // pushes a typed custom message; the drain produces an
+        // entry with customType="status"; the bridge-equivalent
+        // wrapper resolves through the registered renderer with
+        // the FULL wrapper payload (NOT just the inner content).
+        // This is the path that was broken before C1 — the smoke
+        // test now walks it explicitly.
+        mgr.eval(r#"(harness/add-custom-message "status" "build done")"#)
             .unwrap();
-        assert!(rendered.is_some());
-        let txt = rendered.unwrap();
-        assert!(txt.contains("status"), "got: {txt:?}");
-        assert!(txt.contains("ok"), "got: {txt:?}");
+        let drained = mgr.drain_custom_messages();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].custom_type, "status");
+        assert_eq!(drained[0].content, "build done");
+
+        // Build the wrapper exactly as plugin_hooks.rs does and
+        // resolve through the renderer-resolver. Without C1's
+        // top-level customType this returned the default fallback.
+        let wrapper = serde_json::json!({
+            "role": "custom",
+            "customType": drained[0].custom_type,
+            "content": drained[0].content,
+            "display": drained[0].display,
+        });
+        let pm_arc = std::sync::Arc::new(std::sync::Mutex::new(mgr));
+        let resolved =
+            crate::plugin::extension::resolve_custom_message_render(&wrapper, Some(&pm_arc))
+                .expect("display=true must resolve to Some");
+        assert_eq!(resolved.label, "plugin:status");
+        // Renderer's output is "■ status from plugin: <full wrapper>" —
+        // contains both the type and content fields proving the
+        // renderer saw the structured payload.
+        assert!(
+            resolved.body.contains("\"customType\":\"status\""),
+            "renderer must receive the full wrapper; got: {}",
+            resolved.body,
+        );
+        assert!(
+            resolved.body.contains("build done"),
+            "renderer output must include content; got: {}",
+            resolved.body,
+        );
+    }
+
+    // --- P9d (C1 fix): custom-message wrapper shape ---------------------
+
+    /// Single-string `(harness/add-custom-message "...")` form is
+    /// backwards compatible: produces an entry with empty
+    /// customType, display=true.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn add_custom_message_single_arg_form_is_backwards_compatible() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/add-custom-message "hello")"#).unwrap();
+        let drained = mgr.drain_custom_messages();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].custom_type, "");
+        assert_eq!(drained[0].content, "hello");
+        assert!(drained[0].display);
+    }
+
+    /// Typed `(harness/add-custom-message customType content)` form
+    /// carries the customType field — what registered renderers
+    /// dispatch on (pi parity, messages.ts:46).
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn add_custom_message_typed_form_carries_customtype() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/add-custom-message "status" "build done")"#)
+            .unwrap();
+        let drained = mgr.drain_custom_messages();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].custom_type, "status");
+        assert_eq!(drained[0].content, "build done");
+        assert!(drained[0].display);
+    }
+
+    /// `display=false` (third positional) flows through verbatim.
+    /// The UI must honor it to suppress the chat row.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn add_custom_message_respects_display_false() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/add-custom-message "telemetry" "x" false)"#)
+            .unwrap();
+        let drained = mgr.drain_custom_messages();
+        assert_eq!(drained.len(), 1);
+        assert!(!drained[0].display);
+    }
+
+    /// Embedded tabs/newlines in customType or content round-trip
+    /// through harness/-escape + unescape_harness_field.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn add_custom_message_round_trips_embedded_separators() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/add-custom-message "type\twith\ttabs" "line1\nline2")"#)
+            .unwrap();
+        let drained = mgr.drain_custom_messages();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].custom_type, "type\twith\ttabs");
+        assert_eq!(drained[0].content, "line1\nline2");
+    }
+
+    /// Drain clears the slot — subsequent drains return empty.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn drain_custom_messages_clears_slot() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/add-custom-message "a" "1")"#).unwrap();
+        assert_eq!(mgr.drain_custom_messages().len(), 1);
+        assert_eq!(mgr.drain_custom_messages().len(), 0);
     }
 
     // --- P9d: plugin-registered message renderers -----------------------
@@ -2323,13 +2428,19 @@ impl PluginManager {
     }
 
     /// Drain the `harness-custom-messages` blob — UI-only
-    /// notification text. Pushed by plugins via
-    /// `harness/add-custom-message`. The loop emits these as
-    /// `LoopMessage::Custom`; the bridge renders them in the
-    /// chat without sending to the LLM (`convert_to_llm`
-    /// drops non-LLM roles).
-    pub fn drain_custom_messages(&mut self) -> Vec<String> {
-        self.drain_newline_blob("harness-custom-messages")
+    /// notification entries. Pushed by plugins via
+    /// `harness/add-custom-message`. The loop emits each as a
+    /// `LoopMessage::Custom` wrapper carrying `customType`,
+    /// `content`, and `display` at the top level (pi parity —
+    /// CustomMessage shape, messages.ts:46). `convert_to_llm`
+    /// drops the role so the LLM never sees them.
+    pub fn drain_custom_messages(&mut self) -> Vec<CustomMessageEntry> {
+        let raw = self
+            .worker
+            .eval("(if (string? harness-custom-messages) harness-custom-messages \"\")")
+            .unwrap_or_default();
+        let _ = self.worker.eval(r#"(set harness-custom-messages "")"#);
+        raw.lines().filter_map(parse_custom_message_line).collect()
     }
 
     /// Shared body for `drain_*_messages` — read the slot's
@@ -2923,6 +3034,41 @@ fn parse_plugin_tool_line(line: &str) -> Option<PluginToolMeta> {
         parameters,
         handler,
         execution_mode,
+    })
+}
+
+/// One entry drained from `harness-custom-messages`. Pi parity —
+/// `CustomMessage` (messages.ts:46) has `customType` + `content` +
+/// `display` as top-level fields. The wrapper JSON the loop emits
+/// surfaces all three so registered message renderers can dispatch
+/// by `customType` and the UI can honor `display=false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "plugin"), allow(dead_code))]
+pub struct CustomMessageEntry {
+    /// Renderer-lookup key. Empty when the plugin used the
+    /// single-string `(harness/add-custom-message "text")` form.
+    pub custom_type: String,
+    pub content: String,
+    /// Whether the UI should render the chat line. `display=false`
+    /// keeps the message in the transcript (where plugin handlers
+    /// can still observe it) but suppresses the visible row.
+    pub display: bool,
+}
+
+fn parse_custom_message_line(line: &str) -> Option<CustomMessageEntry> {
+    let mut parts = line.split('\t');
+    let custom_type = unescape_harness_field(parts.next()?);
+    let content = unescape_harness_field(parts.next()?);
+    let display_raw = parts.next().unwrap_or("1").trim();
+    // Empty content + empty type is meaningless — drop. (A bare
+    // empty payload would just be noise in the chat.)
+    if custom_type.is_empty() && content.is_empty() {
+        return None;
+    }
+    Some(CustomMessageEntry {
+        custom_type,
+        content,
+        display: display_raw != "0",
     })
 }
 

@@ -153,22 +153,57 @@ const HARNESS_INIT: &str = r#"
     (set harness-followup-messages
          (string harness-followup-messages content "\n"))))
 
-# Custom (UI-only) message queue. Plugins call
-# (harness/add-custom-message "build started") to push a
-# notification that the user SEES in the chat but the model
-# does NOT see in its context. Pi semantics: any message variant
-# other than user/assistant/toolResult is filtered out by
-# `convertToLlm`. We make this explicit with a dedicated
-# `LoopMessage::Custom` variant; the UI renders it; convert_to_llm
-# drops it before the LLM sees it.
+# Wire-format escape — used by every tab-separated harness blob.
+# Defined before any caller so the cond-arity helpers below
+# (harness/add-custom-message, harness/register-*) can reference it.
+(defn- harness/-escape [s]
+  (->> s
+       (string/replace-all "\\" "\\\\")
+       (string/replace-all "\t" "\\t")
+       (string/replace-all "\n" "\\n")))
+
+# Custom (UI-only) message queue. Plugins call this to push a
+# notification the user SEES in the chat but the model does NOT
+# see in its context. Pi semantics: any message variant other
+# than user/assistant/toolResult is filtered out by `convertToLlm`.
+# We make this explicit with a `LoopMessage::Custom` variant; the
+# UI renders it; convert_to_llm drops it before the LLM sees it.
 #
-# Drained per turn boundary alongside steering messages so the
-# UI sees them in order.
+# Two call shapes (pi parity — CustomMessage carries customType,
+# content, display at top level; see messages.ts:46):
+#
+#   (harness/add-custom-message "build started")
+#     bare content. customType="" display=true. The UI uses its
+#     default formatter ("[plugin] <text>"); no registered
+#     renderer fires.
+#
+#   (harness/add-custom-message customType content &opt display)
+#     structured. customType is the key registered renderers are
+#     keyed by (see `harness/register-message-renderer`); display
+#     is true by default — false keeps the message in the
+#     transcript but suppresses the chat line.
+#
+# Stored as tab-separated `customType\tcontent\tdisplay\n`
+# (harness/-escape'd so embedded tabs/newlines round-trip).
+# Drained per turn boundary alongside steering messages.
 (var harness-custom-messages "")
-(defn harness/add-custom-message [content]
-  (when (string? content)
-    (set harness-custom-messages
-         (string harness-custom-messages content "\n"))))
+(defn harness/add-custom-message [a &opt b c]
+  (cond
+    # Single-string form — bare content, no type.
+    (and (string? a) (nil? b))
+      (set harness-custom-messages
+           (string harness-custom-messages
+                   (harness/-escape "") "\t"
+                   (harness/-escape a) "\t"
+                   "1\n"))
+    # Typed form.
+    (and (string? a) (string? b))
+      (let [d (if (nil? c) "1" (if c "1" "0"))]
+        (set harness-custom-messages
+             (string harness-custom-messages
+                     (harness/-escape a) "\t"
+                     (harness/-escape b) "\t"
+                     d "\n")))))
 
 # Slash-command registry. Plugins register at load time;
 # the host reads the list once after all plugins load and
@@ -265,11 +300,6 @@ const HARNESS_INIT: &str = r#"
 # Stored as `type\tdata\tdisplay\n` per entry; data is escaped so
 # embedded tabs / newlines / backslashes don't break parsing.
 (var harness-entries-buf "")
-(defn- harness/-escape [s]
-  (->> s
-       (string/replace-all "\\" "\\\\")
-       (string/replace-all "\t" "\\t")
-       (string/replace-all "\n" "\\n")))
 (defn harness/append-entry [type data &opt display]
   (when (and (string? type) (string? data))
     (let [d (if (nil? display) "1" (if display "1" "0"))]

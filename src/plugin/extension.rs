@@ -29,6 +29,91 @@ use crate::agent::agent_loop::types::ToolExecutionMode;
 
 use super::{PluginManager, PluginShortcutMeta, PluginToolMeta};
 
+/// Outcome of resolving a `LoopMessage::Custom` payload against the
+/// plugin message-renderer registry. Returned by
+/// [`resolve_custom_message_render`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCustomMessage {
+    /// `[plugin]` or `[plugin:<customType>]` — the chrome the UI
+    /// prepends to the body line.
+    pub label: String,
+    /// Body text to print. Already sanitization-ready (but the
+    /// caller still owns the sanitize call so this function stays
+    /// dependency-light).
+    pub body: String,
+}
+
+/// Resolve a `LoopMessage::Custom` payload into a chat line.
+///
+/// Reads `customType`, `content`, `display` at the top level
+/// (matching the wrapper plugin_hooks.rs emits) and:
+///   1. Returns `None` when `display == false` — the message stays
+///      in the transcript but the UI does not draw it.
+///   2. Looks up a registered renderer by `customType`. If one is
+///      registered, invokes it with the full payload JSON; the
+///      handler's return value is the body. Errors swallow back to
+///      the default formatter.
+///   3. Default formatter: uses `content` (string-typed) verbatim,
+///      else pretty-prints the whole payload.
+///
+/// The label is `[plugin]` when `customType` is empty, otherwise
+/// `[plugin:<customType>]`.
+///
+/// Free function (not a method on the UI) so the renderer-resolve
+/// logic is unit-testable against a stand-alone `PluginManager`
+/// without dragging in the interactive renderer.
+pub fn resolve_custom_message_render(
+    payload: &Value,
+    pm: Option<&Arc<Mutex<PluginManager>>>,
+) -> Option<ResolvedCustomMessage> {
+    // Display gate. Missing field defaults to true — matches the
+    // single-string `add-custom-message` form's wrapper.
+    let display = payload
+        .get("display")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if !display {
+        return None;
+    }
+
+    let custom_type = payload
+        .get("customType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let rendered: Option<String> = pm.and_then(|pm_arc| {
+        let handler = {
+            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            mgr.list_message_renderers()
+                .into_iter()
+                .find(|(t, _)| t == &custom_type)
+                .map(|(_, h)| h)
+        };
+        handler.and_then(|h| {
+            let payload_str = payload.to_string();
+            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            mgr.invoke_message_renderer(&h, &payload_str).ok().flatten()
+        })
+    });
+
+    let body = rendered.unwrap_or_else(|| {
+        payload
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| payload.to_string())
+    });
+
+    let label = if custom_type.is_empty() {
+        "plugin".to_string()
+    } else {
+        format!("plugin:{custom_type}")
+    };
+
+    Some(ResolvedCustomMessage { label, body })
+}
+
 /// Parse a plugin key spec string into a `(KeyCode, KeyModifiers)`
 /// pair. Spec grammar (case-insensitive):
 ///   `(modifier "-")* key-name`
@@ -329,6 +414,72 @@ mod tests {
         let metas: Vec<PluginToolMeta> = pm.lock().unwrap().list_plugin_tools();
         let tool = JanetLoopTool::from_meta(metas.into_iter().next().unwrap(), pm.clone()).unwrap();
         assert_eq!(tool.execution_mode(), Some(ToolExecutionMode::Sequential));
+    }
+
+    // --- P9d: custom-message renderer resolution ---------------------
+
+    /// `display=false` short-circuits to `None` — the message stays
+    /// in the transcript but the UI must not draw a chat row.
+    #[test]
+    fn resolve_custom_message_render_respects_display_false() {
+        let payload = serde_json::json!({
+            "role": "custom",
+            "customType": "telemetry",
+            "content": "x",
+            "display": false,
+        });
+        assert!(resolve_custom_message_render(&payload, None).is_none());
+    }
+
+    /// Bare wrapper (no `customType` field) renders with the
+    /// `[plugin]` label and falls back to the `content` body.
+    #[test]
+    fn resolve_custom_message_render_bare_falls_back_to_content() {
+        let payload = serde_json::json!({
+            "role": "custom",
+            "customType": "",
+            "content": "hello",
+            "display": true,
+        });
+        let r = resolve_custom_message_render(&payload, None).unwrap();
+        assert_eq!(r.label, "plugin");
+        assert_eq!(r.body, "hello");
+    }
+
+    /// With a registered renderer for the wrapper's `customType`,
+    /// the resolver dispatches and returns the handler's output.
+    #[test]
+    fn resolve_custom_message_render_invokes_registered_handler() {
+        let pm = {
+            let mut mgr = PluginManager::try_new().unwrap();
+            mgr.eval(
+                r#"(defn render-status [p] (string ">>" p))
+                   (harness/register-message-renderer "status" "render-status")"#,
+            )
+            .unwrap();
+            Arc::new(Mutex::new(mgr))
+        };
+        let payload = serde_json::json!({
+            "role": "custom",
+            "customType": "status",
+            "content": "build started",
+            "display": true,
+        });
+        let r = resolve_custom_message_render(&payload, Some(&pm)).unwrap();
+        assert_eq!(r.label, "plugin:status");
+        assert!(r.body.starts_with(">>"), "got: {}", r.body);
+        // The handler sees the FULL wrapper (customType + content),
+        // not just the inner content — pi parity.
+        assert!(
+            r.body.contains("\"customType\":\"status\""),
+            "got: {}",
+            r.body
+        );
+        assert!(
+            r.body.contains("\"content\":\"build started\""),
+            "got: {}",
+            r.body
+        );
     }
 
     // --- P9c: shortcut parser ----------------------------------------

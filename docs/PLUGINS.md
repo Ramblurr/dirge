@@ -422,25 +422,39 @@ Provide a Janet function the UI invokes when a `LoopMessage::Custom`
 event reaches the chat. Custom messages enter the loop via
 `harness/add-custom-message` (typically from a `prepare-next-run` or
 `on-turn-end` hook) and are filtered out of the LLM context — they're
-UI-only. Without a registered renderer the UI falls back to extracting
-the payload's `content` field, or stringifying the whole payload.
+UI-only. Without a registered renderer the UI falls back to printing
+the payload's `content` verbatim.
 
 Mirrors pi's `api.registerMessageRenderer(customType, renderer)`.
 
 ```janet
 (defn render-status [payload]
+  # payload is the wrapper JSON carrying customType, content, display.
   (string "■ status: " payload))
 
 (harness/register-message-renderer "status" "render-status")
 
 (defn prepare-next-run [ctx]
-  (harness/add-custom-message
-    "{\"type\":\"status\",\"content\":\"another turn complete\"}"))
+  # Three-arg form: customType + content (+ optional display).
+  (harness/add-custom-message "status" "another turn complete"))
 ```
 
-The renderer's `payload` argument is the raw JSON string. The UI looks
-up the renderer by the payload's `type` field, calls it, and prints
-the result as `[plugin:<type>] <text>`.
+**`harness/add-custom-message` call shapes** (pi parity — see
+pi `CustomMessage` in `core/messages.ts:46`):
+
+| Shape | customType | content | display |
+|-------|-----------|---------|---------|
+| `(harness/add-custom-message "text")` | `""` | `"text"` | `true` |
+| `(harness/add-custom-message "status" "text")` | `"status"` | `"text"` | `true` |
+| `(harness/add-custom-message "status" "text" false)` | `"status"` | `"text"` | `false` |
+
+`display=false` keeps the message in the transcript (plugin handlers
+can observe it on subsequent turns) but suppresses the chat row. Use
+for telemetry or state markers you don't want to clutter the chat.
+
+The renderer's `payload` argument is the **full wrapper JSON** —
+`{"role": "custom", "customType": ..., "content": ..., "display": ...}`
+— not just the inner content. Plugins parse what they need.
 
 Distinct from [`harness/register-renderer`](#renderers), which handles
 session-timeline entries (bookmarks, telemetry) — message renderers

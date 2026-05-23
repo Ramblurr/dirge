@@ -306,7 +306,7 @@ pub fn get_steering_messages_from_plugin_manager(
     Arc::new(move || {
         let pm = pm.clone();
         Box::pin(async move {
-            let (steering, custom): (Vec<String>, Vec<String>) = {
+            let (steering, custom) = {
                 let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
                 (mgr.drain_steering_messages(), mgr.drain_custom_messages())
             };
@@ -314,15 +314,20 @@ pub fn get_steering_messages_from_plugin_manager(
             for content in steering {
                 out.push(LoopMessage::User(UserMessage { content }));
             }
-            for content in custom {
-                // Custom-shaped Value carries role="custom"
-                // so default_convert_to_llm filters it out.
-                // The UI bridge can dispatch on
-                // LoopEvent::MessageStart { Custom } to
-                // render notifications differently.
+            for entry in custom {
+                // Custom-shaped Value carries role="custom" so
+                // default_convert_to_llm filters it out. customType /
+                // content / display sit at the top level to match
+                // pi's CustomMessage shape (messages.ts:46) — the UI
+                // dispatches by `customType` against the registered
+                // message-renderer registry; `display=false`
+                // suppresses the chat line while keeping the entry
+                // in the transcript.
                 out.push(LoopMessage::Custom(serde_json::json!({
                     "role": "custom",
-                    "content": content,
+                    "customType": entry.custom_type,
+                    "content": entry.content,
+                    "display": entry.display,
                 })));
             }
             out
@@ -781,6 +786,47 @@ mod tests {
                     v.get("content").and_then(|c| c.as_str()),
                     Some("build started"),
                 );
+                // C1 contract: customType + display sit at the
+                // top level so the UI renderer-resolver can
+                // dispatch (matches pi's CustomMessage shape).
+                // Single-string add-custom-message form yields
+                // empty customType + display=true.
+                assert_eq!(v.get("customType").and_then(|c| c.as_str()), Some(""));
+                assert_eq!(v.get("display").and_then(|d| d.as_bool()), Some(true));
+            }
+            other => panic!("expected Custom; got {other:?}"),
+        }
+    }
+
+    /// C1 regression: typed `(harness/add-custom-message custom-type
+    /// content)` form carries customType at the top level of the
+    /// wrapper. Without this, the UI renderer-resolver looks up an
+    /// empty customType and never finds a registered renderer.
+    #[tokio::test]
+    async fn get_steering_messages_carries_customtype_at_top_level() {
+        let Some(pm) = try_pm() else { return };
+        {
+            let mut mgr = pm.lock().unwrap();
+            mgr.eval(
+                r#"(defn add [_ctx]
+                     (harness/add-custom-message "status" "build started"))"#,
+            )
+            .unwrap();
+            mgr.register("on-tool-end", "add");
+            mgr.dispatch_tool_hook("on-tool-end", "@{:tool \"t\" :output \"x\"}")
+                .unwrap();
+        }
+        let hook = get_steering_messages_from_plugin_manager(pm);
+        let messages = hook().await;
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            LoopMessage::Custom(v) => {
+                assert_eq!(v.get("customType").and_then(|c| c.as_str()), Some("status"),);
+                assert_eq!(
+                    v.get("content").and_then(|c| c.as_str()),
+                    Some("build started"),
+                );
+                assert_eq!(v.get("display").and_then(|d| d.as_bool()), Some(true));
             }
             other => panic!("expected Custom; got {other:?}"),
         }

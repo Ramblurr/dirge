@@ -2735,54 +2735,33 @@ pub async fn run_interactive(
                         }
                     }
                     AgentEvent::CustomMessage { payload } => {
-                        // Plugin-emitted custom message reaching the
-                        // UI (P9d). Look up a registered renderer
-                        // by the payload's `type` field; fall back
-                        // to extracting `content` or pretty-printing
-                        // the whole payload when none is registered.
-                        let type_name = payload
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        // Plugin-emitted custom message (P9d).
+                        // Resolution lives in `plugin::extension`
+                        // so the renderer-lookup logic is testable
+                        // without the interactive renderer; the UI
+                        // here just sanitizes + writes the line.
+                        // `None` means `display=false` — the message
+                        // stays in the transcript but no chat row.
                         #[cfg(feature = "plugin")]
-                        let rendered: Option<String> = if let Some(pm) = plugin_manager {
-                            let handler = {
-                                let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
-                                mgr.list_message_renderers()
-                                    .into_iter()
-                                    .find(|(t, _)| t == &type_name)
-                                    .map(|(_, h)| h)
-                            };
-                            if let Some(h) = handler {
-                                let payload_str = payload.to_string();
-                                let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
-                                mgr.invoke_message_renderer(&h, &payload_str)
-                                    .ok()
-                                    .flatten()
-                            } else {
-                                None
-                            }
-                        } else {
+                        let resolved = crate::plugin::extension::resolve_custom_message_render(
+                            &payload,
+                            plugin_manager,
+                        );
+                        #[cfg(not(feature = "plugin"))]
+                        let resolved: Option<()> = {
+                            let _ = &payload;
                             None
                         };
+                        #[cfg(feature = "plugin")]
+                        if let Some(r) = resolved {
+                            let safe = sanitize_output(&r.body);
+                            renderer.write_line(
+                                &format!("[{}] {}", r.label, safe),
+                                theme::dim(),
+                            )?;
+                        }
                         #[cfg(not(feature = "plugin"))]
-                        let rendered: Option<String> = None;
-
-                        let text = rendered.unwrap_or_else(|| {
-                            payload
-                                .get("content")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .unwrap_or_else(|| payload.to_string())
-                        });
-                        let safe = sanitize_output(&text);
-                        let label = if type_name.is_empty() {
-                            "plugin".to_string()
-                        } else {
-                            format!("plugin:{type_name}")
-                        };
-                        renderer.write_line(&format!("[{label}] {safe}"), theme::dim())?;
+                        let _ = resolved;
                     }
                     AgentEvent::Interjected { partial_response, tokens } => {
                         was_reasoning = false;
