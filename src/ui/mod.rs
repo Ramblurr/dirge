@@ -689,6 +689,28 @@ pub async fn run_interactive(
     let mut was_reasoning = false;
     let mut todo_tools_enabled = false;
     let mut last_tool_name: Option<String> = None;
+    // The tool_call_id of the in-flight chamber (or the most-recent
+    // chamber that was closed without a matching ToolResult yet). Lets
+    // the ToolResult handler distinguish "this result belongs to the
+    // currently-painted chamber" (sequential / single-tool case) from
+    // "this result belongs to an earlier call whose chamber was
+    // displaced by a parallel sibling" (the dirge-jzj scenario).
+    //
+    // When parallel tool execution is enabled (the default per
+    // agent_loop/types.rs), the LLM emits N ToolCalls back-to-back and
+    // the agent_loop's `execute_tool_calls_parallel` fires
+    // ToolExecutionStart for ALL of them before any ToolExecutionEnd.
+    // Each new ToolCall passively closes the prior chamber. Completion
+    // order is whatever finishes first, so ToolResults arrive
+    // arbitrarily — most never match the currently-open chamber's id.
+    // Without this tracker, mismatched results either landed inside
+    // the wrong chamber (path a, body painted under another tool's
+    // banner) or as a `↳ first_line` trailer below an unrelated chamber
+    // (path b). The fix: when a result's id doesn't match the open
+    // chamber, paint a fresh complete chamber for THIS id below the
+    // current scroll position. Completion-order rendering, each tool
+    // gets its own correctly-labeled frame.
+    let mut last_tool_call_id: Option<String> = None;
     // Tracks whether a tool chamber TOP has been drawn but no matching
     // BOTTOM has been written yet. Used by the ask/alert handler to
     // close the in-flight chamber BEFORE rendering the ALERT box.
@@ -2136,6 +2158,7 @@ pub async fn run_interactive(
                         // `close_tool_chamber_if_open`.
                         close_tool_chamber_passive(&mut renderer, &mut last_tool_name, &mut tool_chamber_open)?;
                         last_tool_name = Some(name.to_string());
+                        last_tool_call_id = Some(id.to_string());
                         if agent_line_started {
                             renderer.write_line("", Color::White)?;
                             agent_line_started = false;
@@ -2200,6 +2223,61 @@ pub async fn run_interactive(
                         let show_details = cfg.show_tool_details.unwrap_or(true);
                         let max_chars = cfg.resolve_tool_result_max_chars();
                         let show_diff = cfg.resolve_show_edit_diff();
+
+                        // dirge-jzj: if the chamber on screen belongs to a
+                        // DIFFERENT tool call (parallel-execution race
+                        // where ToolResults arrive out of order, or a
+                        // newer ToolCall's TOP displaced this result's
+                        // chamber before the result arrived), paint a
+                        // fresh complete chamber for THIS id below the
+                        // current scroll position. Lets each result land
+                        // in its own correctly-labeled frame regardless
+                        // of completion order. The id-matches case (the
+                        // common sequential path) falls through to the
+                        // existing render paths below.
+                        if !id.is_empty()
+                            && last_tool_call_id.as_deref() != Some(id.as_str())
+                            && show_details
+                        {
+                            // Close whatever chamber is on screen first,
+                            // then paint a fresh TOP for this id. We
+                            // don't reuse the ToolCall handler's TOP-
+                            // paint code path because that fires from a
+                            // different event; the body of the new
+                            // chamber will land via path (a) below now
+                            // that tool_chamber_open=true.
+                            if tool_chamber_open {
+                                close_tool_chamber_passive(
+                                    &mut renderer,
+                                    &mut last_tool_name,
+                                    &mut tool_chamber_open,
+                                )?;
+                            }
+                            let (resolved_name, resolved_args) = tool_calls_buf
+                                .iter()
+                                .rev()
+                                .find(|e| e.id == id.as_str())
+                                .map(|e| (e.name.to_string(), e.args.clone()))
+                                .unwrap_or_else(|| (String::new(), serde_json::Value::Null));
+                            if !resolved_name.is_empty() {
+                                let upper = resolved_name.to_ascii_uppercase();
+                                let raw_value =
+                                    format_tool_banner_value(&resolved_name, &resolved_args);
+                                let raw_value = sanitize_output(&raw_value).into_string();
+                                let (frame_w, _) = chamber_widths(&renderer);
+                                let header =
+                                    fit_banner_header(&upper, &raw_value, frame_w);
+                                renderer.write_line("", Color::White)?;
+                                renderer.write_line(&header, c_tool())?;
+                                tool_chamber_open = true;
+                                last_tool_name = Some(resolved_name);
+                                last_tool_call_id = Some(id.to_string());
+                            }
+                            // If the call wasn't in tool_calls_buf (id
+                            // unknown — shouldn't happen post-ToolCall
+                            // but defensive), fall through to path (b)
+                            // trailer; we have no banner to paint.
+                        }
 
                         // on-tool-end is also fired by HookedToolDyn so the
                         // host doesn't re-dispatch it here.
@@ -2410,6 +2488,7 @@ pub async fn run_interactive(
                         // Clear after consuming so a future stray ToolResult
                         // can't be coloured with a stale tool name.
                         last_tool_name = None;
+                        last_tool_call_id = None;
                     }
                     AgentEvent::Done { response, tokens, cost } => {
                         was_reasoning = false;
