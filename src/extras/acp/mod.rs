@@ -316,12 +316,11 @@ async fn run_prompt(
                 // ACP runs aren't interactive — but bail cleanly if
                 // one does rather than panic on partial state.
                 break;
-            }
-            // (ContextOverflow is handled higher up with the
-            // `{ error, .. }` binding that formats the friendly
-            // error into a SessionUpdate before breaking. PR #127
-            // briefly added a second `{ .. }` catch-all here that
-            // was unreachable — removed.)
+            } // (ContextOverflow is handled higher up with the
+              // `{ error, .. }` binding that formats the friendly
+              // error into a SessionUpdate before breaking. PR #127
+              // briefly added a second `{ .. }` catch-all here that
+              // was unreachable — removed.)
         }
     }
 

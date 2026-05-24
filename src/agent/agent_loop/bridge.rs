@@ -130,6 +130,30 @@ impl EventBridge {
                         .error_message
                         .as_deref()
                         .unwrap_or("agent loop produced an error with no message");
+                    // Cancellation via the interject channel
+                    // (`AbortSignal::cancel()` from
+                    // `LoopRunner::into_agent_runner`'s bridge task)
+                    // surfaces as an error with this exact message
+                    // from `rig_stream.rs:124`. It's NOT a real
+                    // failure — it's the user asking to stop. Emit
+                    // `Interjected` instead so the UI drains its
+                    // queued messages and respawns, rather than
+                    // `Error` which would drop them.
+                    if error_text.contains("stream aborted by cancellation signal") {
+                        let partial_response = a
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        return vec![AgentEvent::Interjected {
+                            partial_response: CompactString::from(partial_response),
+                            tokens: 0,
+                        }];
+                    }
                     let kind = crate::agent::recovery::classify_error(error_text);
                     return if matches!(kind, crate::agent::recovery::ErrorKind::ContextLength) {
                         // Extract the user prompt that triggered
@@ -524,6 +548,41 @@ mod tests {
                 assert!(msg.contains("unauthorized"));
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// Interject channel cancellation surfaces as a stream Error
+    /// with the message "stream aborted by cancellation signal"
+    /// (rig_stream.rs:124). The bridge must recognise this as a
+    /// graceful interjection — emit `Interjected` so the UI drains
+    /// its queued messages, NOT `Error` which would drop them
+    /// (the user's bug report on this).
+    #[test]
+    fn agent_end_cancellation_emits_interjected_not_error() {
+        let mut bridge = EventBridge::new();
+        let mut a = assistant_with_text("partial response before interject");
+        a.stop_reason = StopReason::Error;
+        a.error_message = Some("stream aborted by cancellation signal".to_string());
+        let messages = vec![
+            LoopMessage::User(UserMessage {
+                content: "do a long thing".to_string(),
+            }),
+            LoopMessage::Assistant(a),
+        ];
+        let out = bridge.translate(LoopEvent::AgentEnd { messages });
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AgentEvent::Interjected {
+                partial_response,
+                tokens,
+            } => {
+                assert_eq!(
+                    partial_response.as_str(),
+                    "partial response before interject"
+                );
+                assert_eq!(*tokens, 0);
+            }
+            other => panic!("expected Interjected, got {other:?}"),
         }
     }
 
