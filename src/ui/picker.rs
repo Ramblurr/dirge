@@ -243,7 +243,7 @@ impl FilePicker {
         if !self.active {
             return Ok(());
         }
-        let (cols, _rows) = crossterm::terminal::size()?;
+        let (cols, _rows) = crate::ui::terminal::tty_size();
         let mut stdout = std::io::stdout();
 
         // Bottom anchor row for the picker — one above the input box.

@@ -12,6 +12,39 @@ use crossterm::terminal::{Clear, ClearType};
 
 use super::resolve_color;
 
+/// Output sink for ratatui's CrosstermBackend. Prefers a fresh
+/// `/dev/tty` handle (so painting is isolated from the process's
+/// fd 1 — see `TerminalGuard`'s fd redirection); falls back to
+/// stdout when there's no controlling terminal (CI tests).
+pub enum BackendWriter {
+    Tty(std::fs::File),
+    Stdout(std::io::Stdout),
+}
+
+impl std::io::Write for BackendWriter {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        match self {
+            BackendWriter::Tty(f) => f.write(b),
+            BackendWriter::Stdout(s) => s.write(b),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            BackendWriter::Tty(f) => f.flush(),
+            BackendWriter::Stdout(s) => s.flush(),
+        }
+    }
+}
+
+fn build_tui_terminal()
+-> Option<ratatui::Terminal<ratatui::backend::CrosstermBackend<BackendWriter>>> {
+    let writer = match crate::ui::terminal::open_tty_for_write() {
+        Some(f) => BackendWriter::Tty(f),
+        None => BackendWriter::Stdout(std::io::stdout()),
+    };
+    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(writer)).ok()
+}
+
 #[derive(Clone)]
 pub struct LineEntry {
     pub text: CompactString,
@@ -193,7 +226,7 @@ pub struct Renderer {
     /// no terminal handle either — this preserves the same testable
     /// shape).
     tui_terminal:
-        Option<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>,
+        Option<ratatui::Terminal<ratatui::backend::CrosstermBackend<BackendWriter>>>,
     /// Cached input editor snapshot used when `write_line` / `write`
     /// trigger a redraw — they don't have the editor reference at
     /// hand, but the last `draw_bottom` did. Stored as pre-wrapped
@@ -239,13 +272,15 @@ impl Renderer {
             alert_title: String::new(),
             avatar_state: crate::ui::avatar::AvatarState::Idle,
             avatar_tick: false,
-            // ratatui migration (Phase 6). Lazily initialised — if
-            // stdout isn't a terminal the backend still constructs
-            // successfully; `draw` is the call that would fail.
-            tui_terminal: ratatui::Terminal::new(
-                ratatui::backend::CrosstermBackend::new(std::io::stdout()),
-            )
-            .ok(),
+            // ratatui's backend writes to /dev/tty (a fresh fd
+            // pointing at the controlling terminal) rather than the
+            // process's stdout. With stdout/stderr redirected to
+            // the log file by TerminalGuard, this is the only path
+            // that can paint the screen — no rogue (print …),
+            // println!, panic, or child-process output can reach
+            // the TTY anymore. Falls back to stdout when /dev/tty
+            // isn't available (CI tests, headless).
+            tui_terminal: build_tui_terminal(),
             cached_input_rows: vec![String::new()],
             cached_input_cursor_row: 0,
             cached_input_cursor_col: 0,
@@ -331,7 +366,7 @@ impl Renderer {
         // above the alert. The editor stays clamped at MAX so the
         // user can't accidentally crowd the chat by pasting a 50-
         // line block.
-        let (cols_q, rows_q) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (cols_q, rows_q) = crate::ui::terminal::tty_size();
         let effective_input_rows = if let Some(lines) = alert_overlay.as_ref() {
             let probe = crate::ui::tui::layout::Layout::new(cols_q, rows_q, 1);
             let wrapped = crate::ui::tui::bottom::overlay_wrapped_row_count(
@@ -607,7 +642,7 @@ impl Renderer {
     }
 
     fn terminal_size(&self) -> (u16, u16) {
-        crossterm::terminal::size().unwrap_or((80, 24))
+        crate::ui::terminal::tty_size()
     }
 
     /// Width chat text wraps to before pushing into the buffer. Uses

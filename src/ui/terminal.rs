@@ -1,11 +1,24 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::Hide;
 use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen};
+
+/// A handle to `/dev/tty` opened once by `TerminalGuard::new` and
+/// read by `Renderer::new` so ratatui's backend writes directly to
+/// the controlling terminal rather than to the process's stdout (fd
+/// 1). With stdout redirected to the log file (see
+/// `redirect_stdout_stderr_to_log` below), any code that writes to
+/// stdout/stderr — Janet `(print …)`, `println!`, panic messages,
+/// child-process inherited stdout, anything — lands in the log
+/// instead of corrupting the TUI. This is the fd-level isolation
+/// the user asked for: ratatui owns the screen, nothing else can
+/// reach it.
+pub(crate) static TTY_FD_PATH: OnceLock<bool> = OnceLock::new();
 
 /// Shared shutdown signal between the input-reader background thread
 /// in `ui::mod` and `TerminalGuard::drop`. The reader polls this with
@@ -26,7 +39,16 @@ pub(crate) static EVENT_READER_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// the common case (reader exits within a few ms).
 pub(crate) static EVENT_READER_EXITED: AtomicBool = AtomicBool::new(false);
 
-pub struct TerminalGuard;
+pub struct TerminalGuard {
+    /// Original stdout (fd 1) saved before we redirected fd 1 to
+    /// the log file. Restored on drop so the shell that spawned
+    /// dirge gets its stdout back.
+    #[cfg(unix)]
+    saved_stdout_fd: Option<libc::c_int>,
+    /// Original stderr (fd 2), same treatment.
+    #[cfg(unix)]
+    saved_stderr_fd: Option<libc::c_int>,
+}
 
 impl TerminalGuard {
     pub fn new() -> std::io::Result<Self> {
@@ -34,23 +56,145 @@ impl TerminalGuard {
         // guard in the same process (test harness, embedded use).
         EVENT_READER_SHUTDOWN.store(false, Ordering::Relaxed);
         EVENT_READER_EXITED.store(false, Ordering::Relaxed);
-        let mut stdout = std::io::stdout();
-        stdout.execute(EnterAlternateScreen)?;
-        stdout.execute(Clear(ClearType::All))?;
-        stdout.execute(EnableMouseCapture)?;
+
+        // Open /dev/tty for all subsequent setup writes AND for
+        // ratatui's backend to use later. If /dev/tty isn't
+        // available (no controlling terminal — CI, pipe), fall back
+        // to stdout; ratatui will too.
+        let mut tty_writer: Box<dyn std::io::Write> = match open_tty_for_write() {
+            Some(f) => Box::new(f),
+            None => Box::new(std::io::stdout()),
+        };
+        tty_writer.execute(EnterAlternateScreen)?;
+        tty_writer.execute(Clear(ClearType::All))?;
+        tty_writer.execute(EnableMouseCapture)?;
         // Bracketed paste lets the terminal deliver a multi-line paste as a
         // single Event::Paste, rather than a flood of keystroke events. The
         // input editor relies on this to compress long pastes into a
         // `[N lines pasted]` placeholder.
-        stdout.execute(EnableBracketedPaste)?;
+        tty_writer.execute(EnableBracketedPaste)?;
         // Hide the hardware cursor by default. While the agent streams output,
         // the renderer issues many MoveTo calls and the visible cursor would
         // flicker across the screen. draw_bottom re-shows it only after
         // positioning it at the input prompt.
-        stdout.execute(Hide)?;
+        tty_writer.execute(Hide)?;
         terminal::enable_raw_mode()?;
-        Ok(TerminalGuard)
+        // Flush the setup writes to /dev/tty BEFORE redirecting fd 1.
+        let _ = tty_writer.flush();
+        drop(tty_writer);
+
+        // === fd isolation ===
+        // Redirect stdout (1) and stderr (2) to the dirge log file
+        // for the duration of the TUI. Any code path that writes to
+        // those fds (Janet code that escaped our :out redirect,
+        // child processes inheriting stdout, panic messages, etc.)
+        // lands in the log instead of corrupting the screen.
+        //
+        // ratatui itself writes via a fresh /dev/tty fd that the
+        // Renderer opens via `open_tty_for_write` — independent of
+        // the process's fd 1.
+        #[cfg(unix)]
+        let (saved_stdout_fd, saved_stderr_fd) = redirect_stdout_stderr_to_log();
+        #[cfg(not(unix))]
+        let _ = (); // non-unix builds don't get fd isolation yet
+
+        // Mark that ratatui should use /dev/tty. The Renderer reads
+        // this on construction to choose its backend writer.
+        let _ = TTY_FD_PATH.set(true);
+
+        #[cfg(unix)]
+        return Ok(TerminalGuard {
+            saved_stdout_fd,
+            saved_stderr_fd,
+        });
+        #[cfg(not(unix))]
+        return Ok(TerminalGuard {});
     }
+}
+
+/// Open `/dev/tty` for write. Returns `None` when there's no
+/// controlling terminal (CI, pipe, headless), in which case callers
+/// should fall back to stdout — the user sees nothing useful
+/// either way but at least we don't crash.
+pub(crate) fn open_tty_for_write() -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(false)
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+}
+
+/// Query the controlling terminal's size via `ioctl(/dev/tty,
+/// TIOCGWINSZ)`. crossterm's own `terminal::size()` ioctls on fd 1,
+/// which is now the log file — returns ENOTTY. We open /dev/tty
+/// fresh each call (cheap; same fs operation that crossterm does
+/// internally for `is_raw_mode_enabled`) and read winsize from it.
+/// Falls back to (80, 24) on any error.
+pub(crate) fn tty_size() -> (u16, u16) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let f = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open("/dev/tty")
+        {
+            Ok(f) => f,
+            Err(_) => return (80, 24),
+        };
+        let fd = f.as_raw_fd();
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+        if rc < 0 || ws.ws_col == 0 || ws.ws_row == 0 {
+            return (80, 24);
+        }
+        (ws.ws_col, ws.ws_row)
+    }
+    #[cfg(not(unix))]
+    {
+        crossterm::terminal::size().unwrap_or((80, 24))
+    }
+}
+
+/// dup2 fd 1 and fd 2 to the dirge log file. Returns the saved
+/// originals so `Drop` can restore them. The same path the tracing
+/// subscriber uses is reused so all out-of-band output ends up in
+/// one place.
+#[cfg(unix)]
+fn redirect_stdout_stderr_to_log() -> (Option<libc::c_int>, Option<libc::c_int>) {
+    let log_path: std::path::PathBuf = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("state")))
+        .map(|base| base.join("dirge"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("dirge.log");
+    let _ = std::fs::create_dir_all(
+        log_path.parent().unwrap_or(std::path::Path::new("/tmp")),
+    );
+    let log = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(_) => return (None, None),
+    };
+    use std::os::fd::AsRawFd;
+    let log_fd = log.as_raw_fd();
+    // dup the originals so Drop can restore.
+    let saved_stdout_fd = unsafe { libc::dup(1) };
+    let saved_stderr_fd = unsafe { libc::dup(2) };
+    // Redirect fds 1 and 2 to the log.
+    unsafe {
+        libc::dup2(log_fd, 1);
+        libc::dup2(log_fd, 2);
+    }
+    // Drop our log handle — the duplicated fds in 1/2 keep the file alive.
+    drop(log);
+    (
+        if saved_stdout_fd >= 0 { Some(saved_stdout_fd) } else { None },
+        if saved_stderr_fd >= 0 { Some(saved_stderr_fd) } else { None },
+    )
 }
 
 impl Drop for TerminalGuard {
@@ -64,7 +208,16 @@ impl Drop for TerminalGuard {
         // (would burn unnecessary shutdown time on a fast path).
         EVENT_READER_SHUTDOWN.store(true, Ordering::Relaxed);
         wait_for_reader_exit(Duration::from_millis(200));
-        let mut stdout = std::io::stdout();
+        // Cleanup writes go to /dev/tty, NOT stdout — fd 1 is still
+        // redirected to the log file at this point. We restore
+        // stdout/stderr AFTER the terminal reset escapes have been
+        // emitted so the shell prompt that follows lands on a clean
+        // screen.
+        let mut tty_writer: Box<dyn std::io::Write> = match open_tty_for_write() {
+            Some(f) => Box::new(f),
+            None => Box::new(std::io::stdout()),
+        };
+        let stdout = &mut tty_writer;
 
         // === Phase 1: tell the terminal to stop reporting things ===
         // Explicit DECRST for every mode we might have touched.
@@ -109,7 +262,7 @@ impl Drop for TerminalGuard {
         // for very-slow / non-responsive terminals (raw write to
         // /dev/null or similar).
         #[cfg(unix)]
-        sync_and_drain_via_sentinel(&mut stdout, Duration::from_millis(500));
+        sync_and_drain_via_sentinel(stdout, Duration::from_millis(500));
 
         // === Phase 3: tear down raw mode ===
         // By here the synchronization sentinel has fired and the
@@ -119,6 +272,25 @@ impl Drop for TerminalGuard {
         // theme depended on it being visible.
         let _ = stdout.write_all(b"\x1b[?25h");
         let _ = stdout.flush();
+
+        // Drop our TTY handle BEFORE restoring fd 1/2 so any
+        // late-shutdown writes by other threads land in the log
+        // (where they're harmless) until the very last moment when
+        // fd 1/2 point at the real terminal again.
+        drop(tty_writer);
+
+        // === Phase 4: restore stdout/stderr ===
+        #[cfg(unix)]
+        unsafe {
+            if let Some(orig) = self.saved_stdout_fd {
+                libc::dup2(orig, 1);
+                libc::close(orig);
+            }
+            if let Some(orig) = self.saved_stderr_fd {
+                libc::dup2(orig, 2);
+                libc::close(orig);
+            }
+        }
     }
 }
 
@@ -165,7 +337,7 @@ fn wait_for_reader_exit(budget: Duration) {
 /// Bounded by `budget` as a fallback for terminals that don't
 /// reply (rare; mostly headless / pipe contexts).
 #[cfg(unix)]
-fn sync_and_drain_via_sentinel(stdout: &mut std::io::Stdout, budget: Duration) {
+fn sync_and_drain_via_sentinel(stdout: &mut dyn std::io::Write, budget: Duration) {
     let fd_in: libc::c_int = 0; // stdin
 
     // Save the current stdin flags so we can restore blocking
