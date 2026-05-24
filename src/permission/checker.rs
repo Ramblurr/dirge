@@ -1799,4 +1799,96 @@ mod tests {
         assert!(!pattern_for_tool("read", "cd *").matches("cd /a/b/c"));
         assert!(pattern_for_tool("read", "cd *").matches("cd file"));
     }
+
+    /// Regression: the prior bash defaults used exact patterns
+    /// (`cargo build`, `git status`, etc.) so any flagged
+    /// invocation re-prompted (`cargo build --release` →
+    /// no match → Ask). The widened defaults wildcard those AND
+    /// add the common dev commands users hit constantly. Pin a
+    /// representative sample so a future tightening can't quietly
+    /// regress the friction.
+    #[test]
+    fn default_bash_rules_cover_common_flagged_invocations() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp/proj")),
+        );
+        for cmd in [
+            // The original friction cases.
+            "cargo build --release",
+            "cargo test --bin dirge --features plugin",
+            "cargo fmt --all --check",
+            "cargo clippy --all-targets",
+            "git status -s",
+            "git log --oneline -10",
+            // Newly-added safe dev commands.
+            "cargo run --release",
+            "git add -A",
+            "git commit -m \"msg\"",
+            "git checkout main",
+            "git switch -c feat/foo",
+            "git pull --rebase",
+            "git fetch origin",
+            "git restore --staged file.rs",
+            "make test",
+            "pytest -x tests/",
+            "python3 script.py",
+            "node index.js",
+            "npx eslint .",
+            "npm test -- --coverage",
+            "go test ./...",
+        ] {
+            let result = checker.check("bash", cmd);
+            assert!(
+                matches!(result, CheckResult::Allowed),
+                "{cmd:?} should be auto-allowed by default bash rules; got {result:?}",
+            );
+        }
+    }
+
+    /// Defense: high-risk operations stay Ask (or Deny) even after
+    /// the bash defaults were widened. If anyone accidentally adds
+    /// `npm install **` or similar to the allow list this fires.
+    #[test]
+    fn default_bash_rules_keep_high_risk_gated() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp/proj")),
+        );
+        // Destructive / network-side-effect / privilege-escalation
+        // commands must NOT be silently allowed.
+        for cmd in [
+            "git push",
+            "git push origin main",
+            "git reset --hard",
+            "git rebase -i main",
+            "git stash drop",
+            "npm install lodash",
+            "pip install requests",
+            "curl http://example.com",
+            "wget http://example.com",
+            "sudo make install",
+        ] {
+            let result = checker.check("bash", cmd);
+            assert!(
+                matches!(result, CheckResult::Ask | CheckResult::Denied(_)),
+                "{cmd:?} must NOT be silently allowed; got {result:?}",
+            );
+        }
+
+        // Hard denies stay hard denies.
+        for cmd in [
+            "rm -rf /etc",
+            "sudo rm -rf /usr",
+            "dd if=/dev/zero of=/dev/sda",
+        ] {
+            let result = checker.check("bash", cmd);
+            assert!(
+                matches!(result, CheckResult::Denied(_)),
+                "{cmd:?} must remain hard-denied; got {result:?}",
+            );
+        }
+    }
 }

@@ -168,7 +168,35 @@ impl std::fmt::Display for SecurityMode {
 }
 
 pub fn default_bash_rules() -> Vec<(&'static str, Action)> {
+    // Allow-list ordering / shape — three buckets:
+    //   1. Read-only inspection (cat / ls / grep / etc.)
+    //   2. Project-scoped dev workflow inside CWD (cargo / git
+    //      writes that stay local / make / npm test / language
+    //      runners). Same trust model as the CWD-scoped write/edit
+    //      allow installed in `checker.rs:install_cwd_allow_rules`:
+    //      if you trust the agent to edit project files, running
+    //      project code is the same trust level.
+    //   3. Filesystem mutators (mkdir / touch / mv / cp) — they
+    //      ALSO route their path arguments through the `write` rules
+    //      via `extract_mutation_paths`, so the CWD-allow on write
+    //      still gates the actual filesystem destination.
+    //
+    // Patterns use `**` (any chars including `/`) instead of exact
+    // match because every prior exact pattern (`cargo build`,
+    // `git status`, etc.) silently re-prompted on common flagged
+    // invocations like `cargo build --release` or `git status -s` —
+    // friction that drove the "permissions are too aggressive"
+    // complaint.
+    //
+    // Intentionally NOT auto-allowed:
+    //   - `git push **`           — side effect outside the project
+    //   - `git rebase/reset/stash`— destructive, can lose work
+    //   - `npm install **`, `pip install **` — executes install
+    //     scripts as arbitrary code outside the repo tree
+    //   - `sudo **`               — privilege escalation always asks
+    //   - `curl/wget`             — network egress always asks
     vec![
+        // Read-only inspection
         ("ls **", Action::Allow),
         ("cd **", Action::Allow),
         ("pwd", Action::Allow),
@@ -184,22 +212,83 @@ pub fn default_bash_rules() -> Vec<(&'static str, Action)> {
         ("cut **", Action::Allow),
         ("diff **", Action::Allow),
         ("grep **", Action::Allow),
+        ("rg **", Action::Allow),
         ("find **", Action::Allow),
-        ("git status", Action::Allow),
+        ("file **", Action::Allow),
+        ("stat **", Action::Allow),
+        ("env", Action::Allow),
+        ("date **", Action::Allow),
+        ("whoami", Action::Allow),
+        ("hostname", Action::Allow),
+        // Git — local read/write inside the repo
+        ("git status **", Action::Allow),
         ("git log **", Action::Allow),
         ("git diff **", Action::Allow),
         ("git show **", Action::Allow),
         ("git branch **", Action::Allow),
-        ("cargo check", Action::Allow),
-        ("cargo build", Action::Allow),
-        ("cargo test", Action::Allow),
-        ("cargo fmt", Action::Allow),
-        ("cargo clippy", Action::Allow),
+        ("git add **", Action::Allow),
+        ("git commit **", Action::Allow),
+        ("git checkout **", Action::Allow),
+        ("git switch **", Action::Allow),
+        ("git pull **", Action::Allow),
+        ("git fetch **", Action::Allow),
+        ("git remote **", Action::Allow),
+        ("git tag **", Action::Allow),
+        ("git blame **", Action::Allow),
+        ("git restore **", Action::Allow),
+        ("git rev-parse **", Action::Allow),
+        ("git rev-list **", Action::Allow),
+        ("git ls-files **", Action::Allow),
+        ("git config --get **", Action::Allow),
+        // Rust toolchain
+        ("cargo check **", Action::Allow),
+        ("cargo build **", Action::Allow),
+        ("cargo test **", Action::Allow),
+        ("cargo fmt **", Action::Allow),
+        ("cargo clippy **", Action::Allow),
+        ("cargo run **", Action::Allow),
+        ("cargo doc **", Action::Allow),
+        ("cargo tree **", Action::Allow),
+        ("cargo metadata **", Action::Allow),
+        ("rustc --version", Action::Allow),
+        // Filesystem mutators — path args still route through
+        // `write` rules via `extract_mutation_paths` (F1 dirge-dvy),
+        // so the CWD-allow on write still gates the destination.
         ("mkdir **", Action::Allow),
         ("touch **", Action::Allow),
+        ("mv **", Action::Allow),
+        ("cp **", Action::Allow),
+        ("ln **", Action::Allow),
+        ("chmod **", Action::Allow),
+        // Node / npm / yarn / pnpm — runners (NOT installers)
+        ("npm test **", Action::Allow),
         ("npm run **", Action::Allow),
-        ("pip list", Action::Allow),
+        ("npm ls **", Action::Allow),
+        ("npx **", Action::Allow),
+        ("node **", Action::Allow),
+        ("yarn run **", Action::Allow),
+        ("pnpm run **", Action::Allow),
+        // Python — runners + read-only pip
+        ("python **", Action::Allow),
+        ("python3 **", Action::Allow),
+        ("pytest **", Action::Allow),
+        ("ruff **", Action::Allow),
+        ("black **", Action::Allow),
+        ("mypy **", Action::Allow),
+        ("pip list **", Action::Allow),
         ("pip show **", Action::Allow),
+        ("pip freeze", Action::Allow),
+        // Go
+        ("go build **", Action::Allow),
+        ("go test **", Action::Allow),
+        ("go run **", Action::Allow),
+        ("go fmt **", Action::Allow),
+        ("go vet **", Action::Allow),
+        ("go mod **", Action::Allow),
+        // Make + general task runners
+        ("make **", Action::Allow),
+        ("just **", Action::Allow),
+        // Hard denies — destructive system-level operations
         ("rm -rf /**", Action::Deny),
         ("sudo rm -rf /**", Action::Deny),
         ("dd **", Action::Deny),
