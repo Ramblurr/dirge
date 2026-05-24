@@ -166,12 +166,15 @@ impl<'a> Widget for LeftPanel<'a> {
     }
 }
 
+/// One row of top padding so the left-panel content doesn't sit
+/// flush against the unified top frame. Matches the right panel's
+/// symmetric padding for visual balance.
+const LEFT_PANEL_TOP_PAD: u16 = 1;
+
 fn paint_idle_card(buf: &mut Buffer, area: Rect, info: &LeftPanelInfo, style: Style) {
     let dim = Style::default().fg(RColor::DarkGray);
 
-    // Vertical layout: blank top + DIRGE logo (3 rows) + blank + metadata (3 rows).
     let lines: Vec<(String, Style)> = vec![
-        (String::new(), dim),
         ("D I R G E".to_string(), style),
         (String::new(), dim),
         (String::new(), dim),
@@ -181,11 +184,11 @@ fn paint_idle_card(buf: &mut Buffer, area: Rect, info: &LeftPanelInfo, style: St
     ];
 
     for (i, (text, st)) in lines.iter().enumerate() {
-        if i as u16 >= area.height {
+        let dy = LEFT_PANEL_TOP_PAD + i as u16;
+        if dy >= area.height {
             break;
         }
-        let y = area.y + i as u16;
-        // Center horizontally within left panel rect.
+        let y = area.y + dy;
         let w = area.width as usize;
         let tw = text.chars().count();
         let pad = w.saturating_sub(tw) / 2;
@@ -200,20 +203,57 @@ fn paint_subagent_list(buf: &mut Buffer, area: Rect, rows: &[SubagentStatusRow])
     let agent = Style::default().fg(RColor::Green);
     let err = Style::default().fg(RColor::Red);
 
-    let cap = area.height as usize;
-    for (i, row) in rows.iter().take(cap).enumerate() {
-        let y = area.y + i as u16;
+    // Two rows per subagent: short hash line, then indented prompt
+    // line. Format:
+    //
+    //   ⋯ ...b53fcd
+    //      Investigate Clojure project structure …
+    //
+    // Glyph + space prefix = 2 cells; the prompt row indents by 3
+    // cells (under the hash, not the glyph) so wrap reads naturally.
+    // Reserve one trailing cell so text doesn't run into the
+    // chat-frame divider on the right.
+    let prompt_indent = 3_u16;
+    let trailing_pad = 1_usize;
+    let cap_rows = area.height.saturating_sub(LEFT_PANEL_TOP_PAD) as usize;
+    let mut dy: u16 = LEFT_PANEL_TOP_PAD;
+    for row in rows {
+        // Need at least 2 rows for this subagent.
+        if (dy + 2 - LEFT_PANEL_TOP_PAD) as usize > cap_rows {
+            break;
+        }
         let (glyph, style) = match row.state.as_str() {
             "running" => ("⋯", agent),
             "completed" => ("✓", agent),
             "failed" => ("✗", err),
             _ => ("·", dim),
         };
-        let id_field: String = row.id_short.chars().take(6).collect();
-        let prompt_w = (area.width as usize).saturating_sub(2 + 7 + 1);
-        let prompt_field: String = row.prompt_short.chars().take(prompt_w).collect();
-        let line = format!("{} {:6} {}", glyph, id_field, prompt_field);
-        buf.set_stringn(area.x, y, line, area.width as usize, style);
+        // Hash line: glyph + " ..." + last 6 chars of id_short.
+        let id_tail: String = row
+            .id_short
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let hash_line = format!("{} ...{}", glyph, id_tail);
+        let hash_w = (area.width as usize).saturating_sub(trailing_pad);
+        buf.set_stringn(area.x, area.y + dy, hash_line, hash_w, style);
+        // Prompt line: indented, dim, truncated to fit width.
+        let prompt_avail = (area.width as usize)
+            .saturating_sub(prompt_indent as usize)
+            .saturating_sub(trailing_pad);
+        let prompt_field: String = row.prompt_short.chars().take(prompt_avail).collect();
+        buf.set_stringn(
+            area.x + prompt_indent,
+            area.y + dy + 1,
+            prompt_field,
+            prompt_avail,
+            dim,
+        );
+        dy += 2;
     }
 }
 
@@ -236,17 +276,25 @@ impl<'a> RightPanel<'a> {
     }
 }
 
+/// Right-panel top padding (rows). Mirrors LEFT_PANEL_TOP_PAD so
+/// the two sides line up against the unified top frame.
+const RIGHT_PANEL_TOP_PAD: u16 = 1;
+/// One cell of trailing padding inside sub-panel content so it
+/// doesn't run flush against the right │ border.
+const RIGHT_PANEL_TRAILING_PAD: u16 = 1;
+/// Amber tone — used for the [SYSTEM] title in the unified top
+/// frame and for all body text inside the right panel.
+const AMBER: RColor = RColor::Rgb(255, 191, 0);
+
 impl<'a> Widget for RightPanel<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
 
-        // Build each sub-panel from the panel_data. Filter empties
-        // by emitting a "(none)" line so the user always sees the
-        // section structure.
+        // Body text in the [SYSTEM] pane is amber per spec.
         let dim = RColor::DarkGray;
-        let body = RColor::Green;
+        let body = AMBER;
 
         // [SYSTEM LOAD]
         let sysload_panel = match self.data.sysload.as_ref() {
@@ -293,28 +341,57 @@ impl<'a> Widget for RightPanel<'a> {
             }
             p
         };
-        let modified_panel = {
-            let mut p = SubPanel::new("MODIFIED").border_style(self.style);
-            if self.data.modified.is_empty() {
-                p = p.line("· (none)", dim);
-            } else {
-                for f in &self.data.modified {
-                    p = p.line(f.clone(), body);
-                }
-            }
-            p
-        };
+        // MODIFIED is built below with knowledge of the remaining
+        // row budget — keep it out of the fixed-height stack.
 
-        // Stack vertically with one blank row between.
-        let mut y = area.y;
-        for panel in [sysload_panel, mcp_panel, lsp_panel, todos_panel, modified_panel] {
+        // Stack vertically with one blank row between. Top padding
+        // pushes the first sub-panel down by RIGHT_PANEL_TOP_PAD
+        // rows, and `inner_w = area.width - RIGHT_PANEL_TRAILING_PAD`
+        // leaves a one-cell margin so content doesn't run into the
+        // outer divider on the right edge.
+        let mut y = area.y + RIGHT_PANEL_TOP_PAD;
+        let inner_w = area.width.saturating_sub(RIGHT_PANEL_TRAILING_PAD);
+        // First four sub-panels get their natural height. MODIFIED
+        // grows to fill the remaining vertical space (with a
+        // `+N older` footer when truncated) — same growth model
+        // the legacy panel had.
+        let fixed = [sysload_panel, mcp_panel, lsp_panel, todos_panel];
+        for panel in fixed {
             let h = panel.height();
             if y + h > area.y + area.height {
                 break;
             }
-            let rect = Rect::new(area.x, y, area.width, h);
+            let rect = Rect::new(area.x, y, inner_w, h);
             panel.render(rect, buf);
             y += h + 1; // blank spacer
+        }
+        // MODIFIED: take whatever vertical room is left.
+        let modified_top = y;
+        let remaining = (area.y + area.height).saturating_sub(modified_top);
+        if remaining >= 3 {
+            let rect = Rect::new(area.x, modified_top, inner_w, remaining);
+            // Re-build the MODIFIED panel with its true row budget
+            // applied so a `+N older` footer can substitute for
+            // overflow.
+            let inner_rows = (remaining as usize).saturating_sub(2);
+            let mut p = SubPanel::new("MODIFIED").border_style(self.style);
+            let total = self.data.modified.len();
+            if total == 0 {
+                p = p.line("· (none)", dim);
+            } else if total <= inner_rows {
+                for f in &self.data.modified {
+                    p = p.line(f.clone(), body);
+                }
+            } else {
+                // Reserve last row for the "+N older" footer.
+                let head_rows = inner_rows.saturating_sub(1);
+                for f in self.data.modified.iter().take(head_rows) {
+                    p = p.line(f.clone(), body);
+                }
+                let older = total - head_rows;
+                p = p.line(format!("+{} older", older), dim);
+            }
+            p.render(rect, buf);
         }
     }
 }
@@ -486,14 +563,21 @@ mod tests {
             })
             .unwrap();
         backend = terminal.backend().clone();
-        let row0: String = (0..30)
-            .map(|x| backend.buffer().cell((x, 0)).unwrap().symbol().to_string())
-            .collect();
-        let row1: String = (0..30)
-            .map(|x| backend.buffer().cell((x, 1)).unwrap().symbol().to_string())
-            .collect();
-        assert!(row0.starts_with("⋯ abc123 do thing"), "row0 = {:?}", row0);
-        assert!(row1.starts_with("✓ def456 done"), "row1 = {:?}", row1);
+        // Two-row format with one row of top padding:
+        //   row 0: blank (LEFT_PANEL_TOP_PAD)
+        //   row 1: ⋯ ...bc123       (hash line for subagent 0)
+        //   row 2:    do thing       (prompt line, indented)
+        //   row 3: ✓ ...ef456       (hash line for subagent 1)
+        //   row 4:    done
+        let row_at = |y: u16| -> String {
+            (0..30)
+                .map(|x| backend.buffer().cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        };
+        assert!(row_at(1).starts_with("⋯ ...abc123"), "row1 = {:?}", row_at(1));
+        assert!(row_at(2).contains("do thing"), "row2 = {:?}", row_at(2));
+        assert!(row_at(3).starts_with("✓ ...def456"), "row3 = {:?}", row_at(3));
+        assert!(row_at(4).contains("done"), "row4 = {:?}", row_at(4));
     }
 
     /// RightPanel stacks sub-panels and shows their titles.

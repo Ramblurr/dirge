@@ -77,16 +77,16 @@ impl<'a> Widget for ChatPane<'a> {
         if visible == 0 || l.chat.width == 0 || self.lines.is_empty() {
             return;
         }
-        // Window the buffer slice: take `visible` lines ending at
-        // (total - scroll_offset). When scroll_offset > 0 the user
-        // has scrolled up so we show an older window.
         let total = self.lines.len();
         let end = total.saturating_sub(self.scroll_offset);
         let start = end.saturating_sub(visible);
         let slice = &self.lines[start..end];
+        // Reserve a one-cell right margin so content doesn't sit
+        // flush against the chat ║ border on the right.
+        let text_w = l.chat.width.saturating_sub(1);
         for (i, entry) in slice.iter().enumerate() {
             let y = l.chat.y + i as u16;
-            paint_line(buf, l.chat.x, y, l.chat.width, entry);
+            paint_line(buf, l.chat.x, y, text_w, entry);
         }
     }
 }
@@ -284,8 +284,11 @@ mod tests {
 
         // Single line lands on the top row of the chat band.
         let row = layout.chat.y;
-        // chat.x .. chat.x + chat.width should be 'x'.
-        for i in 0..layout.chat.width {
+        // Content fills cols [chat.x, chat.x + chat.width - 1).
+        // The last cell is reserved as a 1-cell right margin so
+        // content doesn't run into the ║ border.
+        let text_w = layout.chat.width - 1;
+        for i in 0..text_w {
             assert_eq!(
                 backend
                     .buffer()
@@ -297,6 +300,16 @@ mod tests {
                 layout.chat.x + i
             );
         }
+        // The reserved margin cell (chat.x + text_w) is blank.
+        assert_eq!(
+            backend
+                .buffer()
+                .cell((layout.chat.x + text_w, row))
+                .unwrap()
+                .symbol(),
+            " ",
+            "expected the 1-cell right margin to be blank"
+        );
         // Right ║ must NOT be overwritten.
         assert_eq!(
             backend
