@@ -321,26 +321,27 @@ impl Renderer {
             }
         };
 
-        // When the overlay is active, size the input box to fit
-        // the SOFT-WRAPPED row count — long `args:` lines wrap
-        // inside the box rather than being clipped at the right
-        // edge. Cap at MAX_INPUT_VISIBLE_LINES so the alert can't
-        // crowd out the chat entirely on a tiny terminal.
+        // Size the input box to fit the overlay (or, for the
+        // editor, the wrapped editor row count). For overlays we
+        // bypass MAX_INPUT_VISIBLE_LINES because the user
+        // **must** see the action keys row regardless of how
+        // long the alert body is — clipping at 8 was hiding
+        // [y]/[a]/[n]/[ESC]. The chat shrinks to accommodate, with
+        // a floor of 4 rows so the user still sees recent context
+        // above the alert. The editor stays clamped at MAX so the
+        // user can't accidentally crowd the chat by pasting a 50-
+        // line block.
+        let (cols_q, rows_q) = crossterm::terminal::size().unwrap_or((80, 24));
         let effective_input_rows = if let Some(lines) = alert_overlay.as_ref() {
-            // Compute the layout's input_box width without the
-            // overlay's row count, so we know the wrap target. The
-            // box's outer width = chat_v_right_col - chat_v_left_col
-            // + 1 (independent of input_rows).
-            let probe = crate::ui::tui::layout::Layout::new(
-                crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80),
-                crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24),
-                1,
-            );
+            let probe = crate::ui::tui::layout::Layout::new(cols_q, rows_q, 1);
             let wrapped = crate::ui::tui::bottom::overlay_wrapped_row_count(
                 lines,
                 probe.input_box.width,
             );
-            (wrapped as u16).clamp(1, MAX_INPUT_VISIBLE_LINES as u16)
+            // Leave at least 4 rows for the chat (+ 5 fixed rows
+            // of frames/status), so input_rows ≤ rows - 9.
+            let ceiling = (rows_q as i32 - 9).max(1) as u16;
+            (wrapped as u16).clamp(1, ceiling)
         } else {
             *input_rows
         };

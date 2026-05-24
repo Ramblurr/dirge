@@ -299,35 +299,77 @@ fn paint_overlay_box(
     area: Rect,
     title: &str,
     lines: &[(String, crossterm::style::Color)],
-    style: Style,
+    _style: Style,
 ) {
-    paint_frame(buf, area, Some(title), style);
+    // Alert box border is yellow regardless of the supplied frame
+    // style — the user must see at a glance that this is a
+    // cautionary modal, not a casual chrome border.
+    let yellow = Style::default().fg(RColor::Yellow);
+    paint_frame(buf, area, Some(title), yellow);
     let inner_w = area.width as usize - 2;
     let inner_h = area.height as usize - 2;
-    // Build the visual rows: soft-wrap each input line to fit the
-    // inner band, then center each visual row. `wrap_w` reserves 2
-    // cells of breathing room on each side so the wrapped text
-    // doesn't run flush against the │ borders — same `args:` line
-    // that used to get hard-cut at the right edge now wraps onto
-    // the next row instead.
-    let wrap_w = inner_w.saturating_sub(4).max(1);
+
+    // Soft-wrap each input line, but use a single SENTINEL value for
+    // the action-keys row (passed as the LAST line in `lines`) so
+    // we can guarantee it stays visible even if the body overflows.
+    let wrap_w = inner_w.saturating_sub(2).max(1);
     use crate::ui::wrap::soft_wrap;
-    let mut visual: Vec<(String, crossterm::style::Color)> = Vec::new();
-    for (text, color) in lines.iter() {
+    let last_idx = lines.len().saturating_sub(1);
+    let mut head_visual: Vec<(String, crossterm::style::Color)> = Vec::new();
+    let mut sticky_last: Vec<(String, crossterm::style::Color)> = Vec::new();
+    for (i, (text, color)) in lines.iter().enumerate() {
         let chunks = soft_wrap(text, wrap_w, "  ");
         for chunk in chunks {
-            visual.push((chunk, *color));
+            if i == last_idx {
+                sticky_last.push((chunk, *color));
+            } else {
+                head_visual.push((chunk, *color));
+            }
         }
     }
-    for (i, slot) in (0..inner_h).enumerate() {
-        if let Some((text, color)) = visual.get(i) {
-            let y = area.y + 1 + slot as u16;
-            let tw = text.chars().count();
-            let pad = inner_w.saturating_sub(tw) / 2;
-            let st = Style::default().fg(super::chat::crossterm_to_ratatui(*color));
-            buf.set_stringn(area.x + 1 + pad as u16, y, text, inner_w - pad, st);
-        }
+
+    // Layout: head visual rows fill from the top. If the combined
+    // head + sticky doesn't fit `inner_h`, truncate the END of head
+    // with a "…" indicator so the sticky (action keys) row is
+    // always shown.
+    let sticky_len = sticky_last.len();
+    let head_budget = inner_h.saturating_sub(sticky_len);
+    let head_to_show: Vec<&(String, crossterm::style::Color)>;
+    let need_ellipsis = head_visual.len() > head_budget;
+    let head_keep = if need_ellipsis {
+        head_budget.saturating_sub(1)
+    } else {
+        head_budget
+    };
+    head_to_show = head_visual.iter().take(head_keep).collect();
+
+    // Paint head rows LEFT-aligned with 1 leading space of padding.
+    let mut row_idx = 0usize;
+    for (text, color) in head_to_show {
+        let y = area.y + 1 + row_idx as u16;
+        let st = Style::default().fg(super::chat::crossterm_to_ratatui(*color));
+        buf.set_stringn(area.x + 2, y, text, inner_w.saturating_sub(2), st);
+        row_idx += 1;
     }
+    if need_ellipsis && row_idx < inner_h {
+        let y = area.y + 1 + row_idx as u16;
+        let dim = Style::default().fg(RColor::DarkGray);
+        buf.set_stringn(area.x + 2, y, "…", inner_w.saturating_sub(2), dim);
+        row_idx += 1;
+    }
+    // Paint the sticky tail rows (action keys) at the BOTTOM of the
+    // inner band so they're always visible.
+    let tail_start = inner_h.saturating_sub(sticky_len);
+    for (i, (text, color)) in sticky_last.iter().enumerate() {
+        let slot = tail_start + i;
+        if slot >= inner_h {
+            break;
+        }
+        let y = area.y + 1 + slot as u16;
+        let st = Style::default().fg(super::chat::crossterm_to_ratatui(*color));
+        buf.set_stringn(area.x + 2, y, text, inner_w.saturating_sub(2), st);
+    }
+    let _ = row_idx; // silence linter; head rows fill from top, tail anchors to bottom
 }
 
 /// Soft-wrap the overlay `lines` against `outer_width` (the input
@@ -474,7 +516,13 @@ mod tests {
     #[test]
     fn input_box_overlay_replaces_editor() {
         use crossterm::style::Color as CC;
-        let layout = Layout::new(160, 30, 1);
+        // input_rows=4 so the overlay has 4 inner rows. With our
+        // sticky-tail logic, last line (action keys) anchors at the
+        // bottom; head lines fill from the top. With 2 lines and
+        // last-is-sticky, "⚠ PERMISSION REQUIRED" is at row 1 (top
+        // inner), action-keys-equivalent "tool: read_file" at row 4
+        // (bottom inner).
+        let layout = Layout::new(160, 30, 4);
         let lines = vec![
             ("⚠ PERMISSION REQUIRED".to_string(), CC::Yellow),
             ("tool: read_file".to_string(), CC::Yellow),
