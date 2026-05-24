@@ -335,25 +335,6 @@ impl Renderer {
             frame_color,
         };
 
-        // Force a full repaint by clearing ratatui's tracked prev
-        // buffer — without this, anything that writes to the
-        // terminal outside ratatui's draw cycle (stderr in raw mode,
-        // panic messages, tracing logs, plugin/janet prints,
-        // background process output…) leaves the screen state
-        // diverged from ratatui's prev_buffer. Subsequent diffs
-        // only emit changed cells from prev→next, so the divergent
-        // cells persist as visual ghosts: stale "(none)" lines next
-        // to fresh "● clojure-lsp" entries, scrambled panel titles
-        // like "[56P]" instead of "[MCP]", staircase artifacts
-        // below the status row, the works.
-        //
-        // The proper fix is to find and eliminate every direct
-        // stdout/stderr write that bypasses ratatui. Until that's
-        // done, this `clear` keeps the screen consistent at the
-        // cost of repainting every cell each frame (cheap on the
-        // crossterm backend — it's all in-process buffer ops then
-        // one write to stdout).
-        terminal.clear()?;
         terminal.draw(|f| render_frame(&scene, f))?;
         Ok(())
     }
