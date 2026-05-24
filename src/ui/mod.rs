@@ -3887,14 +3887,23 @@ pub async fn run_interactive(
                 {
                     let safe_tool = sanitize_output(&ask_req.tool);
                     let safe_input = sanitize_output(&ask_req.input);
+                    // Spacer rows are empty strings — the widget
+                    // wraps + paints them as a blank row each,
+                    // giving the alert visual breathing room
+                    // between sections. Action keys use theme::perm
+                    // (amber/yellow) so the whole alert reads in
+                    // one color rather than mixing the cautionary
+                    // amber with command-accent green.
                     let mut overlay: Vec<(String, Color)> = Vec::new();
                     overlay.push(("⚠ PERMISSION REQUIRED".to_string(), theme::perm()));
+                    overlay.push((String::new(), theme::perm()));
                     overlay.push((format!("tool: {}", safe_tool), theme::perm()));
                     overlay.push((format!("args: {}", safe_input), theme::perm()));
+                    overlay.push((String::new(), theme::perm()));
                     overlay.push((
                         "[y] allow once  [a] allow always  [n] deny  [ESC] abort"
                             .to_string(),
-                        theme::accent(),
+                        theme::perm(),
                     ));
                     renderer.set_alert_overlay(overlay);
                     renderer.draw_bottom(

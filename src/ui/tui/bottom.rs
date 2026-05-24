@@ -304,16 +304,49 @@ fn paint_overlay_box(
     paint_frame(buf, area, Some(title), style);
     let inner_w = area.width as usize - 2;
     let inner_h = area.height as usize - 2;
+    // Build the visual rows: soft-wrap each input line to fit the
+    // inner band, then center each visual row. `wrap_w` reserves 2
+    // cells of breathing room on each side so the wrapped text
+    // doesn't run flush against the │ borders — same `args:` line
+    // that used to get hard-cut at the right edge now wraps onto
+    // the next row instead.
+    let wrap_w = inner_w.saturating_sub(4).max(1);
+    use crate::ui::wrap::soft_wrap;
+    let mut visual: Vec<(String, crossterm::style::Color)> = Vec::new();
+    for (text, color) in lines.iter() {
+        let chunks = soft_wrap(text, wrap_w, "  ");
+        for chunk in chunks {
+            visual.push((chunk, *color));
+        }
+    }
     for (i, slot) in (0..inner_h).enumerate() {
-        if let Some((text, color)) = lines.get(i) {
+        if let Some((text, color)) = visual.get(i) {
             let y = area.y + 1 + slot as u16;
-            // Center each line horizontally within the inner band.
             let tw = text.chars().count();
             let pad = inner_w.saturating_sub(tw) / 2;
             let st = Style::default().fg(super::chat::crossterm_to_ratatui(*color));
             buf.set_stringn(area.x + 1 + pad as u16, y, text, inner_w - pad, st);
         }
     }
+}
+
+/// Soft-wrap the overlay `lines` against `outer_width` (the input
+/// box's outer width — inner cells = outer - 2) and return the
+/// total number of visual rows the body needs. Called by the
+/// renderer to size `input_box.height` so wrapped content fits
+/// instead of getting clipped at the box edge.
+pub fn overlay_wrapped_row_count(
+    lines: &[(String, crossterm::style::Color)],
+    outer_width: u16,
+) -> usize {
+    let inner_w = (outer_width as usize).saturating_sub(2);
+    let wrap_w = inner_w.saturating_sub(4).max(1);
+    use crate::ui::wrap::soft_wrap;
+    let mut total = 0;
+    for (text, _) in lines {
+        total += soft_wrap(text, wrap_w, "  ").len();
+    }
+    total
 }
 
 fn paint_status(buf: &mut Buffer, area: Rect, status: &str) {

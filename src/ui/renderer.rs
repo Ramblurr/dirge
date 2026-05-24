@@ -322,12 +322,25 @@ impl Renderer {
         };
 
         // When the overlay is active, size the input box to fit
-        // its content — otherwise the alert is rendered into a
-        // 3-row frame that can only show the title, hiding the
-        // tool/args/action-keys rows. Without overlay, use the
-        // wrapped-editor row count we cached.
+        // the SOFT-WRAPPED row count — long `args:` lines wrap
+        // inside the box rather than being clipped at the right
+        // edge. Cap at MAX_INPUT_VISIBLE_LINES so the alert can't
+        // crowd out the chat entirely on a tiny terminal.
         let effective_input_rows = if let Some(lines) = alert_overlay.as_ref() {
-            (lines.len() as u16).clamp(1, MAX_INPUT_VISIBLE_LINES as u16)
+            // Compute the layout's input_box width without the
+            // overlay's row count, so we know the wrap target. The
+            // box's outer width = chat_v_right_col - chat_v_left_col
+            // + 1 (independent of input_rows).
+            let probe = crate::ui::tui::layout::Layout::new(
+                crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80),
+                crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24),
+                1,
+            );
+            let wrapped = crate::ui::tui::bottom::overlay_wrapped_row_count(
+                lines,
+                probe.input_box.width,
+            );
+            (wrapped as u16).clamp(1, MAX_INPUT_VISIBLE_LINES as u16)
         } else {
             *input_rows
         };

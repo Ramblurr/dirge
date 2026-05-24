@@ -106,27 +106,14 @@ impl<'a> Widget for TopFrame<'a> {
                 .set_style(self.style);
         }
         // Right section: cols (chat_v_right_col, cols).
-        // [SYSTEM] title is painted in amber so the system pane has
-        // a distinct visual identity from the chat / agent-status
-        // sections.
+        // All three top-frame titles share the same style so the
+        // header reads as one coherent strip. (Earlier the [SYSTEM]
+        // title was amber to match the body content inside that
+        // pane, but visual inconsistency between sibling titles
+        // outweighed the section-coloring win.)
         let right_start = l.chat_v_right_col.saturating_add(1);
         let right_w = l.top_frame.width.saturating_sub(right_start);
-        let amber = Style::default().fg(Color::Rgb(255, 191, 0));
-        // Horizontals stay in the frame style; the title chars
-        // alone get amber. paint_titled_horizontal applies one
-        // style to the whole segment, so paint it twice: first the
-        // fill in frame style, then overpaint the title cells in amber.
         paint_titled_horizontal(buf, right_start, y, right_w, RIGHT_TITLE, '═', self.style);
-        if right_w as usize > RIGHT_TITLE.chars().count() {
-            let pad = right_w as usize - RIGHT_TITLE.chars().count();
-            let left_pad = (pad / 2) as u16;
-            for (i, ch) in RIGHT_TITLE.chars().enumerate() {
-                let x = right_start + left_pad + i as u16;
-                if x < l.top_frame.width {
-                    buf[(x, y)].set_char(ch).set_style(amber);
-                }
-            }
-        }
     }
 }
 
