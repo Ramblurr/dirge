@@ -287,6 +287,16 @@ pub struct LoopConfig {
     /// `LoopSpawnConfig` / `provider.rs` plumbing. Until then this
     /// field is accepted but not acted on.
     pub compact_model: Option<String>,
+
+    /// Additional tool names to treat as mutating (clears read-only
+    /// entries from the storm breaker window). Built-in defaults
+    /// (`write`, `edit`, `bash`, `apply_patch`) are always included.
+    pub storm_mutating_tools: Option<Vec<String>>,
+
+    /// Additional tool names to treat as storm-exempt (never
+    /// suppressed regardless of repetition). Built-in defaults
+    /// (`read`, `list_dir`, `grep`, etc.) are always included.
+    pub storm_exempt_tools: Option<Vec<String>>,
 }
 
 /// `convertToLlm` signature. Synchronous in pi (returns
@@ -389,6 +399,8 @@ impl Clone for LoopConfig {
             provider_name: self.provider_name.clone(),
             model_name: self.model_name.clone(),
             compact_model: self.compact_model.clone(),
+            storm_mutating_tools: self.storm_mutating_tools.clone(),
+            storm_exempt_tools: self.storm_exempt_tools.clone(),
         }
     }
 }

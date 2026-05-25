@@ -54,8 +54,10 @@ pub const FORCE_SUMMARY_THRESHOLD: f64 = 0.8;
 /// paste).
 pub const TURN_START_FOLD_THRESHOLD: f64 = 0.9;
 
-/// Hard deadline for fold summary requests (seconds).
-pub const FOLD_SUMMARY_TIMEOUT_SECS: u64 = 15;
+/// Approximate characters-per-token ratio for estimation when
+/// actual token counts aren't available. Used by both run.rs's
+/// turn-start heuristic and Session::estimate_message_tokens.
+pub const CHARS_PER_TOKEN_ESTIMATE: u64 = 4;
 
 // ================================================================
 // Data types — port of context-manager.ts:67-85
@@ -86,15 +88,6 @@ pub struct PostUsageDecision {
     pub tail_budget: Option<u64>,
     /// True when this fold is in the aggressive band (78%-80%).
     pub aggressive: bool,
-}
-
-/// Result of an attempted fold.
-#[derive(Debug, Clone)]
-pub struct FoldResult {
-    pub folded: bool,
-    pub before_messages: usize,
-    pub after_messages: usize,
-    pub summary_chars: usize,
 }
 
 /// Turn-start estimate result.
@@ -208,10 +201,15 @@ pub fn decide_after_usage(
 ///   (messages + tools + system prompt).
 /// `ctx_max`: the model's context window size in tokens.
 pub fn estimate_turn_start(estimate_tokens: u64, ctx_max: u64) -> TurnStartEstimate {
+    let ratio = if ctx_max == 0 {
+        f64::INFINITY
+    } else {
+        estimate_tokens as f64 / ctx_max as f64
+    };
     TurnStartEstimate {
         estimate_tokens,
         ctx_max,
-        ratio: estimate_tokens as f64 / ctx_max as f64,
+        ratio,
     }
 }
 

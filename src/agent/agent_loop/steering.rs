@@ -439,6 +439,8 @@ mod tests {
             provider_name: None,
             model_name: None,
             compact_model: None,
+            storm_mutating_tools: None,
+            storm_exempt_tools: None,
         };
         config.get_steering_messages = Some(steering_from_queue(queue.clone(), QueueMode::All));
 

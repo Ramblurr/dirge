@@ -196,7 +196,7 @@ impl StormBreaker {
 
 /// Built-in mutating tools: calls that change filesystem state.
 /// Kept in sync with `crate::agent::tools::BUILTIN_TOOL_NAMES`.
-fn default_mutating(call: &ToolCall) -> bool {
+pub fn default_mutating(call: &ToolCall) -> bool {
     matches!(
         call.name.as_str(),
         "write" | "edit" | "bash" | "apply_patch"
@@ -209,7 +209,7 @@ fn default_mutating(call: &ToolCall) -> bool {
 /// `find_callers` / `find_callees` are behind `#[cfg(feature = "semantic")]`
 /// but listing them here is harmless — the match simply won't fire
 /// when the feature is off.
-fn default_exempt(call: &ToolCall) -> bool {
+pub fn default_exempt(call: &ToolCall) -> bool {
     matches!(
         call.name.as_str(),
         "read"

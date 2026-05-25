@@ -70,15 +70,12 @@ pub fn shrink_oversized_tool_results(messages: &[Value], max_chars: usize) -> He
 /// Truncate a string to `max_chars` while keeping the beginning
 /// more useful than the end.
 fn truncate_for_model(content: &str, max_chars: usize) -> String {
-    // Keep first 70% from the top (most of the output),
-    // last 30% from the tail (likely tail errors or summaries).
+    if content.len() <= max_chars || max_chars < 2 {
+        return content.to_string();
+    }
     let head_pct = 0.7;
     let head_chars = (max_chars as f64 * head_pct) as usize;
     let tail_chars = max_chars.saturating_sub(head_chars);
-
-    if content.len() <= max_chars {
-        return content.to_string();
-    }
     let head = &content[..content
         .char_indices()
         .nth(head_chars)

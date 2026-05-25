@@ -397,6 +397,8 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         provider_name: cfg.provider_name.clone(),
         model_name: cfg.model_name.clone(),
         compact_model: None,
+        storm_mutating_tools: None,
+        storm_exempt_tools: None,
     };
 
     #[cfg(feature = "plugin")]

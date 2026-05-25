@@ -705,12 +705,12 @@ pub async fn execute_tool_calls_parallel(
 pub async fn execute_tool_calls(
     context: &Context,
     assistant_message: &AssistantMessage,
+    tool_calls: &[ToolCall],
     config: &LoopConfig,
     signal: &AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
     inflight: &InflightSet,
 ) -> ExecutedToolCallBatch {
-    let tool_calls = extract_tool_calls(assistant_message);
     let has_sequential = tool_calls.iter().any(|tc| {
         context
             .tools
@@ -742,6 +742,29 @@ pub async fn execute_tool_calls(
         )
         .await
     }
+}
+
+/// Convenience: extract tool calls from the assistant message, then
+/// dispatch through [`execute_tool_calls`].
+pub async fn execute_tool_calls_from_msg(
+    context: &Context,
+    assistant_message: &AssistantMessage,
+    config: &LoopConfig,
+    signal: &AbortSignal,
+    emit: &mpsc::Sender<LoopEvent>,
+    inflight: &InflightSet,
+) -> ExecutedToolCallBatch {
+    let tool_calls = extract_tool_calls(assistant_message);
+    execute_tool_calls(
+        context,
+        assistant_message,
+        &tool_calls,
+        config,
+        signal,
+        emit,
+        inflight,
+    )
+    .await
 }
 
 /// Extract `ToolCall`s from an assistant message's content. Port
@@ -989,6 +1012,8 @@ mod tests {
             provider_name: None,
             model_name: None,
             compact_model: None,
+            storm_mutating_tools: None,
+            storm_exempt_tools: None,
         }
     }
 
@@ -1530,7 +1555,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
         let signal = AbortSignal::new();
-        let batch = execute_tool_calls(
+        let batch = execute_tool_calls_from_msg(
             &context,
             &assistant,
             &config,
@@ -1594,7 +1619,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
         let signal = AbortSignal::new();
-        let _ = execute_tool_calls(
+        let _ = execute_tool_calls_from_msg(
             &context,
             &assistant,
             &config,
@@ -1630,7 +1655,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
         let signal = AbortSignal::new();
-        let _ = execute_tool_calls(
+        let _ = execute_tool_calls_from_msg(
             &context,
             &assistant,
             &config,
@@ -1685,7 +1710,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
         let signal = AbortSignal::new();
-        let batch = execute_tool_calls(
+        let batch = execute_tool_calls_from_msg(
             &context,
             &assistant,
             &config,

@@ -375,6 +375,8 @@ mod tests {
             provider_name: None,
             model_name: None,
             compact_model: None,
+            storm_mutating_tools: None,
+            storm_exempt_tools: None,
         }
     }
 
@@ -669,6 +671,8 @@ mod tests {
             provider_name: None,
             model_name: None,
             compact_model: None,
+            storm_mutating_tools: None,
+            storm_exempt_tools: None,
         };
         let signal = AbortSignal::new();
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);

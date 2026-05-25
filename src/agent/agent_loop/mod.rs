@@ -83,8 +83,8 @@ pub use tool_input_repair::{
     RepairKind, RepairResult, format_structured_error, is_path_field_name, validate_and_repair,
 };
 pub use tools::{
-    ExecutedToolCallBatch, ToolCall, execute_tool_calls, execute_tool_calls_parallel,
-    execute_tool_calls_sequential, extract_tool_calls,
+    ExecutedToolCallBatch, ToolCall, execute_tool_calls, execute_tool_calls_from_msg,
+    execute_tool_calls_parallel, execute_tool_calls_sequential, extract_tool_calls,
 };
 pub use types::{
     Context, ConvertToLlmFn, GetApiKeyFn, LoopConfig, QueueMode, ThinkingLevel, ToolExecutionMode,

@@ -80,6 +80,30 @@ impl std::fmt::Display for LoopError {
 
 impl std::error::Error for LoopError {}
 
+/// Build a `StormBreaker` from `LoopConfig`, merging custom
+/// mutating/exempt tool name lists with the built-in defaults.
+fn storm_for_config(config: &LoopConfig) -> StormBreaker {
+    let has_custom = config.storm_mutating_tools.is_some() || config.storm_exempt_tools.is_some();
+    if !has_custom {
+        return StormBreaker::default();
+    }
+    let mutating: Option<Box<dyn Fn(&super::tools::ToolCall) -> bool + Send + Sync>> =
+        config.storm_mutating_tools.as_ref().map(|extras| {
+            let extra_set: std::collections::HashSet<String> = extras.iter().cloned().collect();
+            Box::new(move |c: &super::tools::ToolCall| {
+                super::storm::default_mutating(c) || extra_set.contains(&c.name)
+            }) as Box<dyn Fn(&super::tools::ToolCall) -> bool + Send + Sync>
+        });
+    let exempt: Option<Box<dyn Fn(&super::tools::ToolCall) -> bool + Send + Sync>> =
+        config.storm_exempt_tools.as_ref().map(|extras| {
+            let extra_set: std::collections::HashSet<String> = extras.iter().cloned().collect();
+            Box::new(move |c: &super::tools::ToolCall| {
+                super::storm::default_exempt(c) || extra_set.contains(&c.name)
+            }) as Box<dyn Fn(&super::tools::ToolCall) -> bool + Send + Sync>
+        });
+    StormBreaker::new(6, 3, mutating, exempt)
+}
+
 /// Public entry point: start a new run from one or more prompt
 /// messages. Faithful port of pi `runAgentLoop` (agent-loop.ts:95).
 ///
@@ -133,7 +157,7 @@ pub async fn run_agent_loop(
 ///   - otherwise → emit agent_start + turn_start, enter loop with
 ///     newMessages = [] (does NOT re-emit user-message events)
 pub async fn run_agent_loop_continue(
-    context: Context,
+    mut context: Context,
     config: LoopConfig,
     signal: AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
@@ -143,10 +167,7 @@ pub async fn run_agent_loop_continue(
     if context.messages.is_empty() {
         return Err(LoopError::NoMessages);
     }
-    // Pi lines 131-133: last-message role check. Phase 4 reads
-    // the role string from the placeholder `Vec<Value>` shape
-    // since that's what context.messages carries. Phase ??? may
-    // substitute typed messages.
+    // Pi lines 131-133: last-message role check.
     let last_role = context
         .messages
         .last()
@@ -155,6 +176,15 @@ pub async fn run_agent_loop_continue(
         .unwrap_or("");
     if last_role == "assistant" {
         return Err(LoopError::CannotContinueFromAssistant);
+    }
+
+    // Heal messages before entering the loop (shrink oversized tool
+    // results, drop unpaired tool calls). Matches the healing done
+    // in spawn_loop_runner for the session-restore path.
+    let heal_result =
+        super::heal::heal_loaded_messages(&context.messages, super::heal::DEFAULT_MAX_RESULT_CHARS);
+    if heal_result.healed_count > 0 {
+        context.messages = heal_result.messages;
     }
 
     // Pi lines 135-139: newMessages = []; emit agent_start +
@@ -192,7 +222,7 @@ pub async fn run_loop(
     // Storm breaker: tracks (tool_name, args) repeats to detect
     // stuck-in-a-loop behavior. Reset each new user turn.
     // Port of Reasonix `repair/index.ts:38-46` + `loop.ts:621`.
-    let mut storm = StormBreaker::default();
+    let mut storm = storm_for_config(&config);
 
     // Inflight set: authoritative running-id tracker.
     // UI cards consult `inflight.has(call_id)` to derive spinner state.
@@ -415,9 +445,10 @@ pub async fn run_loop(
                     has_more_tool_calls = false;
                 }
 
-                // Dispatch surviving calls.
+                // Dispatch surviving calls through the unified dispatch.
+                // `execute_tool_calls` takes pre-extracted tool calls.
                 if !surviving_calls.is_empty() {
-                    let batch = execute_tool_calls_with(
+                    let batch = super::tools::execute_tool_calls(
                         &current_context,
                         &assistant_msg,
                         &surviving_calls,
@@ -588,53 +619,6 @@ fn extract_tool_calls_from(msg: &AssistantMessage) -> Vec<super::tools::ToolCall
     super::tools::extract_tool_calls(msg)
 }
 
-/// Dispatch pre-filtered tool calls (after storm breaker has
-/// removed suppressed calls). Mirrors the dispatch logic in
-/// `execute_tool_calls` but takes the calls directly instead of
-/// extracting from the assistant message.
-async fn execute_tool_calls_with(
-    context: &Context,
-    assistant_message: &AssistantMessage,
-    tool_calls: &[super::tools::ToolCall],
-    config: &LoopConfig,
-    signal: &AbortSignal,
-    emit: &mpsc::Sender<LoopEvent>,
-    inflight: &InflightSet,
-) -> super::tools::ExecutedToolCallBatch {
-    use super::ExecutedToolCallBatch;
-    let has_sequential = tool_calls.iter().any(|tc| {
-        context
-            .tools
-            .iter()
-            .find(|t| t.name() == tc.name)
-            .and_then(|t| t.execution_mode())
-            == Some(super::ToolExecutionMode::Sequential)
-    });
-    if config.tool_execution == super::ToolExecutionMode::Sequential || has_sequential {
-        super::tools::execute_tool_calls_sequential(
-            context,
-            assistant_message,
-            tool_calls,
-            config,
-            signal,
-            emit,
-            inflight,
-        )
-        .await
-    } else {
-        super::tools::execute_tool_calls_parallel(
-            context,
-            assistant_message,
-            tool_calls,
-            config,
-            signal,
-            emit,
-            inflight,
-        )
-        .await
-    }
-}
-
 /// Convert a `LoopMessage` to the placeholder `Value` shape used
 /// in `Context.messages`. Mirrors `serialize_assistant` from
 /// stream.rs but covers every variant.
@@ -755,6 +739,8 @@ mod tests {
             provider_name: None,
             model_name: None,
             compact_model: None,
+            storm_mutating_tools: None,
+            storm_exempt_tools: None,
         }
     }
 
