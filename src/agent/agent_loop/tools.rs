@@ -113,9 +113,6 @@ pub async fn execute_tool_calls_sequential(
             })
             .await;
 
-        // Inflight: add at dispatch entry. Idempotent.
-        inflight.add(&tool_call.id);
-
         // 2. prepare
         let prepared =
             prepare_tool_call(context, assistant_message, tool_call, config, signal).await;
@@ -128,6 +125,8 @@ pub async fn execute_tool_calls_sequential(
                 is_error,
             },
             PrepareOutcome::Prepared { tool, args } => {
+                // Inflight: add now that we know the tool will actually run.
+                inflight.add(&tool_call.id);
                 let executed =
                     execute_prepared_tool_call(&tool, tool_call, &args, signal, emit).await;
                 finalize_executed_tool_call(

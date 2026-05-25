@@ -109,10 +109,11 @@ impl StormBreaker {
                 return StormVerdict::pass();
             }
         }
-        let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
-        let args = serde_json::from_str::<serde_json::Value>(&args_str)
-            .and_then(|v| serde_json::to_string(&v))
-            .unwrap_or(args_str);
+        // serde_json::Map is a BTreeMap — key order is already
+        // canonical. to_string produces compact form so integer/
+        // float differences (1 vs 1.0) are handled by serde's
+        // number serialisation.
+        let args = serde_json::to_string(&call.arguments).unwrap_or_default();
 
         let mutating = self.is_mutating.as_ref().map(|f| f(call)).unwrap_or(false);
         let read_only = !mutating;
@@ -194,6 +195,7 @@ impl StormBreaker {
 }
 
 /// Built-in mutating tools: calls that change filesystem state.
+/// Kept in sync with `crate::agent::tools::BUILTIN_TOOL_NAMES`.
 fn default_mutating(call: &ToolCall) -> bool {
     matches!(
         call.name.as_str(),
@@ -203,6 +205,10 @@ fn default_mutating(call: &ToolCall) -> bool {
 
 /// Built-in storm-exempt tools: cheap inspectors that should never
 /// trip the repeat-loop guard regardless of repetition count.
+/// Kept in sync with `crate::agent::tools::BUILTIN_TOOL_NAMES`.
+/// `find_callers` / `find_callees` are behind `#[cfg(feature = "semantic")]`
+/// but listing them here is harmless — the match simply won't fire
+/// when the feature is off.
 fn default_exempt(call: &ToolCall) -> bool {
     matches!(
         call.name.as_str(),

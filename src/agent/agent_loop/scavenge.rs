@@ -234,6 +234,7 @@ fn iterate_json_objects(text: &str) -> Vec<String> {
                 }
             }
         }
+        // Unmatched brace — skip past it to avoid O(n²) rescan.
         i += 1;
     }
     out

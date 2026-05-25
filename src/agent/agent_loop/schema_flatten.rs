@@ -40,6 +40,10 @@ pub fn analyze_schema(schema: &Value) -> FlattenDecision {
 ///
 /// Returns the input unchanged if it's not a deep/wide schema.
 pub fn flatten_schema(schema: &Value) -> Value {
+    debug_assert!(
+        schema.get("type").and_then(|v| v.as_str()) == Some("object"),
+        "flatten_schema precondition: root schema must have type=object"
+    );
     let mut flat_props = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
     collect("", schema, &mut flat_props, &mut required, true);

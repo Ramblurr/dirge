@@ -67,6 +67,7 @@ use tokio::task::JoinHandle;
 use crate::event::AgentEvent;
 
 use super::bridge::EventBridge;
+use super::heal;
 use super::message::{LoopMessage, UserMessage};
 use super::run::run_agent_loop;
 use super::steering::steering_from_queue;
@@ -435,7 +436,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         }
     }
 
-    let context = Context {
+    let mut context = Context {
         system_prompt: cfg.system_prompt,
         messages: cfg.history.iter().map(loop_message_to_value).collect(),
         tools: cfg.tools,
@@ -453,6 +454,22 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         let (loop_tx, mut loop_rx) = mpsc::channel(256);
         let event_tx_inner = event_tx.clone();
         let signal_inner = signal_for_task.clone();
+
+        // Heal messages loaded from disk before the first LLM call.
+        // Shrinks oversized tool results and drops unpaired tool
+        // calls that would otherwise 400 the next API request.
+        let heal_result =
+            heal::heal_loaded_messages(&context.messages, heal::DEFAULT_MAX_RESULT_CHARS);
+        if heal_result.healed_count > 0 {
+            tracing::info!(
+                target: "dirge::agent_loop",
+                healed = %heal_result.healed_count,
+                chars_saved = %heal_result.chars_saved,
+                "healed {} message(s) after session restore",
+                heal_result.healed_count,
+            );
+            context.messages = heal_result.messages;
+        }
 
         // Code-review bug #4 fix: run the loop AND the
         // translation pump in the SAME outer task via

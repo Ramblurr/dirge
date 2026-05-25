@@ -133,6 +133,16 @@ pub fn decide_after_usage(
             aggressive: false,
         };
     };
+    if ctx_max == 0 {
+        return PostUsageDecision {
+            kind: PostUsageDecisionKind::None,
+            prompt_tokens,
+            ctx_max,
+            ratio: 0.0,
+            tail_budget: None,
+            aggressive: false,
+        };
+    }
     let ratio = prompt_tokens as f64 / ctx_max as f64;
 
     if ratio > FORCE_SUMMARY_THRESHOLD {
@@ -270,10 +280,10 @@ mod tests {
 
     #[test]
     fn zero_ctx_max_handled_gracefully() {
-        // ratio would be infinity, but comparison still works
+        // ctx_max == 0 is degenerate (unknown model, config error).
+        // Guard returns None rather than computing inf/NaN ratio.
         let d = decide_after_usage(Some(1000), 0, false);
-        // ratio > FORCE_SUMMARY_THRESHOLD → ExitWithSummary
-        assert_eq!(d.kind, PostUsageDecisionKind::ExitWithSummary);
+        assert_eq!(d.kind, PostUsageDecisionKind::None);
     }
 
     // ============================================================

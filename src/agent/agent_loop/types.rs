@@ -281,6 +281,11 @@ pub struct LoopConfig {
     /// truncation). When `Some`, summarisation and related tasks
     /// use this model instead of the session model. Reasonix uses
     /// `deepseek-v4-flash` for all auxiliary work.
+    ///
+    /// **Status**: deferred. Wiring requires a second `StreamFn`
+    /// constructed from a separate model + provider, which needs
+    /// `LoopSpawnConfig` / `provider.rs` plumbing. Until then this
+    /// field is accepted but not acted on.
     pub compact_model: Option<String>,
 }
 
