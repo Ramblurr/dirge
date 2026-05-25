@@ -241,6 +241,10 @@ pub struct Renderer {
     cached_status: String,
     /// `is_running` from the most recent `draw_bottom` call.
     cached_is_running: bool,
+    /// Completion preview string — formatted list of upcoming
+    /// slash commands from the most recent `draw_bottom` call.
+    /// Empty when no tab-completion is active.
+    cached_completion_preview: String,
 }
 
 impl Renderer {
@@ -285,6 +289,7 @@ impl Renderer {
             cached_input_cursor_col: 0,
             cached_status: String::new(),
             cached_is_running: false,
+            cached_completion_preview: String::new(),
         })
     }
 
@@ -325,6 +330,7 @@ impl Renderer {
             cached_input_cursor_col,
             cached_status,
             cached_is_running,
+            cached_completion_preview,
             tui_terminal,
             ..
         } = self;
@@ -351,6 +357,7 @@ impl Renderer {
                 cursor_row: *cached_input_cursor_row,
                 cursor_col: *cached_input_cursor_col,
                 is_running: *cached_is_running,
+                completion_preview: cached_completion_preview.as_str(),
             }
         };
 
@@ -1107,6 +1114,23 @@ impl Renderer {
         self.cached_status = status.to_string();
         self.cached_is_running = is_running;
         self.input_rows = total_rows.clamp(1, MAX_INPUT_VISIBLE_LINES as u16);
+
+        // Build slash-command completion preview if active.
+        #[cfg(feature = "experimental-ui-tab-slash")]
+        {
+            self.cached_completion_preview =
+                crate::ui::slash::format_completion_preview(editor.completion.as_ref(), wrap_w);
+        }
+        #[cfg(not(feature = "experimental-ui-tab-slash"))]
+        {
+            self.cached_completion_preview = String::new();
+        }
+        let completion_extra: u16 = if self.cached_completion_preview.is_empty() {
+            0
+        } else {
+            1
+        };
+        self.input_rows = (total_rows + completion_extra).clamp(1, MAX_INPUT_VISIBLE_LINES as u16);
 
         if is_running {
             self.spinner_tick = !self.spinner_tick;

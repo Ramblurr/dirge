@@ -35,6 +35,7 @@ semantic-cpp = ["semantic", "dep:tree-sitter-cpp"]
 semantic-elixir = ["semantic", "dep:tree-sitter-elixir"]
 plugin = ["dep:janetrs"]
 lsp = ["dep:lsp-types"]
+experimental-ui-tab-slash = []
 
 [target.'cfg(unix)'.dependencies]
 # Used by the bash tool for process-group cleanup on timeout

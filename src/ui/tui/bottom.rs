@@ -33,6 +33,10 @@ pub enum BottomBody<'a> {
         cursor_row: u16,
         cursor_col: u16,
         is_running: bool,
+        /// Dim preview row shown below the input when slash-command
+        /// tab completion is active (e.g. "/mode  /panel  /quit").
+        /// Empty string = no preview.
+        completion_preview: &'a str,
     },
     /// Modal overlay replacing the editor. `title` shows in the
     /// frame's top border (e.g. `[ALERT]`); `lines` paint inside
@@ -99,8 +103,8 @@ impl<'a> Widget for BottomStrip<'a> {
         paint_avatar_box(buf, l.avatar_box, self.avatar.as_ref(), self.border_style);
         match self.body.as_ref() {
             Some(BottomBody::Editor {
-                rows, is_running, ..
-            }) => paint_editor_box(buf, l.input_box, rows, *is_running, self.border_style),
+                rows, is_running, completion_preview, ..
+            }) => paint_editor_box(buf, l.input_box, rows, *is_running, completion_preview, self.border_style),
             Some(BottomBody::Overlay { title, lines }) => {
                 paint_overlay_box(buf, l.input_box, title, lines, self.border_style)
             }
@@ -249,7 +253,7 @@ fn paint_empty_box(buf: &mut Buffer, area: Rect, style: Style) {
     paint_frame(buf, area, None, style);
 }
 
-fn paint_editor_box(buf: &mut Buffer, area: Rect, rows: &[String], is_running: bool, style: Style) {
+fn paint_editor_box(buf: &mut Buffer, area: Rect, rows: &[String], is_running: bool, completion_preview: &str, style: Style) {
     paint_frame(buf, area, None, style);
     if area.width < 6 || area.height < 3 {
         return;
@@ -263,14 +267,23 @@ fn paint_editor_box(buf: &mut Buffer, area: Rect, rows: &[String], is_running: b
     let prompt_w = 3_usize; // both prompts are 3 cells
     let accent = Style::default().fg(RColor::Yellow);
     let user = Style::default().fg(RColor::White);
+    let dim = Style::default().fg(RColor::DarkGray);
     let text_avail = inner_w.saturating_sub(prompt_w);
     let visible_rows = (area.height as usize).saturating_sub(2);
-    for (i, row_text) in rows.iter().take(visible_rows).enumerate() {
+    let has_preview = !completion_preview.is_empty();
+    let editor_rows = visible_rows.saturating_sub(if has_preview { 1 } else { 0 });
+    for (i, row_text) in rows.iter().take(editor_rows).enumerate() {
         let y = area.y + 1 + i as u16;
         let prompt = if i == 0 { prompt_main } else { prompt_cont };
         buf.set_stringn(area.x + 1, y, prompt, inner_w, accent);
         let text_x = area.x + 1 + prompt_w as u16;
         buf.set_stringn(text_x, y, row_text, text_avail, user);
+    }
+    if has_preview {
+        let preview_y = area.y + 1 + editor_rows as u16;
+        buf.set_stringn(area.x + 1, preview_y, prompt_cont, inner_w, accent);
+        let text_x = area.x + 1 + prompt_w as u16;
+        buf.set_stringn(text_x, preview_y, completion_preview, text_avail, dim);
     }
     // Cursor positioning is owned by render_frame via
     // Frame::set_cursor_position.
@@ -505,6 +518,7 @@ mod tests {
                     cursor_row: 0,
                     cursor_col: 2,
                     is_running: false,
+                    completion_preview: "",
                 });
                 f.render_widget(widget, area);
             })

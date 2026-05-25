@@ -1876,6 +1876,158 @@ pub async fn handle_slash(
     Ok(())
 }
 
+/// Result of a slash-command tab completion.
+#[allow(dead_code)]
+pub struct CompletionResult {
+    pub new_buffer: String,
+    pub new_cursor: usize,
+    /// The full sorted command list and the index of the currently-selected
+    /// command, so the renderer can show a preview of upcoming items.
+    pub all_commands: Vec<&'static str>,
+    pub current_index: usize,
+}
+
+/// Try to complete the slash command at `cursor` in `buffer`.
+/// Returns `Some(CompletionResult)` if completion was possible.
+/// Tab cycles through matching commands; when narrowed to one match,
+/// subsequent tabs cycle through ALL commands so the user can keep browsing.
+#[cfg(feature = "experimental-ui-tab-slash")]
+pub fn try_complete(buffer: &str, cursor: usize) -> Option<CompletionResult> {
+    if !buffer.starts_with('/') {
+        return None;
+    }
+
+    // Find the current word under cursor.
+    let word_start = buffer[..cursor.min(buffer.len())]
+        .rfind(' ')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let current_word = &buffer[word_start..cursor.min(buffer.len())];
+
+    // Only complete the first word (the command name).
+    if word_start != 0 || current_word.contains(' ') {
+        return None;
+    }
+
+    let all_commands = builtin_commands();
+    let matching: Vec<&str> = all_commands
+        .iter()
+        .filter(|c| c.starts_with(current_word))
+        .copied()
+        .collect();
+
+    if matching.is_empty() {
+        return None;
+    }
+
+    // Once the current word is an exact command name, cycle through ALL
+    // commands so the user can keep browsing.  Otherwise stay within the
+    // matching prefix subset (e.g. /mod → /mode, /model → repeats).
+    let is_exact = all_commands.contains(&current_word);
+
+    let (replacement, current_index) = if is_exact {
+        let all_idx = all_commands.iter().position(|c| *c == current_word);
+        let next_idx = match all_idx {
+            Some(i) => (i + 1) % all_commands.len(),
+            None => 0,
+        };
+        (all_commands[next_idx], next_idx)
+    } else {
+        let current_idx = matching.iter().position(|c| *c == current_word);
+        let next_idx = match current_idx {
+            Some(i) => (i + 1) % matching.len(),
+            None => 0,
+        };
+        let cmd = matching[next_idx];
+        let all_idx = all_commands.iter().position(|c| *c == cmd).unwrap_or(0);
+        (cmd, all_idx)
+    };
+    let mut new_buffer = replacement.to_string();
+    if cursor < buffer.len() {
+        new_buffer.push_str(&buffer[cursor..]);
+    }
+    let new_cursor = replacement.len();
+    Some(CompletionResult {
+        new_buffer,
+        new_cursor,
+        all_commands,
+        current_index,
+    })
+}
+
+/// Returns all built-in slash commands (with leading `/`), sorted alphabetically.
+#[cfg(feature = "experimental-ui-tab-slash")]
+pub fn builtin_commands() -> Vec<&'static str> {
+    let mut cmds = vec![
+        "/allow",
+        "/btw",
+        "/cd",
+        "/clear",
+        "/clone",
+        "/compact",
+        "/compress",
+        "/fork",
+        "/help",
+        "/mode",
+        "/model",
+        "/panel",
+        "/prompt",
+        "/quit",
+        "/reasoning",
+        "/regen-prompts",
+        "/retry",
+        "/sessions",
+        "/tasks",
+        "/toggle",
+        "/tree",
+        "/undo",
+    ];
+    #[cfg(feature = "git-worktree")]
+    {
+        cmds.push("/worktree");
+        cmds.push("/wt-exit");
+        cmds.push("/wt-merge");
+    }
+    #[cfg(feature = "mcp")]
+    cmds.push("/mcp");
+    #[cfg(feature = "loop")]
+    cmds.push("/loop");
+    cmds.sort_unstable();
+    cmds
+}
+
+/// Format a completion preview string showing upcoming commands.
+/// Returns an empty string when `cr` is `None`. The result is shaped
+/// to fit within `avail_w` display cells (after the continuation
+/// prompt), showing as many upcoming command names as will fit.
+#[cfg(feature = "experimental-ui-tab-slash")]
+pub fn format_completion_preview(cr: Option<&CompletionResult>, avail_w: usize) -> String {
+    let cr = match cr {
+        Some(c) => c,
+        None => return String::new(),
+    };
+    if cr.all_commands.is_empty() || avail_w < 4 {
+        return String::new();
+    }
+    let all = &cr.all_commands;
+    let start = (cr.current_index + 1) % all.len();
+    let mut result = String::new();
+    for i in 0..all.len() {
+        let cmd = all[(start + i) % all.len()];
+        let candidate = if result.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{result}  {cmd}")
+        };
+        use unicode_width::UnicodeWidthStr;
+        if UnicodeWidthStr::width(candidate.as_str()) > avail_w {
+            break;
+        }
+        result = candidate;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1951,5 +2103,107 @@ mod tests {
             msg(MessageRole::Assistant, "a0"),
         ];
         assert_eq!(align_cut_to_user_boundary(&messages, 0), 1);
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn no_completion_without_slash() {
+        assert!(try_complete("hello", 5).is_none());
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn empty_buffer_returns_none() {
+        assert!(try_complete("", 0).is_none());
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn complete_partial_command() {
+        let r = try_complete("/mod", 4).unwrap();
+        assert_eq!(r.new_buffer, "/mode");
+        assert_eq!(r.new_cursor, 5);
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn cycles_between_partial_matches() {
+        let r = try_complete("/mod", 4).unwrap();
+        assert!(r.new_buffer.starts_with("/mod"));
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn cycles_beyond_single_match() {
+        let r1 = try_complete("/", 1).unwrap();
+        let r2 = try_complete(&r1.new_buffer, r1.new_cursor).unwrap();
+        assert_ne!(r1.new_buffer, r2.new_buffer);
+        assert!(!r2.new_buffer.is_empty());
+        assert!(r2.new_buffer.starts_with('/'));
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn cycles_from_full_command() {
+        let r = try_complete("/btw", 4).unwrap();
+        assert_ne!(r.new_buffer, "/btw");
+        assert!(r.new_buffer.starts_with('/'));
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn cycles_through_all_commands() {
+        let mut seen = std::collections::HashSet::new();
+        let mut buf = "/".to_string();
+        let mut cur = 1;
+        for _ in 0..100 {
+            let result = try_complete(&buf, cur);
+            if result.is_none() {
+                break;
+            }
+            let r = result.unwrap();
+            buf = r.new_buffer;
+            cur = r.new_cursor;
+            seen.insert(buf.clone());
+        }
+        let all = builtin_commands();
+        assert_eq!(
+            seen.len(),
+            all.len(),
+            "should cycle through all builtin commands"
+        );
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn unknown_command_returns_none() {
+        assert!(try_complete("/nonexistent", 12).is_none());
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn commands_are_sorted() {
+        let cmds = builtin_commands();
+        for pair in cmds.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "{} should be before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[cfg(feature = "experimental-ui-tab-slash")]
+    #[test]
+    fn preview_includes_upcoming_commands() {
+        let r = try_complete("/", 1).unwrap();
+        let all = &r.all_commands;
+        let cur = r.current_index;
+        let upcoming = &all[(cur + 1)..];
+        assert!(
+            !upcoming.is_empty(),
+            "should have commands after the current one"
+        );
     }
 }
