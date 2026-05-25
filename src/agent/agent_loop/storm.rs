@@ -82,6 +82,14 @@ impl StormBreaker {
         is_mutating: Option<Box<dyn Fn(&ToolCall) -> bool + Send + Sync>>,
         is_storm_exempt: Option<Box<dyn Fn(&ToolCall) -> bool + Send + Sync>>,
     ) -> Self {
+        assert!(
+            threshold >= 2,
+            "storm breaker threshold must be >= 2 (got {threshold})"
+        );
+        assert!(
+            window_size >= threshold,
+            "storm breaker window_size ({window_size}) must be >= threshold ({threshold})"
+        );
         Self {
             window_size,
             threshold,
@@ -101,7 +109,10 @@ impl StormBreaker {
                 return StormVerdict::pass();
             }
         }
-        let args = serde_json::to_string(&call.arguments).unwrap_or_default();
+        let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
+        let args = serde_json::from_str::<serde_json::Value>(&args_str)
+            .and_then(|v| serde_json::to_string(&v))
+            .unwrap_or(args_str);
 
         let mutating = self.is_mutating.as_ref().map(|f| f(call)).unwrap_or(false);
         let read_only = !mutating;
@@ -160,6 +171,7 @@ impl StormBreaker {
             if verdict.suppress {
                 report.storms_broken += 1;
                 if let Some(reason) = verdict.reason {
+                    tracing::warn!("storm breaker: {reason}");
                     report.notes.push(reason);
                 }
             } else {
@@ -167,13 +179,52 @@ impl StormBreaker {
             }
         }
 
+        if report.storms_broken > 0 {
+            tracing::info!(
+                suppressed = report.storms_broken,
+                surviving = surviving.len(),
+                "storm breaker: {}/{} calls suppressed",
+                report.storms_broken,
+                calls.len()
+            );
+        }
+
         (surviving, report)
     }
 }
 
+/// Built-in mutating tools: calls that change filesystem state.
+fn default_mutating(call: &ToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "write" | "edit" | "bash" | "apply_patch"
+    )
+}
+
+/// Built-in storm-exempt tools: cheap inspectors that should never
+/// trip the repeat-loop guard regardless of repetition count.
+fn default_exempt(call: &ToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "read"
+            | "list_dir"
+            | "grep"
+            | "find_files"
+            | "glob"
+            | "repo_overview"
+            | "find_callers"
+            | "find_callees"
+    )
+}
+
 impl Default for StormBreaker {
     fn default() -> Self {
-        Self::new(6, 3, None, None)
+        Self::new(
+            6,
+            3,
+            Some(Box::new(default_mutating)),
+            Some(Box::new(default_exempt)),
+        )
     }
 }
 
