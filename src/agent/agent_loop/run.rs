@@ -257,7 +257,77 @@ pub async fn run_loop(
             }
 
             // Pi lines 202-216: tool calls + results.
-            let tool_calls = extract_tool_calls_from(&assistant_msg);
+            let mut tool_calls = extract_tool_calls_from(&assistant_msg);
+
+            // Scavenge: scan reasoning content for tool calls the
+            // model forgot to emit in `tool_calls`. Port of Reasonix
+            // repair/index.ts:65-85.
+            //
+            // Only tools in the current context's tool set are
+            // accepted. Deduplication by (name, args) signature
+            // prevents double-counting if the same call appears in
+            // both reasoning and declared tool_calls.
+            let allowed_names: std::collections::HashSet<String> = current_context
+                .tools
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect();
+            let reasoning_text: String = assistant_msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Thinking { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let assistant_text: String = assistant_msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let combined = if reasoning_text.is_empty() {
+                if assistant_text.is_empty() {
+                    None
+                } else {
+                    Some(assistant_text)
+                }
+            } else if assistant_text.is_empty() {
+                Some(reasoning_text)
+            } else {
+                Some(format!("{}\n{}", reasoning_text, assistant_text))
+            };
+            if let Some(scan_text) = combined.as_deref() {
+                let scavenge_result =
+                    super::scavenge::scavenge_tool_calls(Some(scan_text), &allowed_names, 4);
+                if !scavenge_result.calls.is_empty() {
+                    let seen_signatures: std::collections::HashSet<String> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            format!(
+                                "{}::{}",
+                                tc.name,
+                                serde_json::to_string(&tc.arguments).unwrap_or_default()
+                            )
+                        })
+                        .collect();
+                    for sc in &scavenge_result.calls {
+                        let sig = format!(
+                            "{}::{}",
+                            sc.name,
+                            serde_json::to_string(&sc.arguments).unwrap_or_default()
+                        );
+                        if !seen_signatures.contains(&sig) {
+                            tool_calls.push(sc.clone());
+                        }
+                    }
+                }
+            }
+
             let mut tool_results: Vec<ToolResultMessage> = Vec::new();
             has_more_tool_calls = false;
             if !tool_calls.is_empty() {
