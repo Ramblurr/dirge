@@ -25,6 +25,7 @@
 #![allow(unused_imports)]
 
 pub mod bridge;
+pub mod context_manager;
 #[cfg(test)]
 mod h7_smoke;
 pub mod hooks;
