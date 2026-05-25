@@ -3616,9 +3616,6 @@ pub async fn run_interactive(
                     };
                     overlay.push((arg_label, theme::perm()));
                     overlay.push((String::new(), theme::perm()));
-                    overlay.push((format!("tool: {}", safe_tool), theme::perm()));
-                    overlay.push((format!("args: {}", safe_input), theme::perm()));
-                    overlay.push((String::new(), theme::perm()));
                     overlay.push((
                         "[y] allow once  [a] allow always  [n] deny  [ESC] abort"
                             .to_string(),
@@ -4810,8 +4807,6 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
         "glob" | "repo_overview" | "skill" | "memory" | "write_todo_list" | "lsp" => {
             "**".to_string()
         }
-        // Plugin tools — allow by tool name prefix, default to **.
-        _ if tool.starts_with("mcp_tool") => PLACEHOLDER.to_string(),
         _ => PLACEHOLDER.to_string(),
     }
 }
