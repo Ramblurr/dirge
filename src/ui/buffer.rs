@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::renderer::{VisualRow, display_col_to_char_index, wrap_editor, wrap_input};
+    use crate::ui::renderer::{VisualRow, display_col_to_char_index, wrap_editor, wrap_input};
 
     /// wrap_editor: empty buffer → one empty row, cursor at (0, 0).
     #[test]

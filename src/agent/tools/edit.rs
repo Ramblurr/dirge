@@ -111,7 +111,7 @@ impl Tool for EditTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "path": { "type": "string", "description": "The absolute path to the file to edit (must be absolute, not relative)" },
                     "old_text": { "type": "string", "description": "Exact text to find and replace" },
                     "new_text": { "type": "string", "description": "New text to replace with" },
                     "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of just the first" }

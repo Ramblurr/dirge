@@ -73,7 +73,7 @@ impl Tool for WriteTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "path": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)" },
                     "content": { "type": "string", "description": "Content to write to the file" }
                 },
                 "required": ["path", "content"]
