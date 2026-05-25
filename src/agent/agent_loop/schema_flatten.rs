@@ -51,19 +51,37 @@ pub fn flatten_schema(schema: &Value) -> Value {
     })
 }
 
+/// Escape dots in property names so `flatten_schema` →
+/// `nest_arguments` round-trips correctly even when original keys
+/// contain `.` characters.  `\.` → literal dot.
+const ESCAPED_DOT: &str = "\\.";
+const DOT_PLACEHOLDER: &str = "\x1E";
+
 /// Re-nest flat dot-notation args back into the original nested shape.
+/// Handles escaped dots in property names (produced by `flatten_schema`).
 /// Port of `nestArguments` (flatten.ts:37-43).
 pub fn nest_arguments(flat_args: &Value) -> Value {
     match flat_args {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (key, value) in map {
-                set_by_path(&mut out, key.split('.').collect::<Vec<_>>(), value.clone());
+                let path: Vec<String> = split_flat_key(key);
+                set_by_path(&mut out, path.iter().map(|s| s.as_str()).collect(), value.clone());
             }
             Value::Object(out)
         }
         other => other.clone(),
     }
+}
+
+/// Split a flat key on `.`, respecting `\\.` escape sequences.
+fn split_flat_key(key: &str) -> Vec<String> {
+    // Replace escaped dots with a placeholder, split on dot, restore.
+    let with_placeholder = key.replace(ESCAPED_DOT, DOT_PLACEHOLDER);
+    with_placeholder
+        .split('.')
+        .map(|s| s.replace(DOT_PLACEHOLDER, "."))
+        .collect()
 }
 
 // ---- internal helpers ----
@@ -118,10 +136,11 @@ fn collect(
                 .unwrap_or_default();
 
             for (key, child) in props {
+                let escaped_key = key.replace('.', ESCAPED_DOT);
                 let next_prefix = if prefix.is_empty() {
-                    key.clone()
+                    escaped_key
                 } else {
-                    format!("{prefix}.{key}")
+                    format!("{prefix}.{escaped_key}")
                 };
                 let child_required = is_root_required && required_set.contains(&key.as_str());
                 collect(&next_prefix, child, out, required, child_required);
@@ -139,6 +158,11 @@ fn collect(
 
 /// Set a value at a dot-path inside a nested JSON object.
 /// Port of `setByPath` (flatten.ts:84-92).
+///
+/// Gracefully handles conflicting flat/nested keys: if an intermediate
+/// path segment is already a non-object value, it is overwritten with
+/// an object so the deeper key can nest inside (the model sent both a
+/// leaf value and a subtree at the same path prefix).
 fn set_by_path(target: &mut serde_json::Map<String, Value>, path: Vec<&str>, value: Value) {
     let mut cur = target;
     let last = path.len() - 1;
@@ -146,11 +170,22 @@ fn set_by_path(target: &mut serde_json::Map<String, Value>, path: Vec<&str>, val
         if i == last {
             cur.insert(key.to_string(), value.clone());
         } else {
+            let needs_object = cur
+                .get(&key.to_string())
+                .map_or(true, |v| !v.is_object());
+            if needs_object {
+                // Conflicting or missing intermediate — overwrite with object.
+                if cur.get(&key.to_string()).is_some() {
+                    tracing::warn!(
+                        "schema_flatten: key \"{key}\" was a non-object, overwriting to nest deeper keys"
+                    );
+                }
+                cur.insert(key.to_string(), Value::Object(serde_json::Map::new()));
+            }
             cur = cur
-                .entry(key.to_string())
-                .or_insert_with(|| Value::Object(serde_json::Map::new()))
-                .as_object_mut()
-                .expect("nested value must be an object");
+                .get_mut(&key.to_string())
+                .and_then(|v| v.as_object_mut())
+                .expect("guaranteed object after check/insert");
         }
     }
 }
@@ -311,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn nest_arguments_handles_deeply_nested_paths() {
+    fn nest_arguments_handles_deep_paths() {
         let nested = nest_arguments(&serde_json::json!({
             "a.b.c.d": "deep",
             "a.b.c.e": 42,
@@ -325,6 +360,63 @@ mod tests {
                             "d": "deep",
                             "e": 42,
                         }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn dots_in_property_names_roundtrip() {
+        // Property names with literal dots must survive flatten/renest.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "user.name": {"type": "string"},
+                "profile": {
+                    "type": "object",
+                    "properties": {
+                        "a.b": {"type": "string"}
+                    }
+                }
+            }
+        });
+        let flat = flatten_schema(&schema);
+        // "user.name" should be escaped as "user\\.name" in flat schema.
+        assert!(flat["properties"].get("user\\.name").is_some());
+        // Nested should be "profile.a\\.b".
+        assert!(flat["properties"].get("profile.a\\.b").is_some());
+
+        // Renest: the flat key "user\\.name" recreates {"user.name": value}
+        let nested = nest_arguments(&serde_json::json!({
+            "user\\.name": "alice",
+            "profile.a\\.b": "hello",
+        }));
+        assert_eq!(
+            nested,
+            serde_json::json!({
+                "user.name": "alice",
+                "profile": {
+                    "a.b": "hello",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn set_by_path_handles_conflicting_flat_and_nested_keys() {
+        // Model sends both "a.b" as string and "a.b.c" as value.
+        // Should not panic; deeper key overwrites intermediate.
+        let result = nest_arguments(&serde_json::json!({
+            "a.b": "string_value",
+            "a.b.c": "deeper",
+        }));
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "a": {
+                    "b": {
+                        "c": "deeper",
                     }
                 }
             })
