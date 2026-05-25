@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::Hide;
-use crossterm::event::EnableBracketedPaste;
+use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen};
 
 /// A handle to `/dev/tty` opened once by `TerminalGuard::new` and
@@ -87,6 +87,14 @@ impl TerminalGuard {
         // input editor relies on this to compress long pastes into a
         // `[N lines pasted]` placeholder.
         tty_writer.execute(EnableBracketedPaste)?;
+        // Capture mouse events so wheel scrolls reach the app (and we
+        // scroll the output pane) instead of being absorbed by the
+        // terminal to scroll its scrollback — which, under the alt
+        // screen, would push the TUI off-view. Drag is captured too,
+        // so native text selection requires the standard
+        // bypass-modifier: Option/Alt+drag on macOS terminals, Shift
+        // +drag on most Linux terminals.
+        tty_writer.execute(EnableMouseCapture)?;
         // Hide the hardware cursor by default. While the agent streams output,
         // the renderer issues many MoveTo calls and the visible cursor would
         // flicker across the screen. draw_bottom re-shows it only after
@@ -247,9 +255,8 @@ impl Drop for TerminalGuard {
 
         // === Phase 1: tell the terminal to stop reporting things ===
         // Explicit DECRST for every mode we might have touched.
-        // Mouse is intentionally NOT captured — the terminal handles
-        // native text selection directly.  The mouse DECRST sequences
-        // below are idempotent defensive cleanup.
+        // Mouse capture is enabled in `TerminalGuard::new` for wheel
+        // scrolling — the DECRST sequences below take it back down.
         //   ?2004  — bracketed paste
         //   ?1049  — alternate screen (LeaveAlternateScreen)
         let _ = stdout.write_all(

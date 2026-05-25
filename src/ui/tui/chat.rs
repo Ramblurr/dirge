@@ -19,7 +19,7 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::widgets::Widget;
 
 use super::layout::Layout;
-use crate::ui::renderer::LineEntry;
+use crate::ui::renderer::{LineEntry, SelectionRange};
 
 /// Render the chat region from a slice of `LineEntry` lines.
 ///
@@ -34,6 +34,10 @@ pub struct ChatPane<'a> {
     scroll_offset: usize,
     /// Style for the chat ║ verticals.
     border_style: Style,
+    /// Active selection range in normalized `(line_idx, char_offset)`
+    /// coordinates. Cells inside this range have REVERSED applied on
+    /// top of their underlying style.
+    selection: Option<SelectionRange>,
 }
 
 impl<'a> ChatPane<'a> {
@@ -43,12 +47,19 @@ impl<'a> ChatPane<'a> {
             lines,
             scroll_offset,
             border_style: Style::default().fg(RColor::Green),
+            selection: None,
         }
     }
 
     /// Override the ║ border style. Default is `Color::Green`.
     pub fn border_style(mut self, style: Style) -> Self {
         self.border_style = style;
+        self
+    }
+
+    /// Highlight cells inside the given selection range with REVERSED.
+    pub fn selection(mut self, sel: SelectionRange) -> Self {
+        self.selection = Some(sel);
         self
     }
 }
@@ -87,7 +98,88 @@ impl<'a> Widget for ChatPane<'a> {
         for (i, entry) in slice.iter().enumerate() {
             let y = l.chat.y + i as u16;
             paint_line(buf, l.chat.x, y, text_w, entry);
+
+            // Selection overlay: line indices are absolute buffer
+            // indices, so add `start` (the first visible line's
+            // buffer index) to translate the on-screen row into a
+            // buffer-line index for range comparison.
+            if let Some(sel) = self.selection {
+                let line_idx = start + i;
+                apply_selection_to_row(buf, l.chat.x, y, text_w, entry, line_idx, &sel);
+            }
         }
+    }
+}
+
+/// Walk the visible cells on row `y` and OR `Modifier::REVERSED` onto
+/// each cell that falls inside the selection char-range for this
+/// buffer line. Char→display-column mapping mirrors
+/// `display_col_to_char_index` in renderer.rs: count `width_cjk` per
+/// char until we've consumed the selection's start/end char counts.
+///
+/// The function is a no-op when:
+/// - line_idx is outside [sel.start.0, sel.end.0]
+/// - the row's selected char range collapses to empty
+/// - the chat row has zero usable width
+fn apply_selection_to_row(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    entry: &LineEntry,
+    line_idx: usize,
+    sel: &SelectionRange,
+) {
+    use unicode_width::UnicodeWidthChar;
+
+    if width == 0 {
+        return;
+    }
+    if line_idx < sel.start.0 || line_idx > sel.end.0 {
+        return;
+    }
+    let clean: Vec<char> = crate::ui::ansi::strip_ansi(&entry.text).chars().collect();
+    let line_char_len = clean.len();
+
+    // Per-row char range: first row clips to [start.1, end]; last row
+    // clips to [0, end.1]; intermediate rows highlight the whole line.
+    // A 1-row selection clips to [start.1, end.1].
+    let (lo, hi) = if line_idx == sel.start.0 && line_idx == sel.end.0 {
+        (sel.start.1.min(line_char_len), sel.end.1.min(line_char_len))
+    } else if line_idx == sel.start.0 {
+        (sel.start.1.min(line_char_len), line_char_len)
+    } else if line_idx == sel.end.0 {
+        (0, sel.end.1.min(line_char_len))
+    } else {
+        (0, line_char_len)
+    };
+    if lo >= hi {
+        return;
+    }
+
+    // Translate the char range to a display-column range by summing
+    // glyph widths up to lo, then continuing to hi.
+    let col_start_off: u16 = clean[..lo]
+        .iter()
+        .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0) as u16)
+        .sum();
+    let col_end_off: u16 = col_start_off
+        + clean[lo..hi]
+            .iter()
+            .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0) as u16)
+            .sum::<u16>();
+
+    let cell_x_lo = x.saturating_add(col_start_off);
+    let cell_x_hi = x.saturating_add(col_end_off).min(x.saturating_add(width));
+    if cell_x_lo >= cell_x_hi {
+        return;
+    }
+    for cx in cell_x_lo..cell_x_hi {
+        if cx >= buf.area.x.saturating_add(buf.area.width) {
+            break;
+        }
+        let cell = &mut buf[(cx, y)];
+        cell.modifier.insert(Modifier::REVERSED);
     }
 }
 
@@ -164,10 +256,6 @@ pub fn crossterm_to_ratatui(c: crossterm::style::Color) -> RColor {
         CC::AnsiValue(v) => RColor::Indexed(v),
     }
 }
-
-// Suppress the not-yet-used modifier import — selection rendering
-// in a follow-up will use it (reverse video for selected runs).
-const _: Modifier = Modifier::REVERSED;
 
 #[cfg(test)]
 mod tests {
@@ -417,5 +505,55 @@ mod tests {
             RColor::Rgb(1, 2, 3)
         );
         assert_eq!(crossterm_to_ratatui(CC::AnsiValue(42)), RColor::Indexed(42));
+    }
+
+    /// Selection range painted with REVERSED modifier on the right
+    /// cells, not on others. Single line, char-range maps to
+    /// display-col range (ASCII so 1:1).
+    #[test]
+    fn selection_paints_reversed_on_selected_cells() {
+        use crate::ui::renderer::SelectionRange;
+        let layout = Layout::new(160, 30, 1);
+        let mut backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend.clone()).unwrap();
+        let lines = vec![line("hello world", CC::Green)];
+        // Select "world" — chars 6..11 on line 0.
+        let sel = SelectionRange {
+            start: (0, 6),
+            end: (0, 11),
+        };
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                f.render_widget(
+                    ChatPane::new(&layout, &lines, 0).selection(sel),
+                    area,
+                );
+            })
+            .unwrap();
+        backend = terminal.backend().clone();
+
+        let row = layout.chat.y;
+        // chars 0..6 ("hello ") — not selected → not REVERSED.
+        for i in 0..6 {
+            let cell = backend.buffer().cell((layout.chat.x + i, row)).unwrap();
+            assert!(
+                !cell.modifier.contains(Modifier::REVERSED),
+                "col {} should not be REVERSED",
+                layout.chat.x + i
+            );
+        }
+        // chars 6..11 ("world") — selected → REVERSED.
+        for i in 6..11 {
+            let cell = backend.buffer().cell((layout.chat.x + i, row)).unwrap();
+            assert!(
+                cell.modifier.contains(Modifier::REVERSED),
+                "col {} should be REVERSED",
+                layout.chat.x + i
+            );
+        }
+        // Past the selection — not REVERSED.
+        let cell = backend.buffer().cell((layout.chat.x + 11, row)).unwrap();
+        assert!(!cell.modifier.contains(Modifier::REVERSED));
     }
 }

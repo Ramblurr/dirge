@@ -162,4 +162,22 @@ pub enum UserEvent {
     /// `crossterm::terminal::size()` directly; the variant is just a kick
     /// to repaint at the new dimensions.
     Resize,
+    /// Mouse wheel scrolled up — scroll the output pane up by one line.
+    /// Mouse capture is on (see `TerminalGuard::new`) so the wheel reaches
+    /// the app instead of being absorbed by the terminal, which under the
+    /// alt screen would push the TUI off-view.
+    ScrollUp,
+    /// Mouse wheel scrolled down — scroll the output pane down by one line.
+    ScrollDown,
+    /// Left mouse button pressed at terminal cell `(row, col)` — starts
+    /// an app-level drag selection. Consumed by `ui::selection::handle`
+    /// before any UI-state-specific consumer sees it.
+    MouseDown { row: u16, col: u16 },
+    /// Left mouse button dragged to terminal cell `(row, col)` — extends
+    /// the active selection.
+    MouseDrag { row: u16, col: u16 },
+    /// Left mouse button released at terminal cell `(row, col)` —
+    /// finalizes the selection, copies it to the clipboard, and clears
+    /// the highlight.
+    MouseUp { row: u16, col: u16 },
 }

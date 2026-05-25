@@ -1775,14 +1775,18 @@ pub async fn handle_slash(
             renderer.write_line("  /help                  show this message", c_result())?;
             renderer.write_line("", c_agent())?;
             renderer.write_line("keys:", c_agent())?;
-            renderer.write_line("  PgUp/PgDn             scroll chat history", c_result())?;
+            renderer.write_line("  PgUp/PgDn / wheel      scroll chat history", c_result())?;
             renderer.write_line("  Home/End               jump to top/bottom", c_result())?;
             renderer.write_line(
                 "  @<query>               file picker (Tab/Enter select, Esc cancel)",
                 c_result(),
             )?;
             renderer.write_line(
-                "  drag + Cmd/Ctrl+C      select and copy text (native terminal)",
+                "  drag                  select text; mouse-up copies to clipboard",
+                c_result(),
+            )?;
+            renderer.write_line(
+                "  y / Esc (while selecting)  copy selection / clear without copy",
                 c_result(),
             )?;
             renderer.write_line("  Ctrl+R                 toggle reasoning", c_result())?;
@@ -1803,7 +1807,7 @@ pub async fn handle_slash(
                 "  (type while agent runs to queue a follow-up message)",
                 c_result(),
             )?;
-            renderer.write_line("  PgUp/PgDn             scroll chat history", c_result())?;
+            renderer.write_line("  PgUp/PgDn / wheel      scroll chat history", c_result())?;
 
             // Plugin-registered commands, if any. Listed last so they sit
             // visually after the built-ins and the keybindings.

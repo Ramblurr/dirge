@@ -18,7 +18,7 @@ use super::chat::{ChatPane, crossterm_to_ratatui};
 use super::frame::{ChatBotFrame, TopFrame};
 use super::layout::Layout;
 use super::panels::{LeftPanel, RightPanel};
-use crate::ui::renderer::{LeftPanelInfo, LineEntry, PanelData, SubagentStatusRow};
+use crate::ui::renderer::{LeftPanelInfo, LineEntry, PanelData, SelectionRange, SubagentStatusRow};
 
 #[allow(unused_imports)] // RColor stays in scope for the doctest example.
 use ratatui::style::Color as _RColor;
@@ -34,6 +34,9 @@ pub struct Scene<'a> {
     pub scroll_offset: usize,
     /// Number of input editor rows (clamped to MAX_INPUT_ROWS by Layout).
     pub input_rows: u16,
+    /// Active selection range, if any. Lines inside this range render
+    /// with REVERSED modifier so the user sees what they've highlighted.
+    pub chat_selection: Option<SelectionRange>,
     /// Right panel data (MCP, LSP, TODOS, MODIFIED, sysload).
     pub panel_data: &'a PanelData,
     /// Left panel: idle card info (used when subagents is empty).
@@ -71,10 +74,12 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     }
 
     // Chat region (content + ║ verticals).
-    f.render_widget(
-        ChatPane::new(&layout, scene.chat_buffer, scene.scroll_offset).border_style(frame_style),
-        area,
-    );
+    let mut chat = ChatPane::new(&layout, scene.chat_buffer, scene.scroll_offset)
+        .border_style(frame_style);
+    if let Some(sel) = scene.chat_selection {
+        chat = chat.selection(sel);
+    }
+    f.render_widget(chat, area);
 
     // Right panel — stacked sub-panels. Skip on narrow terminals.
     if scene.show_side_panels && layout.right_panel.width >= 16 {
@@ -151,6 +156,7 @@ pub fn empty_scene<'a>(
         chat_buffer,
         scroll_offset: 0,
         input_rows: 1,
+        chat_selection: None,
         panel_data,
         left_info,
         subagents,
@@ -252,6 +258,7 @@ mod tests {
             chat_buffer: &buf,
             scroll_offset: 0,
             input_rows: 4,
+            chat_selection: None,
             panel_data: &pd,
             left_info: &info,
             subagents: &subs,
@@ -366,6 +373,7 @@ mod tests {
             chat_buffer: &buf,
             scroll_offset: 0,
             input_rows: 1,
+            chat_selection: None,
             panel_data: &pd,
             left_info: &info,
             subagents: &subs,
@@ -389,6 +397,7 @@ mod tests {
             chat_buffer: &buf,
             scroll_offset: 0,
             input_rows: 1,
+            chat_selection: None,
             panel_data: &pd,
             left_info: &info,
             subagents: &subs,
