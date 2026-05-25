@@ -44,6 +44,7 @@
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::context_manager::{self, PostUsageDecisionKind};
 use super::message::{
     AssistantMessage, ContentBlock, LoopEvent, LoopMessage, StopReason, ToolResultMessage,
 };
@@ -187,6 +188,11 @@ pub async fn run_loop(
 ) -> Vec<LoopMessage> {
     let mut first_turn = true;
 
+    // Multi-tier compaction tracking. Port of Reasonix
+    // loop.ts:172 `this._foldedThisTurn`.
+    // Reset each new user turn; set true when a fold happens.
+    let mut folded_this_turn = false;
+
     // Pi line 167: initial steering poll.
     let mut pending_messages: Vec<LoopMessage> = match &config.get_steering_messages {
         Some(get) => get().await,
@@ -194,6 +200,10 @@ pub async fn run_loop(
     };
 
     'outer: loop {
+        // Multi-tier: fresh turn intent — clear fold flag.
+        // Port of Reasonix loop.ts:623 `this._foldedThisTurn = false`.
+        folded_this_turn = false;
+
         let mut has_more_tool_calls = true;
 
         // Pi line 174: INNER LOOP.
@@ -204,6 +214,44 @@ pub async fn run_loop(
                 let _ = emit.send(LoopEvent::TurnStart).await;
             } else {
                 first_turn = false;
+            }
+
+            // Reasonix loop.ts:656-684 — turn-start fold estimate.
+            // Covers cases the post-response fold can't see:
+            // terminal prior turn, session restore, huge paste.
+            // Estimate is approximate (no tokenizer); defaults to
+            // no-fold when data is unavailable.
+            {
+                let ctx_max = config
+                    .model_name
+                    .as_deref()
+                    .and_then(crate::config::context_window_for_model)
+                    .unwrap_or(128_000);
+                // Rough estimate from message count × avg content length.
+                let rough_estimate: u64 = current_context
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let content = m
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .len() as u64;
+                        // ~4 chars per token heuristic
+                        content / 4
+                    })
+                    .sum();
+                let estimate = context_manager::estimate_turn_start(rough_estimate, ctx_max);
+                if estimate.ratio > context_manager::TURN_START_FOLD_THRESHOLD {
+                    tracing::warn!(
+                        target: "dirge::agent_loop",
+                        estimate_tokens = %estimate.estimate_tokens,
+                        ctx_max = %estimate.ctx_max,
+                        ratio = %estimate.ratio,
+                        "context-manager: turn-start fold recommended ({}% of context)",
+                        (estimate.ratio * 100.0) as u32,
+                    );
+                }
             }
 
             // Pi lines 181-189: inject pending steering / follow-up
@@ -279,6 +327,50 @@ pub async fn run_loop(
                     tool_results: tool_results.clone(),
                 })
                 .await;
+
+            // Reasonix loop.ts:987-1032 — context-manager decision
+            // after each turn's response. Thresholds:
+            //   >80% → exit-with-summary (defense in depth)
+            //   >78% → aggressive fold (half tail budget)
+            //   >75% → normal fold
+            //   ≤75% → carry on
+            //
+            // `prompt_tokens` is None until usage tracking is wired
+            // into the stream pipeline (future phase). With None,
+            // decision defaults to None (carry on).
+            {
+                let ctx_max = config
+                    .model_name
+                    .as_deref()
+                    .and_then(crate::config::context_window_for_model)
+                    .unwrap_or(128_000);
+                let decision = context_manager::decide_after_usage(
+                    None, // TODO: pipe usage.prompt_tokens from stream
+                    ctx_max,
+                    folded_this_turn,
+                );
+                match decision.kind {
+                    PostUsageDecisionKind::Fold if !folded_this_turn => {
+                        folded_this_turn = true;
+                        tracing::info!(
+                            target: "dirge::agent_loop",
+                            ratio = %decision.ratio,
+                            aggressive = decision.aggressive,
+                            tail_budget = ?decision.tail_budget,
+                            "context-manager: fold recommended ({})",
+                            if decision.aggressive { "aggressive" } else { "normal" },
+                        );
+                    }
+                    PostUsageDecisionKind::ExitWithSummary => {
+                        tracing::warn!(
+                            target: "dirge::agent_loop",
+                            ratio = %decision.ratio,
+                            "context-manager: forcing summary and ending turn",
+                        );
+                    }
+                    _ => {}
+                }
+            }
 
             // Pi lines 220-239: prepareNextTurn.
             if let Some(hook) = &config.prepare_next_turn {
