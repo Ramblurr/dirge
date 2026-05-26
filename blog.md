@@ -17,8 +17,8 @@ Janet is the spiritual successor to Lua, designed for exactly this job:
 
 - **The entire language fits in ~1MB.** The `janetrs` crate embeds the VM without ceremony. It doesn't need dynamic linking or shared libraries, and has a negligible startup cost.
 - **S-expressions all the way down.** Plugin hooks receive and return structured data that looks exactly like the code you're writing. There's no impedance mismatch between configuration and code is data.
-- **Single-threaded by design.** No GIL, no race conditions, no synchronization headaches. One VM, one worker thread, serialized hook dispatch. You get the safety of immutability without the ceremony of channels and mutexes.
-- **Batteries for scripting.** PEG macros for parsing, fibers for cooperative concurrency, destructuring for clean data extraction — Janet is a real programming language, not a watered-down DSL.
+- **Single-threaded by design.** there's no GIL, race conditions, or synchronization headaches to worry about. It's just a single VM with a worker thread and a serialized hook dispatch.
+- **Batteries for scripting.** PEG macros for parsing, fibers for cooperative concurrency, destructuring for clean data extraction. Janet is a real, Clojure inspired, programming language as opposed to a watered-down DSL.
 
 A minimal plugin looks like this:
 
@@ -40,15 +40,13 @@ But the full harness API is a proper operating surface. Plugins can:
 
 There are 11 lifecycle hooks: `on-init`, `on-prompt`, `on-response`, `on-turn-start`, `on-turn-end`, `on-message-update`, `on-tool-start`, `on-tool-end`, `on-error`, `on-complete`, `prepare-next-run`. A multi-file plugin (directory of `.janet` files loaded in lexicographic order into a shared environment) can orchestrate complex workflows across them all.
 
-The existing example plugins demonstrate the range: workflow orchestration (architect → implementor → review via inversion of control), path protection (deny writes to critical paths), destructive-command confirmation, persona selection, turn timing, and even local LLM provider registration — all in under 100 lines of Janet each.
+The existing example plugins demonstrate the range: workflow orchestration (architect → implementor → review via inversion of control), path protection (deny writes to critical paths), destructive-command confirmation, persona selection, turn timing, and even local LLM provider registration, and in under 100 lines of Janet each.
 
-This is what the Pi project got right about extensibility: if you expose the agent lifecycle as hooks and give users a real language, they'll build things you never anticipated. dirge is the first coding agent to inherit that design.
+This is what the Pi project got right about extensibility: if you expose the agent lifecycle as hooks and give users a real language, they'll build things you never anticipated. Dirge embraces the same design philosophy.
 
----
+## Making the most of DeepSeek
 
-## How we made DeepSeek beat Opus 4.7
-
-"Open-source models are bad at tool calling." You've heard this. The conventional wisdom says that if you want reliable tool use, you pay for a commercial model that internalized every API contract during pretraining.
+You might've heard how open models like DeepSeek are bad at tool calling. The conventional wisdom says that if you want reliable tool use, you pay for a model like Claude Opus that internalized every API contract during pretraining.
 
 We spent two days looking at billions of tokens through a sibling CLI and came to a different conclusion: **"bad at tool calling" is almost always a harness problem, not a model problem.**
 
