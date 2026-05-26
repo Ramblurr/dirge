@@ -718,6 +718,55 @@ impl AnyAgent {
         loop_runner.into_agent_runner()
     }
 
+    /// Spawn a review runner with only memory + skill tools.
+    /// Used by background review (Phase 4) to create a restricted
+    /// agent that can only write to project memory and skills.
+    pub fn spawn_review_runner(
+        &self,
+        prompt: String,
+        transcript: String,
+    ) -> crate::agent::runner::AgentRunner {
+        use crate::agent::agent_loop::{
+            LoopSpawnConfig, loop_tool_to_rig_definition, retrying_stream_fn,
+            spawn_loop_runner,
+        };
+        use crate::agent::recovery::RecoveryPolicy;
+
+        // Filter to only memory + skill tools.
+        let review_tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>> = self
+            .loop_tools
+            .iter()
+            .filter(|t| {
+                let name = t.name();
+                name == "memory" || name == "skill"
+            })
+            .cloned()
+            .collect();
+
+        let tool_defs: Vec<rig::completion::ToolDefinition> = review_tools
+            .iter()
+            .map(|t| loop_tool_to_rig_definition(t.as_ref()))
+            .collect();
+
+        let inner_stream_fn = self.build_stream_fn(tool_defs);
+        let stream_fn = retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default());
+
+        let full_prompt = format!("{}\n\n<session_transcript>\n{}\n</session_transcript>", prompt, transcript);
+
+        let mut cfg = LoopSpawnConfig::minimal(stream_fn, full_prompt);
+        cfg.system_prompt = self.preamble.clone();
+        cfg.tools = review_tools;
+        cfg.provider_name = Some(self.provider_name().to_string());
+        cfg.model_name = if self.model_name.is_empty() {
+            None
+        } else {
+            Some(self.model_name.clone())
+        };
+
+        let loop_runner = spawn_loop_runner(cfg);
+        loop_runner.into_agent_runner()
+    }
+
     /// Phase 4.5h-2: produce a `StreamFn` from this agent's
     /// underlying `CompletionModel`, threading the supplied tool
     /// definitions. Used by the new loop path (`spawn_loop_runner`)

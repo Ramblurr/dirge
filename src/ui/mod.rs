@@ -2898,6 +2898,21 @@ pub async fn run_interactive(
                             crate::plugin::PostDoneAction::Idle => {}
                         }
 
+                        // Phase 4: spawn background review when the
+                        // session is truly idle (no plugin followup,
+                        // loop iteration, or worktree cleanup claimed
+                        // the next turn). Fire-and-forget — the review
+                        // runs in a tokio task and never blocks the user.
+                        if !is_running {
+                            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                            let paths = crate::extras::dirge_paths::ProjectPaths::new(&cwd);
+                            crate::agent::review::spawn_background_review(
+                                agent.clone(),
+                                paths,
+                                response.to_string(),
+                            );
+                        }
+
                         #[cfg(feature = "git-worktree")]
                         if let Some(main_path) = wt_return_path.take() {
                             match std::env::set_current_dir(&main_path) {
