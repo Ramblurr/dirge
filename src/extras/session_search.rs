@@ -123,7 +123,8 @@ impl SessionSearch {
     /// an anchored window. Results are deduplicated by lineage
     /// root.
     pub fn discover(&self, query: &str) -> Result<Vec<DiscoveryHit>, String> {
-        let results = self.db.search_messages(query, None)?;
+        let sanitized = sanitize_fts5_query(query);
+        let results = self.db.search_messages(&sanitized, None)?;
         if results.is_empty() {
             return Ok(Vec::new());
         }
@@ -460,6 +461,27 @@ fn truncate_content(content: &str, max_len: usize) -> String {
     )
 }
 
+/// Sanitize a user-provided query string for safe use with FTS5 MATCH.
+/// FTS5 has special syntax characters that could be exploited or cause
+/// unexpected behavior: `*` (prefix wildcard), `"` (phrase), parentheses
+/// (grouping), and boolean operators AND/OR/NOT/NEAR. We wrap the query
+/// in double quotes to treat it as a literal phrase, then strip any
+/// embedded quotes from the user input to prevent injection.
+fn sanitize_fts5_query(query: &str) -> String {
+    // Strip characters with FTS5 special meaning.
+    let cleaned: String = query
+        .chars()
+        .filter(|c| !matches!(c, '*' | '"' | '(' | ')'))
+        .collect();
+    // Wrap in double quotes so FTS5 treats it as a literal phrase.
+    // Empty query after cleaning → return empty string (caller handles).
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("\"{}\"", trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,5 +687,37 @@ mod tests {
         // Message doesn't exist, but we trust the caller.
         let session = search.find_message_session("sess-1", 999).unwrap();
         assert_eq!(session, "sess-1");
+    }
+
+    // ── sanitize_fts5_query ─────────────────────────────
+
+    #[test]
+    fn sanitize_preserves_normal_query() {
+        let result = sanitize_fts5_query("database migrations");
+        assert_eq!(result, "\"database migrations\"");
+    }
+
+    #[test]
+    fn sanitize_strips_fts5_special_chars() {
+        let result = sanitize_fts5_query("foo* AND (bar)");
+        assert_eq!(result, "\"foo AND bar\"");
+    }
+
+    #[test]
+    fn sanitize_strips_quotes() {
+        let result = sanitize_fts5_query("\"exact phrase\"");
+        assert_eq!(result, "\"exact phrase\"");
+    }
+
+    #[test]
+    fn sanitize_empty_after_cleaning() {
+        let result = sanitize_fts5_query("*\"()");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn sanitize_trims_whitespace() {
+        let result = sanitize_fts5_query("  hello world  ");
+        assert_eq!(result, "\"hello world\"");
     }
 }
