@@ -12,6 +12,3 @@
 pub mod format;
 pub mod guard;
 pub mod manager;
-
-pub use format::SkillSpec;
-pub use manager::SkillManager;

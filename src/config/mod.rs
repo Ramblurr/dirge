@@ -154,6 +154,13 @@ pub struct Config {
     /// models.
     pub stream_chunk_timeout_secs: Option<u64>,
     pub default_prompt: Option<String>,
+    /// Optional provider to use for background review at session end.
+    /// When not set, the review fork reuses the main session's provider.
+    pub review_provider: Option<String>,
+    /// Optional model to use for background review. Falls back to the
+    /// main model when not set. Useful for routing review work to a
+    /// cheaper/faster model.
+    pub review_model: Option<String>,
     /// UI color theme. Known built-in values: `phosphor` (default,
     /// 80s CRT green) and `plain` (white/cyan).
     ///
