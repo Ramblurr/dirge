@@ -1706,8 +1706,8 @@ pub async fn run_interactive(
                                     )?;
                                     continue;
                                 }
-                                write_user_lines(&mut renderer, &text)?;
-                                renderer.write_line("", Color::White)?;
+                                // Render deferred — the agent loop will emit
+                                // AgentEvent::UserMessage for the prompt.
                                 match prefix {
                                     shell::ShellPrefix::Visible(cmd) => {
                                         match run_shell_command(&cmd, &sandbox).await {
@@ -1823,6 +1823,10 @@ pub async fn run_interactive(
                                     )?;
                                     continue;
                                 }
+                                // Slash commands that spawn agents (/resume, /loop start)
+                                // will also emit AgentEvent::UserMessage — causing a
+                                // double echo. But non-agent commands (/model, /sessions,
+                                // /help) have no UserMessage event, so we keep the echo.
                                 write_user_lines(&mut renderer, &text)?;
                                 renderer.write_line("", Color::White)?;
                                 let result = handle_slash(&text, &mut agent, &client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut is_running, &mut input, &permission, &ask_tx, &question_tx, &plan_tx, &mut todo_tools_enabled, &bg_store, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager, #[cfg(feature = "semantic")] semantic_manager, #[cfg(feature = "lsp")] lsp_manager.as_ref()).await;
@@ -1978,9 +1982,8 @@ pub async fn run_interactive(
                                     theme::dim(),
                                 )?;
                             } else {
-                                write_user_lines(&mut renderer, &text)?;
-                                renderer.write_line("", Color::White)?;
-
+                                // User message will be rendered when the
+                                // agent loop emits AgentEvent::UserMessage.
                                 let history = crate::agent::runner::convert_history(session);
 
                                 #[allow(unused_mut)]

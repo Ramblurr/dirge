@@ -436,7 +436,12 @@ impl MemoryToolStore {
         Ok(self.success_response(&*guard, target, "Entry added."))
     }
 
-    pub fn replace(&self, target: &str, old_text: &str, new_content: &str) -> Result<serde_json::Value, String> {
+    pub fn replace(
+        &self,
+        target: &str,
+        old_text: &str,
+        new_content: &str,
+    ) -> Result<serde_json::Value, String> {
         let store = self.store_for(target);
         let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
         guard.replace(old_text, new_content)?;
@@ -456,7 +461,12 @@ impl MemoryToolStore {
         self.success_response(&*guard, target, "")
     }
 
-    fn success_response(&self, store: &MemoryStore, target: &str, message: &str) -> serde_json::Value {
+    fn success_response(
+        &self,
+        store: &MemoryStore,
+        target: &str,
+        message: &str,
+    ) -> serde_json::Value {
         let entries = store.live_entries();
         let current: usize = entries.iter().map(|e| e.len()).sum::<usize>()
             + entries.len().saturating_sub(1) * ENTRY_DELIMITER.len();

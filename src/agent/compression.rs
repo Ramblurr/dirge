@@ -125,17 +125,11 @@ pub fn prune_tool_outputs(messages: &[Value], protect_tail: usize) -> Vec<Value>
             if i >= end {
                 return msg.clone();
             }
-            let role = msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
             if role != "tool" {
                 return msg.clone();
             }
-            let content = msg
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.len() <= 500 {
                 return msg.clone();
             }
@@ -321,18 +315,15 @@ Use this exact structure:\n\n\
 fn serialize_turns_for_summary(turns: &[Value]) -> String {
     let mut out = String::new();
     for (i, turn) in turns.iter().enumerate() {
-        let role = turn
-            .get("role")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let content = turn
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let role = turn.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+        let content = turn.get("content").and_then(|v| v.as_str()).unwrap_or("");
         out.push_str(&format!("[{i}] {role}: "));
         if content.len() > 2000 {
             let truncated: String = content.chars().take(2000).collect();
-            out.push_str(&format!("{truncated}… [truncated, {} total chars]\n", content.len()));
+            out.push_str(&format!(
+                "{truncated}… [truncated, {} total chars]\n",
+                content.len()
+            ));
         } else {
             out.push_str(content);
             out.push('\n');
@@ -366,27 +357,23 @@ pub fn validate_summary(summary: &str) -> bool {
 /// SUMMARY_PREFIX, or None.
 #[allow(dead_code)]
 pub fn find_previous_summary(messages: &[Value]) -> Option<(usize, String)> {
-    messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, m)| {
-            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
-            if role != "system" {
-                return None;
-            }
-            let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            if content.starts_with(SUMMARY_PREFIX) {
-                let body = content
-                    .strip_prefix(SUMMARY_PREFIX)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                Some((i, body))
-            } else {
-                None
-            }
-        })
+    messages.iter().enumerate().rev().find_map(|(i, m)| {
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "system" {
+            return None;
+        }
+        let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        if content.starts_with(SUMMARY_PREFIX) {
+            let body = content
+                .strip_prefix(SUMMARY_PREFIX)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Some((i, body))
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -504,9 +491,7 @@ mod tests {
 
     #[test]
     fn estimate_tokens_handles_missing_content() {
-        let msgs = vec![
-            serde_json::json!({"role": "system"}),
-        ];
+        let msgs = vec![serde_json::json!({"role": "system"})];
         assert_eq!(estimate_messages_tokens(&msgs), 0);
     }
 
@@ -514,7 +499,9 @@ mod tests {
 
     #[test]
     fn valid_summary_passes() {
-        assert!(validate_summary("## Active Task\nRefactor auth module\n\n## Completed Actions\n1. READ config.py"));
+        assert!(validate_summary(
+            "## Active Task\nRefactor auth module\n\n## Completed Actions\n1. READ config.py"
+        ));
     }
 
     #[test]

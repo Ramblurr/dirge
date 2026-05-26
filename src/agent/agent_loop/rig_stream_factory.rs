@@ -49,12 +49,10 @@
 use std::sync::Arc;
 
 use rig::OneOrMany;
-use rig::completion::message::{AssistantContent, Message, Reasoning, ToolCall, ToolFunction};
-use rig::completion::{
-    CompletionModel, CompletionRequestBuilder, GetTokenUsage, ToolDefinition,
-};
 #[cfg(test)]
 use rig::completion::CompletionError;
+use rig::completion::message::{AssistantContent, Message, Reasoning, ToolCall, ToolFunction};
+use rig::completion::{CompletionModel, CompletionRequestBuilder, GetTokenUsage, ToolDefinition};
 use serde_json::Value;
 
 use super::message::StreamEvent;
@@ -363,7 +361,6 @@ pub fn build_provider_additional_params(
     provider_name: Option<&str>,
     opts: &super::stream::StreamOptions,
 ) -> Option<serde_json::Value> {
-    
     let mut additional = serde_json::Map::new();
 
     // ----- reasoning per provider -----

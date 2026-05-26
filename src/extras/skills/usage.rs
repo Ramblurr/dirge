@@ -148,9 +148,10 @@ impl UsageStore {
 
     /// Record a skill creation event.
     pub fn record_create(&mut self, name: &str, created_by: &str) {
-        let entry = self.data.entry(name.to_string()).or_insert_with(|| {
-            SkillUsage::new(Some(created_by))
-        });
+        let entry = self
+            .data
+            .entry(name.to_string())
+            .or_insert_with(|| SkillUsage::new(Some(created_by)));
         // If the entry already existed, don't overwrite created_by.
         if entry.created_by.is_none() {
             entry.created_by = Some(created_by.to_string());
@@ -225,10 +226,13 @@ impl UsageStore {
     /// or patched (just created).
     pub fn activity_age_seconds(&self, name: &str) -> Option<u64> {
         let entry = self.data.get(name)?;
-        let newest = [entry.last_used_at.as_deref(), entry.last_patched_at.as_deref()]
-            .into_iter()
-            .flatten()
-            .max();
+        let newest = [
+            entry.last_used_at.as_deref(),
+            entry.last_patched_at.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
         let ts = newest?;
         let parsed = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
         let now = chrono::Utc::now();
@@ -266,7 +270,9 @@ fn acquire_usage_lock(lock_path: &PathBuf) -> Result<UsageLock, String> {
             Ok(mut f) => {
                 let pid = std::process::id().to_string();
                 let _ = std::io::Write::write_all(&mut f, pid.as_bytes());
-                return Ok(UsageLock { path: lock_path.clone() });
+                return Ok(UsageLock {
+                    path: lock_path.clone(),
+                });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Check staleness on first attempt only.
@@ -441,6 +447,9 @@ mod tests {
         std::fs::write(paths.skills_dir().join(".usage.json"), "not valid json{{{").unwrap();
 
         let store = UsageStore::load(&paths).unwrap();
-        assert!(store.data.is_empty(), "corrupt JSON should result in empty store");
+        assert!(
+            store.data.is_empty(),
+            "corrupt JSON should result in empty store"
+        );
     }
 }

@@ -42,7 +42,13 @@ impl SkillManager {
     /// Create a new skill (convenience — builds frontmatter from parts).
     /// For JSON output (tool), prefer create_from_content.
     #[cfg(test)]
-    pub fn create(&self, name: &str, description: &str, body: &str, tags: &[String]) -> Result<(), String> {
+    pub fn create(
+        &self,
+        name: &str,
+        description: &str,
+        body: &str,
+        tags: &[String],
+    ) -> Result<(), String> {
         let content = format::build_frontmatter(name, description, tags) + body;
         self.create_from_content(name, &content)
     }
@@ -50,7 +56,13 @@ impl SkillManager {
     /// Edit an existing skill (convenience — builds frontmatter from parts).
     /// For JSON output (tool), prefer edit_from_content.
     #[cfg(test)]
-    pub fn edit(&self, name: &str, description: &str, body: &str, tags: &[String]) -> Result<(), String> {
+    pub fn edit(
+        &self,
+        name: &str,
+        description: &str,
+        body: &str,
+        tags: &[String],
+    ) -> Result<(), String> {
         let content = format::build_frontmatter(name, description, tags) + body;
         self.edit_from_content(name, &content)
     }
@@ -178,8 +190,7 @@ impl SkillManager {
     /// Read a skill's full SKILL.md content.
     pub fn read_content(&self, name: &str) -> Result<String, String> {
         let path = self.skills_dir.join(name).join("SKILL.md");
-        std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read skill '{}': {e}", name))
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read skill '{}': {e}", name))
     }
 
     /// List all skill names in the skills directory.

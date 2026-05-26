@@ -33,7 +33,7 @@ fn contains_cjk(query: &str) -> bool {
         || (0x3000..=0x303F).contains(&cp)   // CJK Symbols
         || (0x3040..=0x309F).contains(&cp)   // Hiragana
         || (0x30A0..=0x30FF).contains(&cp)   // Katakana
-        || (0xAC00..=0xD7AF).contains(&cp)   // Hangul Syllables
+        || (0xAC00..=0xD7AF).contains(&cp) // Hangul Syllables
     })
 }
 
@@ -478,8 +478,7 @@ fn sanitize_fts5_query(query: &str) -> String {
     }
 
     // Step 1: Extract balanced double-quoted phrases and protect them.
-    static QUOTED_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#""[^"]*""#).unwrap());
+    static QUOTED_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""[^"]*""#).unwrap());
     let mut quoted_parts: Vec<String> = Vec::new();
     let mut sanitized = QUOTED_RE
         .replace_all(query, |caps: &regex::Captures| {
@@ -491,16 +490,13 @@ fn sanitize_fts5_query(query: &str) -> String {
         .to_string();
 
     // Step 2: Strip remaining FTS5-special characters: + { } ( ) " ^
-    static SPECIAL_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"[+{}()"^]"#).unwrap());
+    static SPECIAL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[+{}()"^]"#).unwrap());
     sanitized = SPECIAL_RE.replace_all(&sanitized, " ").to_string();
 
     // Step 3: Collapse repeated * into single *, remove leading *
-    static STAR_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\*+").unwrap());
+    static STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*+").unwrap());
     sanitized = STAR_RE.replace_all(&sanitized, "*").to_string();
-    static LEADING_STAR_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(^|\s)\*").unwrap());
+    static LEADING_STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\s)\*").unwrap());
     sanitized = LEADING_STAR_RE.replace_all(&sanitized, "$1").to_string();
 
     // Step 4: Remove dangling boolean operators at start/end

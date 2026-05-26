@@ -890,11 +890,11 @@ mod tests {
             other => panic!("expected UserMessage, got {other:?}"),
         }
         // MessageEnd is still a no-op for user messages.
-        assert!(bridge
-            .translate(LoopEvent::MessageEnd {
-                message: user_msg
-            })
-            .is_empty());
+        assert!(
+            bridge
+                .translate(LoopEvent::MessageEnd { message: user_msg })
+                .is_empty()
+        );
 
         // ToolResult MessageStart/End remain no-ops.
         let tool_msg = LoopMessage::ToolResult(ToolResultMessage {
@@ -904,16 +904,18 @@ mod tests {
             details: serde_json::Value::Null,
             is_error: false,
         });
-        assert!(bridge
-            .translate(LoopEvent::MessageStart {
-                message: tool_msg.clone()
-            })
-            .is_empty());
-        assert!(bridge
-            .translate(LoopEvent::MessageEnd {
-                message: tool_msg
-            })
-            .is_empty());
+        assert!(
+            bridge
+                .translate(LoopEvent::MessageStart {
+                    message: tool_msg.clone()
+                })
+                .is_empty()
+        );
+        assert!(
+            bridge
+                .translate(LoopEvent::MessageEnd { message: tool_msg })
+                .is_empty()
+        );
     }
 
     /// `MessageUpdate` with End-phase markers are no-ops (the

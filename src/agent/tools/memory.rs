@@ -124,7 +124,9 @@ ACTIONS:
                     .old_text
                     .as_deref()
                     .filter(|c| !c.trim().is_empty())
-                    .ok_or_else(|| ToolError::Msg("old_text is required for 'replace'".to_string()))?;
+                    .ok_or_else(|| {
+                        ToolError::Msg("old_text is required for 'replace'".to_string())
+                    })?;
                 let content = args
                     .content
                     .as_deref()
@@ -144,7 +146,9 @@ ACTIONS:
                     .old_text
                     .as_deref()
                     .filter(|c| !c.trim().is_empty())
-                    .ok_or_else(|| ToolError::Msg("old_text is required for 'remove'".to_string()))?;
+                    .ok_or_else(|| {
+                        ToolError::Msg("old_text is required for 'remove'".to_string())
+                    })?;
                 let resp = self
                     .store
                     .remove(target, old_text)
@@ -180,11 +184,8 @@ mod tests {
 
     fn temp_store() -> (Arc<MemoryToolStore>, std::path::PathBuf) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "dirge-mem-tool-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dirge-mem-tool-test-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let paths = ProjectPaths::new(&dir);
@@ -213,8 +214,7 @@ mod tests {
             old_text: None,
         }));
         assert!(result.is_ok(), "add failed: {:?}", result);
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         assert_eq!(resp["success"], true);
         assert_eq!(resp["entry_count"], 1);
 
@@ -225,8 +225,7 @@ mod tests {
             content: None,
             old_text: None,
         }));
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         let entries = resp["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].as_str().unwrap().contains("cargo build"));
@@ -245,8 +244,7 @@ mod tests {
             old_text: None,
         }));
         assert!(result.is_ok());
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         assert_eq!(resp["target"], "pitfalls");
     }
 
@@ -293,8 +291,7 @@ mod tests {
             content: Some("build command: cargo build --release".into()),
             old_text: Some("cargo build".into()),
         }));
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         assert_eq!(resp["success"], true);
 
         // Verify the entry was replaced.
@@ -304,8 +301,7 @@ mod tests {
             content: None,
             old_text: None,
         }));
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         let entries = resp["entries"].as_array().unwrap();
         assert!(entries[0].as_str().unwrap().contains("--release"));
     }
@@ -330,8 +326,7 @@ mod tests {
             content: None,
             old_text: Some("temp entry".into()),
         }));
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         assert_eq!(resp["success"], true);
 
         // Verify empty.
@@ -341,8 +336,7 @@ mod tests {
             content: None,
             old_text: None,
         }));
-        let resp: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        let resp: serde_json::Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         assert_eq!(resp["entry_count"], 0);
     }
 

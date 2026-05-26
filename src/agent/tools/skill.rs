@@ -125,9 +125,10 @@ impl Tool for SkillTool {
 
         match args.action.as_str() {
             "load" => {
-                let name = args.name.as_deref().ok_or_else(|| {
-                    ToolError::Msg("name is required for 'load'".to_string())
-                })?;
+                let name = args
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| ToolError::Msg("name is required for 'load'".to_string()))?;
                 let Some(skill) = skill::find_skill(name, &self.skills) else {
                     return Err(ToolError::Msg(format!(
                         "Skill '{}' not found. Available: {}",
@@ -153,28 +154,34 @@ impl Tool for SkillTool {
             }
 
             "list" => {
-                let names = self
-                    .manager
-                    .list()
-                    .map_err(|e| ToolError::Msg(e))?;
+                let names = self.manager.list().map_err(|e| ToolError::Msg(e))?;
                 if names.is_empty() {
                     Ok("No skills found in .dirge/skills/.".to_string())
                 } else {
                     Ok(format!(
                         "Skills ({}):\n{}",
                         names.len(),
-                        names.iter().map(|n| format!("  - {}", n)).collect::<Vec<_>>().join("\n")
+                        names
+                            .iter()
+                            .map(|n| format!("  - {}", n))
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     ))
                 }
             }
 
             "create" => {
-                let name = args.name.as_deref().ok_or_else(|| {
-                    ToolError::Msg("name is required for 'create'".to_string())
-                })?;
-                let content = args.content.as_deref().filter(|c| !c.trim().is_empty()).ok_or_else(|| {
-                    ToolError::Msg("content is required for 'create'".to_string())
-                })?;
+                let name = args
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| ToolError::Msg("name is required for 'create'".to_string()))?;
+                let content = args
+                    .content
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty())
+                    .ok_or_else(|| {
+                        ToolError::Msg("content is required for 'create'".to_string())
+                    })?;
                 self.manager
                     .create_from_content(name, content)
                     .map_err(|e| ToolError::Msg(e))?;
@@ -186,12 +193,15 @@ impl Tool for SkillTool {
             }
 
             "edit" => {
-                let name = args.name.as_deref().ok_or_else(|| {
-                    ToolError::Msg("name is required for 'edit'".to_string())
-                })?;
-                let content = args.content.as_deref().filter(|c| !c.trim().is_empty()).ok_or_else(|| {
-                    ToolError::Msg("content is required for 'edit'".to_string())
-                })?;
+                let name = args
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| ToolError::Msg("name is required for 'edit'".to_string()))?;
+                let content = args
+                    .content
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty())
+                    .ok_or_else(|| ToolError::Msg("content is required for 'edit'".to_string()))?;
                 self.manager
                     .edit_from_content(name, content)
                     .map_err(|e| ToolError::Msg(e))?;
@@ -203,12 +213,17 @@ impl Tool for SkillTool {
             }
 
             "patch" => {
-                let name = args.name.as_deref().ok_or_else(|| {
-                    ToolError::Msg("name is required for 'patch'".to_string())
-                })?;
-                let old_string = args.old_string.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-                    ToolError::Msg("old_string is required for 'patch'".to_string())
-                })?;
+                let name = args
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| ToolError::Msg("name is required for 'patch'".to_string()))?;
+                let old_string = args
+                    .old_string
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        ToolError::Msg("old_string is required for 'patch'".to_string())
+                    })?;
                 let new_string = args.new_string.as_deref().unwrap_or("");
                 self.manager
                     .patch(name, old_string, new_string)
@@ -221,12 +236,11 @@ impl Tool for SkillTool {
             }
 
             "delete" => {
-                let name = args.name.as_deref().ok_or_else(|| {
-                    ToolError::Msg("name is required for 'delete'".to_string())
-                })?;
-                self.manager
-                    .delete(name)
-                    .map_err(|e| ToolError::Msg(e))?;
+                let name = args
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| ToolError::Msg("name is required for 'delete'".to_string()))?;
+                self.manager.delete(name).map_err(|e| ToolError::Msg(e))?;
                 Ok(format!("Skill '{}' deleted.", name))
             }
 
@@ -397,7 +411,8 @@ mod tests {
             content: Some(content.into()),
             old_string: None,
             new_string: None,
-        })).unwrap();
+        }))
+        .unwrap();
 
         let result = rt.block_on(tool.call(SkillArgs {
             action: "create".into(),
@@ -425,7 +440,8 @@ mod tests {
             content: Some(content.into()),
             old_string: None,
             new_string: None,
-        })).unwrap();
+        }))
+        .unwrap();
 
         let result = rt.block_on(tool.call(SkillArgs {
             action: "patch".into(),
@@ -458,7 +474,8 @@ mod tests {
             content: Some(content.into()),
             old_string: None,
             new_string: None,
-        })).unwrap();
+        }))
+        .unwrap();
 
         let result = rt.block_on(tool.call(SkillArgs {
             action: "patch".into(),
@@ -486,7 +503,8 @@ mod tests {
             content: Some(content.into()),
             old_string: None,
             new_string: None,
-        })).unwrap();
+        }))
+        .unwrap();
 
         let result = rt.block_on(tool.call(SkillArgs {
             action: "delete".into(),

@@ -323,10 +323,10 @@ impl SessionDb {
             "tool_call_count INTEGER DEFAULT 0",
             "api_call_count INTEGER DEFAULT 0",
         ] {
-            if let Err(e) = self.conn.execute(
-                &format!("ALTER TABLE sessions ADD COLUMN {col}"),
-                [],
-            ) {
+            if let Err(e) = self
+                .conn
+                .execute(&format!("ALTER TABLE sessions ADD COLUMN {col}"), [])
+            {
                 // Duplicate column name is harmless — the column
                 // already exists from a partial previous migration.
                 if !e.to_string().contains("duplicate column name") {
@@ -340,14 +340,11 @@ impl SessionDb {
     /// v5: add message detail columns.
     /// Port of Hermes's messages schema (hermes_state.py:224-242).
     fn run_migration_v5(&self) -> Result<(), String> {
-        for col in &[
-            "token_count INTEGER",
-            "finish_reason TEXT",
-        ] {
-            if let Err(e) = self.conn.execute(
-                &format!("ALTER TABLE messages ADD COLUMN {col}"),
-                [],
-            ) {
+        for col in &["token_count INTEGER", "finish_reason TEXT"] {
+            if let Err(e) = self
+                .conn
+                .execute(&format!("ALTER TABLE messages ADD COLUMN {col}"), [])
+            {
                 if !e.to_string().contains("duplicate column name") {
                     return Err(format!("Migration v5 failed on {col}: {e}"));
                 }
@@ -621,7 +618,7 @@ impl SessionDb {
     /// No-ops when the session is already ended — the first end_reason
     /// wins (compression splits keep their end_reason).
     /// Port of Hermes's `end_session()` (hermes_state.py:732-748).
-    /// 
+    ///
     /// Currently test-only. Will be wired for compression splits
     /// and explicit user exit paths.
     #[cfg(test)]
@@ -1163,7 +1160,10 @@ mod tests {
         assert!(result.is_err(), "should fail to open on bad path");
         let err = last_init_error();
         assert!(err.is_some(), "last_init_error should be set");
-        assert!(err.unwrap().contains("Failed to open"), "error should describe the failure");
+        assert!(
+            err.unwrap().contains("Failed to open"),
+            "error should describe the failure"
+        );
 
         // Clean up.
         let _ = std::fs::remove_file(&bad);

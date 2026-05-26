@@ -219,10 +219,8 @@ impl Curator {
                 };
                 if needs_reactivate {
                     if let Some(ref mut u) = usage {
-                        let _ = u.set_state(
-                            &name,
-                            crate::extras::skills::usage::SkillState::Active,
-                        );
+                        let _ =
+                            u.set_state(&name, crate::extras::skills::usage::SkillState::Active);
                         reactivated.push(name);
                     }
                 }

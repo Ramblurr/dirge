@@ -67,12 +67,12 @@ pub use plugin_hooks::{after_hook_from_plugin_manager, before_hook_from_plugin_m
 pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 pub use retry::retrying_stream_fn;
 pub use rig_stream::{wrap_rig_stream, wrap_streamed_assistant};
+#[cfg(test)]
+pub use rig_stream_factory::rig_stream_fn_from_model;
 pub use rig_stream_factory::{
     build_provider_additional_params, loop_tool_to_rig_definition,
     rig_stream_fn_from_model_with_provider, value_to_rig_message,
 };
-#[cfg(test)]
-pub use rig_stream_factory::rig_stream_fn_from_model;
 pub use rig_tool::RigToolAdapter;
 pub use run::{run_agent_loop, run_loop};
 pub use steering::steering_from_queue;
@@ -81,12 +81,12 @@ pub use tool::LoopTool;
 pub use tool_input_repair::{
     RepairKind, RepairResult, format_structured_error, is_path_field_name, validate_and_repair,
 };
+#[cfg(test)]
+pub use tools::execute_tool_calls_from_msg;
 pub use tools::{
     ExecutedToolCallBatch, ToolCall, execute_tool_calls, execute_tool_calls_parallel,
     execute_tool_calls_sequential, extract_tool_calls,
 };
-#[cfg(test)]
-pub use tools::execute_tool_calls_from_msg;
 pub use types::{
     Context, ConvertToLlmFn, GetApiKeyFn, LoopConfig, QueueMode, ThinkingLevel, ToolExecutionMode,
     TransformContextFn, TurnUpdate,

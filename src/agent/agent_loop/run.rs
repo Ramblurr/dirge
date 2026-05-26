@@ -436,21 +436,16 @@ pub async fn run_loop(
                         // compress the middle section of the conversation.
                         // Port of Hermes's compression pass.
                         if let Some(prompt_tokens) = token_usage.map(|u| u.input_tokens) {
-                            if crate::agent::compression::should_compress(
-                                prompt_tokens,
-                                ctx_max,
-                            ) {
-                                let before =
-                                    crate::agent::compression::estimate_messages_tokens(
-                                        &current_context.messages,
-                                    );
+                            if crate::agent::compression::should_compress(prompt_tokens, ctx_max) {
+                                let before = crate::agent::compression::estimate_messages_tokens(
+                                    &current_context.messages,
+                                );
                                 // Prune large tool outputs — cheap pre-pass,
                                 // no LLM call needed.
-                                let pruned =
-                                    crate::agent::compression::prune_tool_outputs(
-                                        &current_context.messages,
-                                        5, // protect last 5 messages
-                                    );
+                                let pruned = crate::agent::compression::prune_tool_outputs(
+                                    &current_context.messages,
+                                    5, // protect last 5 messages
+                                );
                                 current_context.messages = pruned;
 
                                 // Build a summary marker as a system message
