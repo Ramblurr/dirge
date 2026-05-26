@@ -182,6 +182,18 @@ mod tests {
         assert!(t.is_empty(), "got: {t:?}");
     }
 
+    /// fd-duplication redirects (`2>&1`, `>&2`) target file
+    /// descriptors, not files. They must NOT trigger a write
+    /// permission check — the check against `validate_path` would
+    /// reject the bare number as a "numeric path," and even if it
+    /// passed, there's no file being written.
+    #[test]
+    fn extract_redirect_targets_skips_fd_duplication() {
+        assert!(extract_redirect_targets("cargo test 2>&1").is_empty());
+        assert!(extract_redirect_targets("cmd >&2").is_empty());
+        assert!(extract_redirect_targets("cmd 1>&2").is_empty());
+    }
+
     /// Redirected statement: the inner command is checked (redirect
     /// operands handled by C4 separately, not surfaced here).
     #[test]
@@ -386,7 +398,10 @@ fn collect_redirect_targets(node: tree_sitter::Node, source: &[u8], out: &mut Ve
                 if let Some(child) = node.named_child(i) {
                     if let Ok(text) = child.utf8_text(source) {
                         let trimmed = unquote_simple(text.trim());
-                        if !trimmed.is_empty() && !trimmed.starts_with("&") {
+                        if !trimmed.is_empty()
+                            && !trimmed.starts_with("&")
+                            && !trimmed.chars().all(|c| c.is_ascii_digit())
+                        {
                             out.push(trimmed);
                         }
                     }
