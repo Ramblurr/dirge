@@ -9,6 +9,7 @@
 //! (create, edit, patch, delete) with security scanning and
 //! atomic writes.
 
+pub mod curator;
 pub mod format;
 pub mod guard;
 pub mod manager;
