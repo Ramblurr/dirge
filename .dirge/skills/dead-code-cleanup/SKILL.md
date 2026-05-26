@@ -1,5 +1,4 @@
 # dead-code-cleanup
-# dead-code-cleanup
 
 Systematic dead code removal following dirge conventions.
 
@@ -28,26 +27,19 @@ Systematic dead code removal following dirge conventions.
 ### Exceptions
 
 - `agent_loop/mod.rs` uses `#![allow(unused_imports)]` on its re-export block
-- `compression.rs` has ~13 `#[allow]` annotations — all Round 9 infrastructure awaiting auxiliary LLM pipeline (LoopConfig.compact_model). Verified against Hermes context_compressor.py. Do NOT remove.
-- `session_db.rs`: `last_init_error()` awaits slash-command, `set_parent_session()` awaits compression pipeline
-- `session_db.rs`: `SearchResult.role` — populated from SQL, not yet read by consumers
-- `skills/manager.rs`: `archive()`/`restore()` await skill tool action wiring
+- `compression.rs` has ~10 `#[allow]` annotations — all Round 9 infrastructure awaiting auxiliary LLM pipeline (LoopConfig.compact_model). Verified against Hermes context_compressor.py. Do NOT remove.
+- `session_db.rs`: `last_init_error()`, `set_parent_session()` await slash-command consumers
+- `skills/manager.rs`: `archive()`/`restore()` await skill tool wiring
 - `skills/usage.rs`: `set_pinned()` (web API only in Hermes — awaits /pin slash), `skill_names()` (tool schemas, autocomplete)
-- `skills/curator.rs`: `IDLE_HOURS`, `SkillLifecycle` — curator infrastructure
-
-### What was wired (2025 session)
-
-- `search_messages_trigram` → wired into `SessionSearch::discover()` via `contains_cjk()` for CJK detection
-- `record_create`, `record_view`, `record_patch` → wired into `SkillTool` create/edit/patch actions
-- `record_use` → wired into `SkillTool` load action (alongside `record_view`, matching Hermes `skill_tool.py:105-108`)
-- `UsageStore.lock_path` → file locking in `save()` via `acquire_usage_lock()` (PID create-exclusive)
-- `end_session()` → wired then UNWIRED from `persist_turn_to_db()`. Now `#[cfg(test)]`. See pitfalls.
+- `session_db.rs`: `SearchResult.role` — populated from SQL, not yet read by consumers
 
 ### Pitfalls
 
 - **`end_session()` in `persist_turn_to_db()` causes session content leakage**: marking session "done" after every turn makes previous session content dump alongside user input. Keep `#[cfg(test)]` — only two Hermes callers: compression rotation and explicit user exit.
 - **Don't add `end_session()` to turn-persistence paths** — it's not idempotent in effect despite being idempotent in SQL.
-- **UsageStore.clone() for mutation from `&self` context**: since `SkillTool.call()` takes `&self`, usage counter bumps require `self.usage.clone()` to get an owned mutable copy. This is intentional — best-effort telemetry, the clone is cheap.
+- **UsageStore.clone() for mutation from `&self` context**: since `SkillTool.call()` takes `&self`, usage counter bumps require `self.usage.clone()` to get an owned mutable copy. Intentional — best-effort telemetry, the clone is cheap.
+- **Double `session.add_message(MessageRole::User)` causes chat display duplication**: user messages were added to session twice — once at input time (ui/mod.rs ~line 2054) and once in the `AgentEvent::UserMessage` handler. The event handler should render only; session mutation belongs at input time.
+- **`cfg_attr(not(feature = "plugin"), allow(dead_code))` on fields that are ALWAYS dead**: fields like `BeforeToolCallContext.assistant_message` that current plugin hooks don't read should use plain `#[allow(dead_code)]` + explanatory doc comment. Reserve `cfg_attr` for fields that ARE read when the feature is active.
 
 ### Verification
 

@@ -23,18 +23,17 @@ use crate::extras::session_db::{SearchResult, SessionDb};
 /// When CJK is present, the default unicode61 tokenizer splits
 /// each character into a separate token, breaking phrase matching.
 /// We route to the trigram FTS5 index instead.
-/// Port of Hermes's `_query_contains_cjk()` (hermes_state.py:2085-2105).
+/// Port of Hermes's _contains_cjk() (hermes_state.py:2100-2112).
 fn contains_cjk(query: &str) -> bool {
     query.chars().any(|c| {
-        matches!(c,
-            '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
-            | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
-            | '\u{3040}'..='\u{309F}' // Hiragana
-            | '\u{30A0}'..='\u{30FF}' // Katakana
-            | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
-            | '\u{3000}'..='\u{303F}' // CJK Symbols and Punctuation
-            | '\u{FF00}'..='\u{FFEF}' // Halfwidth and Fullwidth Forms
-        )
+        let cp = c as u32;
+        (0x4E00..=0x9FFF).contains(&cp)     // CJK Unified Ideographs
+        || (0x3400..=0x4DBF).contains(&cp)  // CJK Extension A
+        || (0x20000..=0x2A6DF).contains(&cp) // CJK Extension B
+        || (0x3000..=0x303F).contains(&cp)   // CJK Symbols
+        || (0x3040..=0x309F).contains(&cp)   // Hiragana
+        || (0x30A0..=0x30FF).contains(&cp)   // Katakana
+        || (0xAC00..=0xD7AF).contains(&cp)   // Hangul Syllables
     })
 }
 
@@ -457,24 +456,78 @@ fn truncate_content(content: &str, max_len: usize) -> String {
 }
 
 /// Sanitize a user-provided query string for safe use with FTS5 MATCH.
-/// FTS5 has special syntax characters that could be exploited or cause
-/// unexpected behavior: `*` (prefix wildcard), `"` (phrase), parentheses
-/// (grouping), and boolean operators AND/OR/NOT/NEAR. We wrap the query
-/// in double quotes to treat it as a literal phrase, then strip any
-/// embedded quotes from the user input to prevent injection.
+/// Port of Hermes's _sanitize_fts5_query (hermes_state.py:2036-2086).
+///
+/// FTS5 query syntax has special characters: `+`, `*`, `"`, `(`, `)`, `{`,
+/// `}`, `^`, and bare boolean operators (AND, OR, NOT). Passing raw user
+/// input directly to MATCH can cause `sqlite3.OperationalError`.
+///
+/// Strategy (6-step pipeline from Hermes):
+/// 1. Extract balanced double-quoted phrases, protect with placeholders
+/// 2. Strip remaining FTS5-special chars: `+{}()"^`
+/// 3. Collapse repeated `*` into single `*`, remove leading `*`
+/// 4. Remove dangling boolean operators at start/end
+/// 5. Wrap hyphenated and dotted terms in quotes (FTS5 splits on `-` and `.`)
+/// 6. Restore preserved quoted phrases
 fn sanitize_fts5_query(query: &str) -> String {
-    // Strip characters with FTS5 special meaning.
-    let cleaned: String = query
-        .chars()
-        .filter(|c| !matches!(c, '*' | '"' | '(' | ')'))
-        .collect();
-    // Wrap in double quotes so FTS5 treats it as a literal phrase.
-    // Empty query after cleaning → return empty string (caller handles).
-    let trimmed = cleaned.trim();
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    if query.trim().is_empty() {
+        return String::new();
+    }
+
+    // Step 1: Extract balanced double-quoted phrases and protect them.
+    static QUOTED_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#""[^"]*""#).unwrap());
+    let mut quoted_parts: Vec<String> = Vec::new();
+    let mut sanitized = QUOTED_RE
+        .replace_all(query, |caps: &regex::Captures| {
+            let s = caps[0].to_string();
+            let idx = quoted_parts.len();
+            quoted_parts.push(s);
+            format!("\x00Q{idx}\x00")
+        })
+        .to_string();
+
+    // Step 2: Strip remaining FTS5-special characters: + { } ( ) " ^
+    static SPECIAL_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"[+{}()"^]"#).unwrap());
+    sanitized = SPECIAL_RE.replace_all(&sanitized, " ").to_string();
+
+    // Step 3: Collapse repeated * into single *, remove leading *
+    static STAR_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\*+").unwrap());
+    sanitized = STAR_RE.replace_all(&sanitized, "*").to_string();
+    static LEADING_STAR_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(^|\s)\*").unwrap());
+    sanitized = LEADING_STAR_RE.replace_all(&sanitized, "$1").to_string();
+
+    // Step 4: Remove dangling boolean operators at start/end
+    static DANGLING_START_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)^(AND|OR|NOT)\b\s*").unwrap());
+    sanitized = DANGLING_START_RE.replace(&sanitized.trim(), "").to_string();
+    static DANGLING_END_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\s+(AND|OR|NOT)\s*$").unwrap());
+    sanitized = DANGLING_END_RE.replace(&sanitized.trim(), "").to_string();
+
+    // Step 5: Wrap hyphenated and dotted terms in quotes.
+    // FTS5 tokenizer splits on `-` and `.`, so `chat-send` becomes
+    // `chat AND send`. Quoting preserves phrase semantics.
+    static DOT_DASH_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b(\w+(?:[._-]\w+)+\w*)\b").unwrap());
+    sanitized = DOT_DASH_RE.replace_all(&sanitized, r#""$1""#).to_string();
+
+    // Step 6: Restore preserved quoted phrases
+    for (i, quoted) in quoted_parts.iter().enumerate() {
+        sanitized = sanitized.replace(&format!("\x00Q{i}\x00"), quoted);
+    }
+
+    let trimmed = sanitized.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    format!("\"{}\"", trimmed)
+    trimmed.to_string()
 }
 
 #[cfg(test)]
@@ -739,19 +792,41 @@ mod tests {
     #[test]
     fn sanitize_preserves_normal_query() {
         let result = sanitize_fts5_query("database migrations");
-        assert_eq!(result, "\"database migrations\"");
+        assert_eq!(result, "database migrations");
+    }
+
+    #[test]
+    fn sanitize_protects_balanced_quotes() {
+        // Balanced quotes protect their content from stripping.
+        let result = sanitize_fts5_query("\"exact phrase\"");
+        assert_eq!(result, "\"exact phrase\"");
     }
 
     #[test]
     fn sanitize_strips_fts5_special_chars() {
-        let result = sanitize_fts5_query("foo* AND (bar)");
-        assert_eq!(result, "\"foo AND bar\"");
+        // +, {, }, (, ), ^ stripped; balanced quotes protect content.
+        let result = sanitize_fts5_query("+hello");
+        assert_eq!(result, "hello");
     }
 
     #[test]
-    fn sanitize_strips_quotes() {
-        let result = sanitize_fts5_query("\"exact phrase\"");
-        assert_eq!(result, "\"exact phrase\"");
+    fn sanitize_collapses_multiple_stars() {
+        // *** collapses to * but leading * still stripped
+        let result = sanitize_fts5_query("a***test");
+        assert_eq!(result, "a*test");
+    }
+
+    #[test]
+    fn sanitize_strips_dangling_boolean() {
+        let result = sanitize_fts5_query("hello AND");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn sanitize_wraps_hyphenated_and_dotted_terms() {
+        // FTS5 splits on - and ., quoting preserves phrase semantics.
+        let result = sanitize_fts5_query("my-app.config.ts");
+        assert_eq!(result, "\"my-app.config.ts\"");
     }
 
     #[test]
@@ -763,6 +838,6 @@ mod tests {
     #[test]
     fn sanitize_trims_whitespace() {
         let result = sanitize_fts5_query("  hello world  ");
-        assert_eq!(result, "\"hello world\"");
+        assert_eq!(result, "hello world");
     }
 }
