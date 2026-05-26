@@ -350,7 +350,7 @@ impl SessionSearch {
         }
         // Find the first message with timestamp >= target.
         for m in &view.messages {
-            if m.timestamp >= timestamp {
+            if *m.timestamp >= *timestamp {
                 return Ok(m.id);
             }
         }
