@@ -21,6 +21,13 @@ pub(super) mod done;
 pub(super) mod interjected;
 pub(super) mod tool_result;
 
+// dirge-5h5: isolated repro harness for the parallel-read chamber
+// race. Drives the chamber state machine directly without the
+// tokio::select! / bridge / agent_loop layers so the bug can be
+// localised to (or ruled out of) the chamber logic itself.
+#[cfg(test)]
+mod dirge_5h5_repro;
+
 pub(super) use context_overflow::handle_context_overflow;
 pub(super) use done::handle_done;
 pub(super) use interjected::handle_interjected;
