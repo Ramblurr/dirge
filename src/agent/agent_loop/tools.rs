@@ -55,6 +55,11 @@ enum PrepareOutcome {
     Prepared {
         tool: Arc<dyn LoopTool>,
         args: Value,
+        /// Phase-2: repair-pass notes (e.g. "offset defaulted to
+        /// 0 …") prepended to the tool result content so the
+        /// model sees how its inputs were augmented. Empty for
+        /// tools that didn't trigger any relational defaults.
+        notes: Vec<String>,
     },
     /// Short-circuit error: tool missing, schema rejected,
     /// signal aborted, or beforeToolCall blocked.
@@ -124,13 +129,13 @@ pub async fn execute_tool_calls_sequential(
                 result,
                 is_error,
             },
-            PrepareOutcome::Prepared { tool, args } => {
+            PrepareOutcome::Prepared { tool, args, notes } => {
                 // LOOP-5: RAII guard ensures the inflight id is
                 // removed even on cancellation / panic / `?`-bail.
                 let _inflight = inflight.guard(&tool_call.id);
                 let executed =
                     execute_prepared_tool_call(&tool, tool_call, &args, signal, emit).await;
-                finalize_executed_tool_call(
+                let mut finalized = finalize_executed_tool_call(
                     context,
                     assistant_message,
                     tool_call,
@@ -138,7 +143,12 @@ pub async fn execute_tool_calls_sequential(
                     executed,
                     config,
                 )
-                .await
+                .await;
+                // Phase-2: prepend repair notes (e.g. relational
+                // defaults) to the tool result content so the
+                // model sees the auto-fill in the same turn.
+                prepend_notes_to_result(&mut finalized.result, &notes);
+                finalized
                 // _inflight dropped here → inflight.delete fires.
             }
         };
@@ -202,6 +212,9 @@ async fn prepare_tool_call(
     // On validation failure, apply targeted repairs for the four
     // common open-model shape mistakes (null-for-optional,
     // JSON-string-as-array, {}-to-[], bare-string-to-array).
+    // Phase-2: also collects relational-defaults `notes` to
+    // prepend to the tool result so the model sees the auto-fill.
+    let mut repair_notes: Vec<String> = Vec::new();
     let mut validated_args = match crate::agent::agent_loop::tool_input_repair::validate_and_repair(
         tool.parameters(),
         &prepared_args,
@@ -253,6 +266,10 @@ async fn prepare_tool_call(
                     config.repair_stats.record(*kind);
                 }
             }
+            // Phase-2: carry relational-default notes forward
+            // so the dispatcher can prepend them to the tool
+            // result content.
+            repair_notes = rr.notes;
             rr.repaired
         }
         Err(errors) => {
@@ -339,6 +356,7 @@ async fn prepare_tool_call(
     PrepareOutcome::Prepared {
         tool,
         args: validated_args,
+        notes: repair_notes,
     }
 }
 
@@ -559,6 +577,24 @@ fn create_error_tool_result(message: &str) -> LoopToolResult {
     }
 }
 
+/// Phase-2: prepend repair-pass notes (e.g. relational-defaults
+/// "offset defaulted to 0") to a tool result's text content so
+/// the model sees them in the same turn it dispatched the call.
+/// No-op when `notes` is empty.
+///
+/// The notes are inserted as a SEPARATE leading text block when
+/// possible, OR prepended to the first text block. Non-text
+/// results (image-only, structured-only) get a fresh text block
+/// inserted at index 0.
+fn prepend_notes_to_result(result: &mut LoopToolResult, notes: &[String]) {
+    if notes.is_empty() {
+        return;
+    }
+    let joined = notes.join("\n");
+    let note_block = serde_json::json!({"type": "text", "text": joined});
+    result.content.insert(0, note_block);
+}
+
 /// Emit the `tool_execution_end` event. Port of pi line 717.
 async fn emit_tool_execution_end(finalized: &FinalizedOutcome, emit: &mpsc::Sender<LoopEvent>) {
     let _ = emit
@@ -710,7 +746,7 @@ pub async fn execute_tool_calls_parallel(
                     break;
                 }
             }
-            PrepareOutcome::Prepared { tool, args } => {
+            PrepareOutcome::Prepared { tool, args, notes } => {
                 // Pi lines 484-496: push an async lambda that
                 // executes, finalizes, AND emits its
                 // tool_execution_end at the end. The
@@ -738,7 +774,7 @@ pub async fn execute_tool_calls_parallel(
                         &emit_clone,
                     )
                     .await;
-                    let finalized = finalize_executed_tool_call(
+                    let mut finalized = finalize_executed_tool_call(
                         &context_clone,
                         &assistant_clone,
                         &tool_call_clone,
@@ -747,6 +783,9 @@ pub async fn execute_tool_calls_parallel(
                         &config_clone,
                     )
                     .await;
+                    // Phase-2: prepend repair notes so the model
+                    // sees them in the same tool result.
+                    prepend_notes_to_result(&mut finalized.result, &notes);
                     // Emit end AT COMPLETION. This is the key
                     // difference from sequential (which emits
                     // end immediately after each call).

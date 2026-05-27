@@ -117,7 +117,7 @@ fn language_for_path(path: &Path) -> Option<tree_sitter::Language> {
 /// source snippet so the model can localize without re-reading.
 fn collect_errors(tree: &tree_sitter::Tree, source: &str) -> Vec<SyntaxError> {
     let mut errors: Vec<SyntaxError> = Vec::new();
-    let mut cursor = tree.walk();
+    let cursor = tree.walk();
     let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         if errors.len() >= MAX_ERRORS {

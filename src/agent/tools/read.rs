@@ -149,11 +149,31 @@ impl Tool for ReadTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The absolute path to the file to read (must be absolute, not relative)" },
+                    "path": {
+                        "type": "string",
+                        "description": "The absolute path to the file to read (must be absolute, not relative)",
+                        "dirge-hints": {"semantic": "absolute_path"}
+                    },
                     "offset": { "type": "integer", "description": "Line number to start from (1-indexed)" },
                     "limit": { "type": "integer", "description": "Maximum number of lines to read" }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                // Phase-2: when `limit` is given but `offset` is
+                // not (or vice versa), the harness auto-fills the
+                // missing one with `offset = 0` and prepends a
+                // Note: to the tool result so the model knows the
+                // default was applied. Replaces the hardcoded note
+                // in `read::call`'s body — that path can be
+                // removed once every relational pairing migrates
+                // here.
+                "dirge-hints": {
+                    "relational": [
+                        {
+                            "requires": ["offset", "limit"],
+                            "defaults": {"offset": 0}
+                        }
+                    ]
+                }
             }),
         }
     }

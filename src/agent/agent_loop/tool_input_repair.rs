@@ -58,6 +58,14 @@ impl RepairKind {
 pub struct RepairResult {
     pub repaired: Value,
     pub kinds: Vec<RepairKind>,
+    /// Human-readable notes the repair pass wants the model to
+    /// see in the tool result. Phase-2: relational defaults
+    /// (`offset` auto-set to 0 when only `limit` was supplied)
+    /// surface a `"Note: offset defaulted to 0 …"` here. The
+    /// tool dispatcher prepends these to the eventual tool
+    /// result content so the model sees the augmentation and
+    /// adapts subsequent calls.
+    pub notes: Vec<String>,
 }
 
 /// Per-RepairKind atomic counter. Shared across an agent run via
@@ -207,6 +215,117 @@ pub fn contract_hint_for(tool_name: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
+mod phase2_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn relational_defaults_fills_missing_offset() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"}
+            },
+            "required": ["path"],
+            "dirge-hints": {
+                "relational": [
+                    {"requires": ["offset", "limit"], "defaults": {"offset": 0}}
+                ]
+            }
+        });
+        let args = json!({"path": "/tmp/x", "limit": 30});
+        let result = validate_and_repair(&schema, &args).unwrap().unwrap();
+        assert_eq!(result.repaired["offset"], 0);
+        assert_eq!(result.repaired["limit"], 30);
+        assert_eq!(result.notes.len(), 1);
+        let note = &result.notes[0];
+        assert!(
+            note.contains("offset"),
+            "note should mention offset: {note}"
+        );
+        assert!(note.contains("defaulted"), "note phrasing: {note}");
+    }
+
+    #[test]
+    fn relational_defaults_skip_when_all_present() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"}
+            },
+            "dirge-hints": {
+                "relational": [
+                    {"requires": ["offset", "limit"], "defaults": {"offset": 0}}
+                ]
+            }
+        });
+        let args = json!({"offset": 10, "limit": 20});
+        let result = validate_and_repair(&schema, &args).unwrap();
+        // No notes emitted, no kinds applied, possibly None.
+        assert!(result.is_none() || result.as_ref().unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn relational_defaults_skip_when_all_absent() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"}
+            },
+            "required": ["path"],
+            "dirge-hints": {
+                "relational": [
+                    {"requires": ["offset", "limit"], "defaults": {"offset": 0}}
+                ]
+            }
+        });
+        let args = json!({"path": "/tmp/x"});
+        let result = validate_and_repair(&schema, &args).unwrap();
+        assert!(result.is_none() || result.as_ref().unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn semantic_tag_absolute_path_triggers_md_link_unwrap() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "custom_field": {
+                    "type": "string",
+                    "dirge-hints": {"semantic": "absolute_path"}
+                }
+            }
+        });
+        // A degenerate md-link in a non-standard-named field
+        // should be unwrapped because of the semantic tag.
+        let args = json!({"custom_field": "[notes.md](http://notes.md)"});
+        let result = validate_and_repair(&schema, &args).unwrap().unwrap();
+        assert_eq!(result.repaired["custom_field"], "notes.md");
+        assert!(result.kinds.contains(&RepairKind::MdLinkUnwrapped));
+    }
+
+    #[test]
+    fn x_dirge_kind_path_still_works_for_backcompat() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "thing": {
+                    "type": "string",
+                    "x-dirge-kind": "path"
+                }
+            }
+        });
+        let args = json!({"thing": "[a.rs](http://a.rs)"});
+        let result = validate_and_repair(&schema, &args).unwrap().unwrap();
+        assert_eq!(result.repaired["thing"], "a.rs");
+    }
+}
+
 /// Compose a tool description with its contract hint appended.
 /// Convenience wrapper around `contract_hint_for` so a tool's
 /// `definition()` impl reads as a single function call:
@@ -222,6 +341,96 @@ pub fn with_contract_hint(tool_name: &str, base_description: &str) -> String {
     match contract_hint_for(tool_name) {
         Some(hint) => format!("{base_description}\n\n{hint}"),
         None => base_description.to_string(),
+    }
+}
+
+/// Schema-driven relational-defaults pass. Reads a top-level
+/// `dirge-hints.relational` array from the schema:
+///
+///     "dirge-hints": {
+///       "relational": [
+///         {"requires": ["offset", "limit"], "defaults": {"offset": 0}}
+///       ]
+///     }
+///
+/// Semantic: every entry declares a set of fields that should
+/// be present together. When SOME but not all are present (the
+/// "partial" case), the missing fields are filled from `defaults`
+/// and a `Note:` is appended to `notes` so the model sees the
+/// auto-fill. When ALL are present, or ALL are absent, the pass
+/// is a no-op — the partial case is the only one that needs
+/// repair.
+///
+/// Phase-2 of `docs/AGENTIC_LOOP_PLAN.md` — replaces the
+/// hardcoded `read.rs:190` "Note: offset defaulted to 0" with a
+/// schema-driven mechanism every tool can declare.
+fn apply_relational_defaults(schema: &Value, args: &mut Value, notes: &mut Vec<String>) {
+    let Some(relational) = schema
+        .get("dirge-hints")
+        .and_then(|h| h.get("relational"))
+        .and_then(|v| v.as_array())
+    else {
+        return;
+    };
+    let Value::Object(obj) = args else {
+        return;
+    };
+    for entry in relational {
+        let Some(requires) = entry.get("requires").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let names: Vec<&str> = requires.iter().filter_map(|v| v.as_str()).collect();
+        if names.is_empty() {
+            continue;
+        }
+        let present: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| obj.contains_key(*n))
+            .collect();
+        // Only fire on the "partial" case — some required fields
+        // present, others absent. Full-presence and full-absence
+        // are both fine: the schema's own `required` list handles
+        // the latter, and the LLM is acting consistently in either.
+        if present.is_empty() || present.len() == names.len() {
+            continue;
+        }
+        let defaults = entry.get("defaults").and_then(|d| d.as_object());
+        let mut auto_filled: Vec<(String, Value)> = Vec::new();
+        for name in &names {
+            if obj.contains_key(*name) {
+                continue;
+            }
+            let value = defaults
+                .and_then(|d| d.get(*name))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if !value.is_null() {
+                obj.insert((*name).to_string(), value.clone());
+                auto_filled.push(((*name).to_string(), value));
+            }
+        }
+        if !auto_filled.is_empty() {
+            // One Note per relational entry, summarising every
+            // field defaulted. Keeps the surface concise even
+            // when multiple fields auto-filled together.
+            let filled_desc: Vec<String> = auto_filled
+                .iter()
+                .map(|(n, v)| format!("{n}={v}"))
+                .collect();
+            let provided: Vec<&str> = present.iter().copied().collect();
+            notes.push(format!(
+                "Note: {} was provided but {} was not — defaulted to {}. To change, retry with all of [{}] set explicitly.",
+                provided.join(", "),
+                auto_filled
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                filled_desc.join(", "),
+                names.join(", "),
+            ));
+        }
     }
 }
 
@@ -272,13 +481,59 @@ fn unwrap_md_link(value: &str) -> Option<String> {
     None
 }
 
-/// Check whether a schema node marks a path-typed field — by name
-/// (`path`, `file_path`, etc.) or by `x-dirge-kind: "path"` annotation.
-fn is_path_field(key: &str, prop_schema: &Value) -> bool {
-    if is_path_field_name(key) {
-        return true;
+/// Semantic tag for a single property, read from
+/// `dirge-hints.semantic` (preferred) or `x-dirge-kind`
+/// (back-compat). Drives the repair layer's targeted fixes —
+/// e.g. `AbsolutePath` triggers md-link unwrap. Phase-2 of
+/// `docs/AGENTIC_LOOP_PLAN.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticTag {
+    /// Filesystem path that must be absolute. Subject to md-link
+    /// unwrap; the call-site tool ALSO enforces `is_absolute()`.
+    AbsolutePath,
+    /// Filesystem path that may be relative. Subject to md-link
+    /// unwrap. No absolute-path enforcement.
+    RelativePath,
+}
+
+/// Read the semantic tag for a single property's schema node.
+/// New schemas declare `dirge-hints: {"semantic": "absolute_path"}`.
+/// Older schemas use `x-dirge-kind: "path"` — treated as
+/// `AbsolutePath` for backward compatibility (every existing
+/// tagged tool requires absolute paths). The field-name
+/// heuristic (`path`/`paths`/`dir`/`filename`/`file_path`) still
+/// applies as a fallback for tools that haven't been migrated.
+fn extract_semantic_tag(key: &str, prop_schema: &Value) -> Option<SemanticTag> {
+    // Preferred: dirge-hints.semantic
+    if let Some(sem) = prop_schema
+        .get("dirge-hints")
+        .and_then(|h| h.get("semantic"))
+        .and_then(|v| v.as_str())
+    {
+        return match sem {
+            "absolute_path" => Some(SemanticTag::AbsolutePath),
+            "relative_path" => Some(SemanticTag::RelativePath),
+            _ => None,
+        };
     }
-    prop_schema.get("x-dirge-kind").and_then(|v| v.as_str()) == Some("path")
+    // Back-compat: x-dirge-kind: "path"
+    if prop_schema.get("x-dirge-kind").and_then(|v| v.as_str()) == Some("path") {
+        return Some(SemanticTag::AbsolutePath);
+    }
+    // Fallback: field-name heuristic. Any path-shaped name implies
+    // absolute (every tool with these names today requires one).
+    if is_path_field_name(key) {
+        return Some(SemanticTag::AbsolutePath);
+    }
+    None
+}
+
+/// `true` when the property is path-shaped (either flavour).
+fn is_path_field(key: &str, prop_schema: &Value) -> bool {
+    matches!(
+        extract_semantic_tag(key, prop_schema),
+        Some(SemanticTag::AbsolutePath) | Some(SemanticTag::RelativePath)
+    )
 }
 
 /// Walk args in parallel with the schema, applying `unwrap_md_link`
@@ -337,6 +592,7 @@ pub fn validate_and_repair(
 
     let mut repaired = args.clone();
     let mut applied_kinds: Vec<RepairKind> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
 
     // 1. Content normalizers (run regardless of validation status).
     //    These fix well-known model output quirks that don't cause
@@ -349,6 +605,11 @@ pub fn validate_and_repair(
     // 2. Unwrap degenerate markdown auto-links in path fields.
     repaired = unwrap_md_links_in_args(schema, &repaired, &mut applied_kinds);
 
+    // 2.5 Relational defaults (Phase-2). Fill missing fields when
+    //     the schema's `dirge-hints.relational` declares
+    //     "these belong together"; surface a Note: per fill.
+    apply_relational_defaults(schema, &mut repaired, &mut notes);
+
     // 3. Validate. If the input is valid (possibly after content fixes),
     //    return it — no shape repair needed.
     //    Collect errors into strings first so we can release the
@@ -358,12 +619,13 @@ pub fn validate_and_repair(
         .map(|e| (e.instance_path().to_string(), e.to_string()))
         .collect();
     if validation_errors.is_empty() {
-        if applied_kinds.is_empty() {
+        if applied_kinds.is_empty() && notes.is_empty() {
             return Ok(None);
         }
         return Ok(Some(RepairResult {
             repaired,
             kinds: applied_kinds,
+            notes,
         }));
     }
 
@@ -378,6 +640,7 @@ pub fn validate_and_repair(
         Ok(Some(RepairResult {
             repaired,
             kinds: applied_kinds,
+            notes,
         }))
     } else {
         let final_errors: Vec<String> = remaining
