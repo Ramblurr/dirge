@@ -1,6 +1,42 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// LOOP-3: stat a path and return a `mtime_ns:size` suffix suitable
+/// for splicing into a cache key. External writes (LSP, IDE,
+/// plugin-spawned bash, MCP tool) change one or both, so any
+/// previously cached entry under the old suffix is automatically
+/// unreachable on the next read. Failure (file missing, perms)
+/// returns `"0:0"` which intentionally won't collide with a real
+/// stat — the next call resolves to a fresh entry.
+pub fn fs_stamp(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let nanos = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}:{}", nanos, m.len())
+        }
+        Err(_) => "0:0".to_string(),
+    }
+}
+
+/// Like `fs_stamp` but uses cwd when the path is empty or doesn't
+/// resolve to a stat-able target. Useful for tools that operate on
+/// a directory and use the directory's mtime as the cache-validity
+/// signal (e.g. `list_dir`, `find_files`).
+pub fn fs_stamp_or_cwd(path: &str) -> String {
+    let p = if path.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    fs_stamp(&p)
+}
 
 struct CacheEntry {
     value: String,

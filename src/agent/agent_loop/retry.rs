@@ -195,6 +195,14 @@ pub fn retrying_stream_fn(inner: StreamFn, policy: RecoveryPolicy) -> StreamFn {
 /// Phases that represent observable downstream content. Once any
 /// of these have streamed, we don't retry — the consumer has
 /// already seen output and re-running would duplicate it.
+///
+/// PROV-5: tool-call deltas are NOT included. The model emitting
+/// a tool-call JSON fragment is not the same as the tool actually
+/// running — dispatch happens AFTER the stream ends, downstream
+/// of this retry layer. A 503 mid-tool-call-emission is therefore
+/// retryable; the consumer resets its partial-assistant state on
+/// `StreamEvent::Retry` (see `stream.rs`) so the second attempt's
+/// tool calls don't accumulate on top of the first attempt's.
 fn is_content_delta(phase: DeltaPhase) -> bool {
     matches!(
         phase,
@@ -202,9 +210,6 @@ fn is_content_delta(phase: DeltaPhase) -> bool {
             | DeltaPhase::TextDelta
             | DeltaPhase::ThinkingStart
             | DeltaPhase::ThinkingDelta
-            | DeltaPhase::ToolCallStart
-            | DeltaPhase::ToolCallDelta
-            | DeltaPhase::ToolCallEnd
     )
 }
 
@@ -572,8 +577,13 @@ mod tests {
         assert!(matches!(events.last(), Some(StreamEvent::Error { .. })));
     }
 
-    /// `is_content_delta` returns true for content phases and
-    /// false for end markers.
+    /// `is_content_delta` returns true for text + thinking phases
+    /// (which the user has already seen) and false for everything
+    /// else. PROV-5: tool-call deltas are explicitly NOT committed
+    /// — they're buffered until the stream ends and only then
+    /// dispatched, so a 503 during ToolCallStart/Delta/End is
+    /// safely retryable. The consumer in `stream.rs` resets its
+    /// partial-assistant state on `StreamEvent::Retry`.
     #[test]
     fn is_content_delta_classifies_phases() {
         for phase in [
@@ -581,13 +591,16 @@ mod tests {
             DeltaPhase::TextDelta,
             DeltaPhase::ThinkingStart,
             DeltaPhase::ThinkingDelta,
+        ] {
+            assert!(is_content_delta(phase), "{phase:?} should be content");
+        }
+        for phase in [
+            DeltaPhase::TextEnd,
+            DeltaPhase::ThinkingEnd,
             DeltaPhase::ToolCallStart,
             DeltaPhase::ToolCallDelta,
             DeltaPhase::ToolCallEnd,
         ] {
-            assert!(is_content_delta(phase), "{phase:?} should be content");
-        }
-        for phase in [DeltaPhase::TextEnd, DeltaPhase::ThinkingEnd] {
             assert!(!is_content_delta(phase), "{phase:?} should NOT be content");
         }
     }

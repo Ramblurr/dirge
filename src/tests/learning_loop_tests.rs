@@ -522,13 +522,16 @@ fn curator_empty_skills_dir_is_no_op() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-fn session_db_schema_version_reaches_v5() {
+fn session_db_schema_version_reaches_v6() {
+    // SESS-14 bumped to v6: drops the automatic FTS triggers so
+    // `insert_message` can scrub credentials through `redact_for_fts`
+    // before they land in the FTS index.
     let (db, _dir) = temp_session_db();
     let ver: u32 = db
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(ver, 5, "fresh DB should be at schema version 5");
+    assert_eq!(ver, 6, "fresh DB should be at schema version 6");
 }
 
 #[test]

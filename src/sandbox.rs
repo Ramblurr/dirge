@@ -1,3 +1,6 @@
+use std::sync::OnceLock;
+
+use regex::Regex;
 use tokio::process::Command;
 
 #[derive(Debug, Clone)]
@@ -163,14 +166,110 @@ pub fn is_sensitive_env_name(name: &str) -> bool {
     EXPLICIT.iter().any(|n| &upper == n)
 }
 
+/// Test whether an env var VALUE carries a high-confidence credential
+/// shape, regardless of its name. Ported from hermes-agent/agent/redact.py
+/// (`_PREFIX_PATTERNS` + URL-userinfo regex). The name-based scrub above
+/// catches the common case (anything containing `KEY`/`TOKEN`/etc.), but
+/// values like `DATABASE_URL=postgres://user:pass@host/db` carry
+/// credentials in a name (`DATABASE_URL`) that doesn't match any
+/// sensitive pattern. PERM-11.
+///
+/// Pattern set is deliberately conservative — only signatures with low
+/// false-positive rates make the list. Long base64 alone (without a
+/// vendor prefix) does NOT trip this, because plenty of harmless env
+/// vars happen to carry long opaque tokens (e.g. NIX_PATH hashes).
+pub fn is_sensitive_env_value(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    // Cheap substring pre-checks before the regex set runs. Skipping
+    // the regex when none of the gate substrings are present keeps the
+    // per-spawn cost negligible for the common case.
+    let has_url_userinfo_gate = value.contains("://");
+    let has_prefix_gate = value.contains("AKIA")
+        || value.contains("ghp_")
+        || value.contains("xox")
+        || value.contains("sk-")
+        || value.contains("sk_live_")
+        || value.contains("sk_test_")
+        || value.contains("AIza")
+        || value.contains("github_pat_")
+        || value.contains("hf_")
+        || value.contains("xai-")
+        || value.contains("eyJ");
+    if !has_url_userinfo_gate && !has_prefix_gate {
+        return false;
+    }
+
+    static URL_USERINFO_RE: OnceLock<Regex> = OnceLock::new();
+    static PREFIX_RE: OnceLock<Regex> = OnceLock::new();
+
+    // protocol://user:pass@host — any scheme, requires a non-empty
+    // password component. Matches both DB connection strings
+    // (postgres://user:pass@…) and generic webhook URLs with
+    // userinfo (https://user:token@api.example.com).
+    let url_re = URL_USERINFO_RE.get_or_init(|| {
+        // user may be empty (redis://:pass@…), password must be non-empty.
+        Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@").unwrap()
+    });
+    if has_url_userinfo_gate && url_re.is_match(value) {
+        return true;
+    }
+
+    // High-confidence vendor token prefixes. Each entry is restrictive
+    // enough that a random env var value matching by accident is
+    // essentially impossible.
+    let prefix_re = PREFIX_RE.get_or_init(|| {
+        Regex::new(
+            r"(?x)
+            (?:^|[^A-Za-z0-9_-])
+            (?:
+                  AKIA[0-9A-Z]{16}                  # AWS Access Key ID
+                | ghp_[A-Za-z0-9]{36}               # GitHub PAT (classic)
+                | github_pat_[A-Za-z0-9_]{20,}      # GitHub PAT (fine-grained)
+                | gho_[A-Za-z0-9]{30,}              # GitHub OAuth
+                | ghu_[A-Za-z0-9]{30,}              # GitHub user-to-server
+                | ghs_[A-Za-z0-9]{30,}              # GitHub server-to-server
+                | xox[baprs]-[A-Za-z0-9-]{10,}      # Slack tokens
+                | sk-[A-Za-z0-9_-]{20,}             # OpenAI/Anthropic/OpenRouter
+                | sk_live_[A-Za-z0-9]{20,}          # Stripe live
+                | sk_test_[A-Za-z0-9]{20,}          # Stripe test
+                | AIza[A-Za-z0-9_-]{30,}            # Google API
+                | hf_[A-Za-z0-9]{30,}               # HuggingFace
+                | xai-[A-Za-z0-9]{30,}              # xAI (Grok)
+                | eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_=-]{4,}  # JWT (3-part)
+            )
+            ",
+        )
+        .unwrap()
+    });
+    if has_prefix_gate && prefix_re.is_match(value) {
+        return true;
+    }
+    false
+}
+
 /// Strip sensitive env vars from a Command before spawn. Uses
 /// `.env_remove` rather than `.env_clear()+envs()` so non-sensitive
 /// vars the parent already has (PATH, HOME, etc.) reach the child
 /// without being re-enumerated.
+///
+/// Scrubs by NAME (denylist patterns) AND by VALUE shape (PERM-11):
+/// some legitimate env vars (`DATABASE_URL`, `WEBHOOK_URL`, custom
+/// build vars) carry credentials in their value even though the name
+/// is innocuous.
 fn scrub_env(cmd: &mut Command) {
-    for (k, _) in std::env::vars_os() {
-        if let Some(name) = k.to_str()
-            && is_sensitive_env_name(name)
+    for (k, v) in std::env::vars_os() {
+        let Some(name) = k.to_str() else { continue };
+        if is_sensitive_env_name(name) {
+            cmd.env_remove(&k);
+            continue;
+        }
+        // Name passed — check value shape. Only string-valued env
+        // can carry the credential shapes we look for; non-UTF-8
+        // env values are passed through.
+        if let Some(val) = v.to_str()
+            && is_sensitive_env_value(val)
         {
             cmd.env_remove(&k);
         }
@@ -238,6 +337,91 @@ mod tests {
         assert!(!is_sensitive_env_name("GITHUB_TOKEN"));
         assert!(!is_sensitive_env_name("GH_TOKEN"));
         assert!(!is_sensitive_env_name("SSH_AUTH_SOCK"));
+    }
+
+    #[test]
+    fn is_sensitive_env_value_catches_db_userinfo() {
+        // PERM-11: name passes the denylist, but the VALUE carries
+        // a credential. Catch it.
+        assert!(is_sensitive_env_value(
+            "postgres://user:pass@host:5432/db"
+        ));
+        assert!(is_sensitive_env_value("mysql://root:hunter2@db/app"));
+        assert!(is_sensitive_env_value(
+            "mongodb+srv://admin:secret@cluster.example.com/test"
+        ));
+        assert!(is_sensitive_env_value(
+            "redis://:supersecret@redis.internal:6379"
+        ));
+        assert!(is_sensitive_env_value(
+            "https://deploy:tok123@webhook.example.com/x"
+        ));
+    }
+
+    #[test]
+    fn is_sensitive_env_value_catches_vendor_prefixes() {
+        // AWS access key
+        assert!(is_sensitive_env_value("AKIAIOSFODNN7EXAMPLE"));
+        // GitHub PAT (classic) - exactly 36 chars after prefix
+        assert!(is_sensitive_env_value(
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        ));
+        // GitHub fine-grained PAT
+        assert!(is_sensitive_env_value(
+            "github_pat_abcdefghij1234567890_morechars"
+        ));
+        // Slack bot
+        assert!(is_sensitive_env_value(
+            "xoxb-1234567890-abcdefghij-AbCdEfGh"
+        ));
+        // OpenAI-style sk-
+        assert!(is_sensitive_env_value("sk-proj-abcdef1234567890ABCDEF"));
+        // Google API key
+        assert!(is_sensitive_env_value(
+            "AIzaSyA-abcdefghijklmnopqrstuvwxyz_-_-_-"
+        ));
+        // HuggingFace
+        assert!(is_sensitive_env_value(
+            "hf_abcdefghijklmnopqrstuvwxyz0123456789"
+        ));
+        // JWT (3-part)
+        assert!(is_sensitive_env_value(
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ));
+    }
+
+    #[test]
+    fn is_sensitive_env_value_lets_through_plain_values() {
+        // Common legitimate env values must pass.
+        assert!(!is_sensitive_env_value("/usr/local/bin:/usr/bin:/bin"));
+        assert!(!is_sensitive_env_value("/Users/dev/project"));
+        assert!(!is_sensitive_env_value("xterm-256color"));
+        assert!(!is_sensitive_env_value("en_US.UTF-8"));
+        assert!(!is_sensitive_env_value("development"));
+        assert!(!is_sensitive_env_value(""));
+        // Plain HTTPS URL with NO userinfo: not a credential carrier.
+        assert!(!is_sensitive_env_value("https://api.example.com/v1"));
+        // A `://` substring inside an unrelated value must not trip
+        // the gate (no `user:pass@` shape).
+        assert!(!is_sensitive_env_value("note: see docs at scheme://x"));
+        // Generic long base64-ish string without a known prefix:
+        // must NOT be flagged (NIX_PATH hashes, build cache keys, …).
+        assert!(!is_sensitive_env_value(
+            "abcdef1234567890abcdef1234567890abcdef1234567890"
+        ));
+    }
+
+    #[test]
+    fn is_sensitive_env_value_short_prefix_lookalikes_not_flagged() {
+        // Prefix lookalikes that are TOO short / wrong char class to
+        // be real tokens shouldn't trip the regex.
+        assert!(!is_sensitive_env_value("AKIA"));            // bare prefix
+        assert!(!is_sensitive_env_value("ghp_short"));       // not enough chars after prefix
+        assert!(!is_sensitive_env_value("sk-"));             // bare prefix
+        // Bare "eyJ..." without a payload+signature must NOT match
+        // the 3-part JWT pattern. (2-part JWTs are intentionally
+        // excluded from the value-shape scan — too noisy.)
+        assert!(!is_sensitive_env_value("eyJhbGciOiJIUzI1NiJ9"));
     }
 
     #[test]

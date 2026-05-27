@@ -193,11 +193,17 @@ impl Tool for ReadTool {
             (None, None) => (0, 2000, None),
         };
 
+        // LOOP-3: include the file's mtime+size in the cache key so
+        // an external write (LSP, IDE, plugin-spawned bash, MCP
+        // tool) invalidates the cache automatically. See
+        // `cache::fs_stamp` for the encoding.
+        let stamp = crate::agent::tools::cache::fs_stamp(std::path::Path::new(&args.path));
         let cache_key = format!(
-            "read:{}:{}:{}",
+            "read:{}:{}:{}:{}",
             args.path,
             offset.saturating_add(1), // 0-based → 1-based for cache key stability
             limit,
+            stamp,
         );
 
         if let Some(ref cache) = self.cache {

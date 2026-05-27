@@ -39,6 +39,14 @@ struct Inner {
     push: HashMap<PathBuf, Vec<Diagnostic>>,
     pull: HashMap<PathBuf, Vec<Diagnostic>>,
     last_push_at: HashMap<PathBuf, Instant>,
+    /// EXT-3: per-path async mutex so concurrent `notify_open` for the
+    /// same file serialize the read+version-bump+notify sequence.
+    /// Without this, two interleaved opens could ship version 0
+    /// content with v1's actual bytes (or vice versa) because the
+    /// file read happens outside the version-bump critical section.
+    /// Each entry is an `Arc<tokio::sync::Mutex<()>>` so the per-path
+    /// guard can outlive a brief grab of the surrounding sync mutex.
+    per_path_locks: HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>,
 }
 
 /// High-level client for a connected LSP server. Cheap to clone.
@@ -146,13 +154,34 @@ impl LspClient {
             Ok(p) => p,
             Err(_) => path.to_path_buf(),
         };
-        // EXT-3: read file text BEFORE bumping the version so the
-        // content and version are snapshotted together. Two parallel
-        // open/edit calls could otherwise read stale content after
-        // the version bump, shipping version N with content from
-        // version N+1. Holding the lock during I/O is cheap here —
-        // file reads are fast and the lock is per-client (not
-        // global).
+
+        // EXT-3: serialize concurrent opens of the same path. Grab the
+        // per-path async mutex (creating one if first contact) under
+        // the sync mutex briefly, then hold the async mutex across the
+        // entire read → version bump → rpc.notify sequence. Without
+        // this, two parallel `notify_open` calls can interleave:
+        //
+        //   A: read v0 content
+        //                     B: read v1 content   (file changed)
+        //   A: bump → version 0
+        //                     B: bump → version 1
+        //   A: notify(version=0, text=<B's v1 bytes>)
+        //                     B: notify(version=1, text=<B's v1 bytes>)
+        //
+        // The server then sees version=0 paired with v1 content, which
+        // either confuses incremental sync (rust-analyzer rejects the
+        // mismatch) or, worse, silently de-syncs the in-server text.
+        let path_lock = {
+            let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(
+                state
+                    .per_path_locks
+                    .entry(abs.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _guard = path_lock.lock().await;
+
         let text = tokio::fs::read_to_string(&abs).await?;
         let uri = path_to_file_uri_string(&abs);
 
@@ -229,6 +258,10 @@ impl LspClient {
             state.push.remove(&abs);
             state.pull.remove(&abs);
             state.last_push_at.remove(&abs);
+            // EXT-3: drop the per-path serialization mutex too. Any
+            // in-flight `notify_open` for this path that already
+            // holds an Arc clone keeps it alive until they complete.
+            state.per_path_locks.remove(&abs);
         }
         if was_open {
             let uri = path_to_file_uri_string(&abs);
@@ -806,6 +839,85 @@ mod tests {
         let got = client.diagnostics_for(&path);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].message, "fresh");
+    }
+
+    /// EXT-3 regression: two concurrent `notify_open` calls for the
+    /// same path must serialize cleanly. Each rpc frame the client
+    /// emits must carry consistent (version, text) — i.e. the text
+    /// sent with version N reflects the file contents the call
+    /// actually read.
+    ///
+    /// We can't reproduce the OS-level read race deterministically,
+    /// but we can verify:
+    ///   1. The two opens emit the expected (didOpen, didChange)
+    ///      sequence with versions 0 and 1 — never two didOpens.
+    ///   2. Each frame's text matches what was on disk at the time
+    ///      the call was made (we mutate the file between calls).
+    ///   3. No interleaving — the second call's didChange comes
+    ///      strictly after the first call's didOpen returns.
+    #[tokio::test]
+    async fn ext3_concurrent_notify_open_serializes_per_path() {
+        let (client, mut from_client, _to) = pair().await;
+        let path = tempfile_with("ext3-race", "first contents\n");
+        let path_for_b = path.clone();
+        let client_for_b = client.clone();
+
+        // A starts first and gets version 0. Immediately afterwards
+        // we mutate the file and fire B which should get version 1
+        // with the NEW contents. The per-path mutex guarantees B's
+        // read happens after A's notify returns.
+        let v0 = client.notify_open(&path).await.unwrap();
+        assert_eq!(v0, 0);
+        let open_frame = from_client.recv().await.unwrap();
+        assert_eq!(open_frame["method"], "textDocument/didOpen");
+        assert_eq!(open_frame["params"]["textDocument"]["version"], 0);
+        assert_eq!(
+            open_frame["params"]["textDocument"]["text"],
+            "first contents\n"
+        );
+
+        // Mutate, then race two concurrent re-opens.
+        std::fs::write(&path, "second contents\n").unwrap();
+
+        let path_for_a = path.clone();
+        let client_for_a = client.clone();
+        let t_a = tokio::spawn(async move {
+            client_for_a.notify_open(&path_for_a).await.unwrap()
+        });
+        let t_b = tokio::spawn(async move {
+            client_for_b.notify_open(&path_for_b).await.unwrap()
+        });
+
+        let (va, vb) = tokio::join!(t_a, t_b);
+        let va = va.unwrap();
+        let vb = vb.unwrap();
+
+        // The two returned versions must be 1 and 2 in some order
+        // (never both 1 — that would mean A and B both bumped from 0
+        // and one of the rpc frames carried stale content).
+        let mut versions = [va, vb];
+        versions.sort();
+        assert_eq!(
+            versions,
+            [1, 2],
+            "concurrent opens must produce distinct, sequential versions"
+        );
+
+        // Drain the two didChange frames. Both must carry the post-
+        // mutation contents — neither can have shipped "first
+        // contents\n" with a bumped version, which is exactly the
+        // bug EXT-3 fixes.
+        let f1 = from_client.recv().await.unwrap();
+        let f2 = from_client.recv().await.unwrap();
+        for f in [&f1, &f2] {
+            assert_eq!(f["method"], "textDocument/didChange");
+            assert_eq!(
+                f["params"]["contentChanges"][0]["text"],
+                "second contents\n",
+                "frame must reflect on-disk contents at call time: {f}"
+            );
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]

@@ -246,6 +246,19 @@ pub async fn stream_assistant_response(
                         error,
                     })
                     .await;
+                // PROV-5: drop the in-progress partial assistant
+                // message accumulated from the failed attempt so
+                // the next attempt's `Start`/`Delta` don't pile
+                // on top. The retry layer above is now configured
+                // to allow retries through tool-call deltas; this
+                // is the matching consumer-side reset.
+                if added_partial
+                    && let Some(last) = context.messages.last()
+                    && last.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                {
+                    context.messages.pop();
+                }
+                added_partial = false;
             }
         }
     }

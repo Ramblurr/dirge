@@ -194,4 +194,48 @@ Each numbered finding above is intended to be one `bd create` issue. The cross-c
 
 ---
 
+## 8. LOOP-9 Compaction — Follow-up Notes (2026-05-27)
+
+The Hermes-port of LLM-summarization compaction landed in
+`src/agent/compression.rs` + `src/agent/agent_loop/run.rs` (round 9
+patch). The first-pass pruner + second-pass structured summarizer
+now compose end-to-end via `run_compaction_pass`, wired through a
+new `SummarizeFn` callback on `LoopSpawnConfig` →
+`run_agent_loop_with_summarizer`.
+
+**Deferred to a follow-up agent:**
+
+- **Session-side state mutation.** `LoopEvent::ContextCompacted`
+  fires with a fresh `compacted-<8hex>` session id, but the actual
+  `session.id` update + `session.compactions.push()` +
+  `save_session()` cycle still lives in the UI event-consumer
+  (`src/ui/mod.rs:3584+`) and currently only persists the DB
+  rotation row — it does NOT yet flip `session.id` on the
+  in-memory `Session` struct. That file is owned by another agent
+  this round; once it lifts, the consumer should: (a) read
+  `new_session_id` from the event, (b) mutate `session.id`
+  in-place, (c) call `session.compress_reporting(summary, …)` to
+  push a `Compaction` entry, (d) call `save_session(&session)`.
+  Cross-reference: Hermes `conversation_compression.py:367-407`
+  does this in one place; our split is a deliberate
+  architectural concession to keep the loop free of `&mut Session`.
+
+- **Background compression.** Hermes runs the auxiliary LLM call
+  concurrently with the main turn so the user isn't blocked by
+  summary generation. Our `SummarizeFn` is `.await`ed inline. A
+  future pass can detach via `tokio::spawn` and swap the messages
+  on the next turn boundary.
+
+- **Prior-summary chaining beyond 1 generation.** We honor the
+  most-recent previous summary via `find_previous_summary` but
+  don't track lineage of compactions across multiple rotations —
+  Hermes preserves a hierarchy. Today's behavior is "iterative
+  update of the latest summary", which is the common case.
+
+- **`/compress <focus>` argument.** `build_summary_prompt` accepts a
+  `focus_topic` placeholder but the slash command doesn't yet pass
+  it through. Trivial wire-up when needed.
+
+---
+
 *Generated 2026-05-26 from 7 parallel subagent audits totaling ~1.1M tokens of analysis.*

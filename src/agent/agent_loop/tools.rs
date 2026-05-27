@@ -323,18 +323,37 @@ async fn execute_prepared_tool_call(
     let id_clone = tool_call.id.clone();
     let name_clone = tool_call.name.clone();
     let args_clone = tool_call.arguments.clone();
+    // LOOP-11: track dropped updates via an atomic counter so
+    // they're visible in tracing instead of silently lost. The
+    // tool itself shouldn't block on UI delivery — that would
+    // back-pressure the model — so we keep `try_send` semantics
+    // and just record the drop. The counter is per-tool-call;
+    // the warning fires on first drop and the count is logged
+    // once at the end of dispatch.
+    let dropped_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let dropped_clone = dropped_count.clone();
     let on_update: LoopToolUpdate = Arc::new(move |partial: &LoopToolResult| {
         // `try_send` rather than `.send().await` because the
         // callback is sync — pi's callback is sync too. If the
-        // channel is closed/full, drop the update (matches
-        // dirge's bounded-channel philosophy from earlier
-        // notification work).
-        let _ = emit_clone.try_send(LoopEvent::ToolExecutionUpdate {
+        // channel is closed/full, increment the dropped counter
+        // (LOOP-11) rather than silently losing the event.
+        let evt = LoopEvent::ToolExecutionUpdate {
             tool_call_id: id_clone.clone(),
             tool_name: name_clone.clone(),
             args: args_clone.clone(),
             partial_result: partial.clone(),
-        });
+        };
+        if emit_clone.try_send(evt).is_err() {
+            let prev = dropped_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if prev == 0 {
+                tracing::warn!(
+                    target: "dirge::agent_loop::tools",
+                    tool = %name_clone,
+                    tool_call_id = %id_clone,
+                    "ToolExecutionUpdate channel full or closed; dropping update events",
+                );
+            }
+        }
     });
 
     // Phase 6 — make the tool dispatch responsive to
@@ -378,6 +397,20 @@ async fn execute_prepared_tool_call(
         result = exec_future => result,
     };
 
+    // LOOP-11: surface the final dropped-update count if any
+    // backpressure happened during execution. Logged at INFO so
+    // diagnostics flow shows up under --verbose without flooding
+    // normal output.
+    let final_dropped = dropped_count.load(std::sync::atomic::Ordering::Relaxed);
+    if final_dropped > 0 {
+        tracing::info!(
+            target: "dirge::agent_loop::tools",
+            tool = %tool_call.name,
+            tool_call_id = %tool_call.id,
+            dropped = final_dropped,
+            "ToolExecutionUpdate events dropped during tool execution",
+        );
+    }
     match outcome {
         Ok(result) => ExecutedOutcome {
             result,

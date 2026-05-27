@@ -15,9 +15,12 @@
 
 use rusqlite::{Connection, OpenFlags, params};
 use std::path::Path;
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 // Used in migrate() to set user_version pragma.
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 /// Thread-safe snapshot of the most recent `SessionDb::open()` failure.
 /// Port of Hermes's `_last_init_error` (hermes_state.py:66-67).
@@ -35,6 +38,155 @@ fn set_last_init_error(msg: Option<String>) {
     if let Ok(mut guard) = LAST_INIT_ERROR.lock() {
         *guard = msg;
     }
+}
+
+/// SESS-14: scrub credential-shaped tokens from text before it lands in
+/// the FTS5 index. Ported from hermes-agent/agent/redact.py (the
+/// `_PREFIX_PATTERNS`, `_DB_CONNSTR_RE`, `_URL_USERINFO_RE`,
+/// `_AUTH_HEADER_RE`, `_ENV_ASSIGN_RE` patterns) — same coverage as
+/// `sandbox::is_sensitive_env_value`, but applied as a *replace* (not
+/// a yes/no test) since we still need a searchable, non-secret
+/// projection of the message text.
+///
+/// Raw content stays in `messages.content` / `messages.tool_calls`;
+/// only the searchable projection passed to `messages_fts` and
+/// `messages_fts_trigram` is redacted. Anyone reading a transcript
+/// back out sees the unredacted original.
+///
+/// Each match is replaced with `<REDACTED>`. Pre-checks gate each
+/// regex on a cheap substring so the common no-secret case stays
+/// fast (a single line of plain prose pays for the gate misses only).
+pub fn redact_for_fts(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    static VENDOR_PREFIX_RE: OnceLock<Regex> = OnceLock::new();
+    static URL_USERINFO_RE: OnceLock<Regex> = OnceLock::new();
+    static AUTH_HEADER_RE: OnceLock<Regex> = OnceLock::new();
+    static ENV_ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    static JSON_FIELD_RE: OnceLock<Regex> = OnceLock::new();
+    static JWT_RE: OnceLock<Regex> = OnceLock::new();
+
+    let mut out: std::borrow::Cow<'_, str> = text.into();
+
+    // Vendor prefix tokens. Same set as
+    // sandbox::is_sensitive_env_value — kept in sync deliberately.
+    let has_prefix_gate = out.contains("AKIA")
+        || out.contains("ghp_")
+        || out.contains("github_pat_")
+        || out.contains("gho_")
+        || out.contains("ghu_")
+        || out.contains("ghs_")
+        || out.contains("xox")
+        || out.contains("sk-")
+        || out.contains("sk_live_")
+        || out.contains("sk_test_")
+        || out.contains("AIza")
+        || out.contains("hf_")
+        || out.contains("xai-");
+    if has_prefix_gate {
+        let re = VENDOR_PREFIX_RE.get_or_init(|| {
+            Regex::new(
+                r"(?x)
+                (?:
+                      AKIA[0-9A-Z]{16}
+                    | ghp_[A-Za-z0-9]{36}
+                    | github_pat_[A-Za-z0-9_]{20,}
+                    | gho_[A-Za-z0-9]{30,}
+                    | ghu_[A-Za-z0-9]{30,}
+                    | ghs_[A-Za-z0-9]{30,}
+                    | xox[baprs]-[A-Za-z0-9-]{10,}
+                    | sk-[A-Za-z0-9_-]{20,}
+                    | sk_live_[A-Za-z0-9]{20,}
+                    | sk_test_[A-Za-z0-9]{20,}
+                    | AIza[A-Za-z0-9_-]{30,}
+                    | hf_[A-Za-z0-9]{30,}
+                    | xai-[A-Za-z0-9]{30,}
+                )
+                ",
+            )
+            .unwrap()
+        });
+        if re.is_match(&out) {
+            out = re.replace_all(&out, "<REDACTED>").into_owned().into();
+        }
+    }
+
+    // JWTs (3-part eyJ...) — gate on "eyJ" substring.
+    if out.contains("eyJ") {
+        let re = JWT_RE.get_or_init(|| {
+            Regex::new(
+                r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_=-]{4,}",
+            )
+            .unwrap()
+        });
+        if re.is_match(&out) {
+            out = re.replace_all(&out, "<REDACTED>").into_owned().into();
+        }
+    }
+
+    // URLs with userinfo: scheme://user:pass@host
+    if out.contains("://") {
+        let re = URL_USERINFO_RE.get_or_init(|| {
+            Regex::new(r"([A-Za-z][A-Za-z0-9+.\-]*://)([^/\s:@]*):([^/\s@]+)@")
+                .unwrap()
+        });
+        if re.is_match(&out) {
+            out = re
+                .replace_all(&out, "${1}<REDACTED>@")
+                .into_owned()
+                .into();
+        }
+    }
+
+    // Authorization: Bearer <token>
+    if out.contains("uthorization") || out.contains("UTHORIZATION") {
+        let re = AUTH_HEADER_RE.get_or_init(|| {
+            Regex::new(r"(?i)(Authorization:\s*Bearer\s+)\S+").unwrap()
+        });
+        if re.is_match(&out) {
+            out = re
+                .replace_all(&out, "${1}<REDACTED>")
+                .into_owned()
+                .into();
+        }
+    }
+
+    // KEY=value / TOKEN=value / SECRET=value / PASSWORD=value /
+    // CREDENTIAL=value / AUTH=value (env-style)
+    if out.contains('=') {
+        let re = ENV_ASSIGN_RE.get_or_init(|| {
+            Regex::new(
+                r#"(?i)([A-Za-z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Za-z0-9_]*\s*=\s*)['"]?[^\s'"&]+"#,
+            )
+            .unwrap()
+        });
+        if re.is_match(&out) {
+            out = re
+                .replace_all(&out, "${1}<REDACTED>")
+                .into_owned()
+                .into();
+        }
+    }
+
+    // JSON-ish fields: "api_key": "value", "token": "value", …
+    if out.contains(':') && out.contains('"') {
+        let re = JSON_FIELD_RE.get_or_init(|| {
+            Regex::new(
+                r#"(?i)("(?:api_?key|token|secret|password|access_token|refresh_token|auth_token|bearer)"\s*:\s*)"[^"]+""#,
+            )
+            .unwrap()
+        });
+        if re.is_match(&out) {
+            out = re
+                .replace_all(&out, "${1}\"<REDACTED>\"")
+                .into_owned()
+                .into();
+        }
+    }
+
+    out.into_owned()
 }
 
 pub struct SessionDb {
@@ -112,6 +264,10 @@ impl SessionDb {
 
         if current < 5 {
             self.run_migration_v5()?;
+        }
+
+        if current < 6 {
+            self.run_migration_v6()?;
         }
 
         self.conn
@@ -337,6 +493,77 @@ impl SessionDb {
         Ok(())
     }
 
+    /// v6: SESS-14 — drop the auto-INSERT / auto-UPDATE FTS triggers so
+    /// the application can redact secrets before they land in the
+    /// full-text index. The raw text stays in `messages.content` /
+    /// `messages.tool_calls`, but `messages_fts` and
+    /// `messages_fts_trigram` only receive a redacted projection
+    /// supplied by `insert_message`.
+    ///
+    /// AFTER DELETE triggers stay in place — purging from the FTS
+    /// table on a row delete doesn't need any redaction.
+    ///
+    /// Backfill: re-insert the existing row contents into both FTS
+    /// tables after passing them through `redact_for_fts`. Existing
+    /// indexes were built from raw content; without this step a
+    /// search would still hit pre-v6 secrets.
+    fn run_migration_v6(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "
+                DROP TRIGGER IF EXISTS messages_ai;
+                DROP TRIGGER IF EXISTS messages_au;
+                DROP TRIGGER IF EXISTS messages_fts_trigram_insert;
+                DROP TRIGGER IF EXISTS messages_fts_trigram_update;
+                ",
+            )
+            .map_err(|e| format!("Migration v6 trigger drop failed: {e}"))?;
+
+        // Backfill: clear both indexes then re-insert with redacted
+        // content row-by-row so the redactor runs on each row.
+        self.conn
+            .execute("DELETE FROM messages_fts", [])
+            .map_err(|e| format!("Migration v6 clear fts failed: {e}"))?;
+        self.conn
+            .execute("DELETE FROM messages_fts_trigram", [])
+            .map_err(|e| format!("Migration v6 clear trigram failed: {e}"))?;
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, COALESCE(content, ''), COALESCE(tool_name, ''), COALESCE(tool_calls, '')
+                 FROM messages",
+            )
+            .map_err(|e| format!("Migration v6 select failed: {e}"))?;
+
+        let rows: Vec<(i64, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| format!("Migration v6 query failed: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        for (id, content, tool_name, tool_calls) in rows {
+            let combined = format!("{content} {tool_name} {tool_calls}");
+            let redacted = redact_for_fts(&combined);
+            self.conn
+                .execute(
+                    "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
+                    params![id, redacted],
+                )
+                .map_err(|e| format!("Migration v6 fts backfill failed at row {id}: {e}"))?;
+            self.conn
+                .execute(
+                    "INSERT INTO messages_fts_trigram(rowid, content) VALUES (?1, ?2)",
+                    params![id, redacted],
+                )
+                .map_err(|e| format!("Migration v6 trigram backfill failed at row {id}: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// v5: add message detail columns.
     /// Port of Hermes's messages schema (hermes_state.py:224-242).
     fn run_migration_v5(&self) -> Result<(), String> {
@@ -390,6 +617,34 @@ impl SessionDb {
             )
             .map_err(|e| format!("Failed to insert message: {e}"))?;
 
+        let row_id = self.conn.last_insert_rowid();
+
+        // SESS-14: redact secrets before they reach the FTS5 index.
+        // The auto-insert triggers were dropped in v6 so we own this
+        // path explicitly. Raw text stays in `messages` (so callers
+        // re-reading a transcript see the original content); only
+        // the searchable projection is scrubbed.
+        let combined = format!(
+            "{} {} {}",
+            content,
+            tool_name.unwrap_or(""),
+            tool_calls.unwrap_or(""),
+        );
+        let redacted = redact_for_fts(&combined);
+
+        self.conn
+            .execute(
+                "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
+                params![row_id, redacted],
+            )
+            .map_err(|e| format!("Failed to insert into messages_fts: {e}"))?;
+        self.conn
+            .execute(
+                "INSERT INTO messages_fts_trigram(rowid, content) VALUES (?1, ?2)",
+                params![row_id, redacted],
+            )
+            .map_err(|e| format!("Failed to insert into messages_fts_trigram: {e}"))?;
+
         self.conn
             .execute(
                 "UPDATE sessions SET message_count = message_count + 1, last_active = ?1 WHERE id = ?2",
@@ -397,7 +652,7 @@ impl SessionDb {
             )
             .map_err(|e| format!("Failed to update session message count: {e}"))?;
 
-        Ok(self.conn.last_insert_rowid())
+        Ok(row_id)
     }
 }
 
@@ -1169,6 +1424,172 @@ mod tests {
         let _ = std::fs::remove_file(&bad);
     }
 
+    #[test]
+    fn redact_for_fts_strips_vendor_prefix_tokens() {
+        // AWS access key
+        let r = redact_for_fts("aws key: AKIAIOSFODNN7EXAMPLE here");
+        assert!(!r.contains("AKIAIOSFODNN7EXAMPLE"), "got: {r}");
+        assert!(r.contains("<REDACTED>"));
+
+        // GitHub PAT classic
+        let r = redact_for_fts("token: ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(!r.contains("ghp_abcdefghij"), "got: {r}");
+        assert!(r.contains("<REDACTED>"));
+
+        // Slack
+        let r = redact_for_fts("creds=xoxb-1234567890-abcdefghij-AbCdEfGh tail");
+        assert!(!r.contains("xoxb-1234567890"), "got: {r}");
+
+        // OpenAI/Anthropic sk-
+        let r = redact_for_fts("ANTHROPIC_API_KEY=sk-ant-12345abcdefghijklmnopqrst");
+        assert!(!r.contains("sk-ant-12345abcdefghijklmnopqrst"), "got: {r}");
+    }
+
+    #[test]
+    fn redact_for_fts_strips_url_userinfo() {
+        let r = redact_for_fts(
+            "DATABASE_URL=postgres://admin:hunter2@db.internal:5432/app",
+        );
+        assert!(!r.contains("hunter2"), "got: {r}");
+        // The whole assignment value gets caught by the env-assign
+        // pattern first (DATABASE_URL doesn't trip the AUTH/KEY/TOKEN
+        // gate, but the userinfo regex does — verify either way).
+        assert!(r.contains("<REDACTED>"), "got: {r}");
+
+        let r = redact_for_fts("call https://deploy:secret-tok@webhook.example.com/x");
+        assert!(!r.contains("secret-tok"), "got: {r}");
+    }
+
+    #[test]
+    fn redact_for_fts_strips_authorization_header() {
+        let r = redact_for_fts("Authorization: Bearer ey-some-opaque-token");
+        assert!(!r.contains("ey-some-opaque-token"), "got: {r}");
+        assert!(r.contains("<REDACTED>"));
+
+        // case-insensitive
+        let r = redact_for_fts("authorization: bearer abc.def.ghi");
+        assert!(!r.contains("abc.def.ghi"), "got: {r}");
+    }
+
+    #[test]
+    fn redact_for_fts_strips_env_assignment() {
+        let r = redact_for_fts("OPENAI_API_KEY=opaque-value-1234567890");
+        assert!(!r.contains("opaque-value-1234567890"), "got: {r}");
+        assert!(r.contains("<REDACTED>"));
+
+        let r = redact_for_fts("password=hunter2");
+        assert!(!r.contains("hunter2"), "got: {r}");
+    }
+
+    #[test]
+    fn redact_for_fts_strips_jwt() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let r = redact_for_fts(&format!("token = {jwt}"));
+        assert!(!r.contains("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"), "got: {r}");
+        assert!(r.contains("<REDACTED>"));
+    }
+
+    #[test]
+    fn redact_for_fts_leaves_plain_text_alone() {
+        let plain = "how do we handle database migrations in this project";
+        assert_eq!(redact_for_fts(plain), plain);
+        // Empty input is preserved.
+        assert_eq!(redact_for_fts(""), "");
+        // A bare URL with no userinfo passes through.
+        let url = "see https://api.example.com/v1/docs";
+        assert_eq!(redact_for_fts(url), url);
+    }
+
+    #[test]
+    fn redact_for_fts_strips_json_field() {
+        let r = redact_for_fts(r#"{"api_key": "secret-value-xyz", "name": "alice"}"#);
+        assert!(!r.contains("secret-value-xyz"), "got: {r}");
+        assert!(r.contains("\"alice\""), "non-secret fields preserved: {r}");
+    }
+
+    /// End-to-end: secrets pass through `insert_message` to the FTS5
+    /// indexes redacted, but the raw row in `messages` retains the
+    /// original content for transcript replay.
+    #[test]
+    fn fts_index_holds_redacted_text_messages_table_holds_raw() {
+        let (db, _dir) = temp_db();
+        db.insert_session("sess-1", "cli", "gpt-5", "openai", "2025-01-15T10:00:00Z")
+            .unwrap();
+
+        let raw = "Authorization: Bearer ey-opaque-token here is some context";
+        db.insert_message(
+            "sess-1",
+            "assistant",
+            raw,
+            None,
+            None,
+            None,
+            "2025-01-15T10:01:00Z",
+        )
+        .unwrap();
+
+        // messages table holds RAW content (round-trip preserved).
+        let stored: String = db
+            .conn
+            .query_row(
+                "SELECT content FROM messages WHERE session_id = 'sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, raw);
+
+        // FTS indexes hold REDACTED content. A search for the secret
+        // token finds nothing; a search for the non-secret context
+        // finds the row.
+        let hits = db.search_messages("ey-opaque-token", None).unwrap();
+        assert!(hits.is_empty(), "FTS must not index the secret token");
+
+        let hits = db.search_messages("context", None).unwrap();
+        assert_eq!(hits.len(), 1, "non-secret tokens still searchable");
+    }
+
+    #[test]
+    fn fts_index_redacts_secrets_inside_tool_calls() {
+        let (db, _dir) = temp_db();
+        db.insert_session("sess-1", "cli", "gpt-5", "openai", "2025-01-15T10:00:00Z")
+            .unwrap();
+
+        let tool_calls =
+            r#"[{"name":"bash","args":{"cmd":"curl -H 'Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789' https://api.example.com"}}]"#;
+        db.insert_message(
+            "sess-1",
+            "assistant",
+            "Calling the API",
+            Some("bash"),
+            Some(tool_calls),
+            None,
+            "2025-01-15T10:01:00Z",
+        )
+        .unwrap();
+
+        // Raw tool_calls preserved.
+        let raw: String = db
+            .conn
+            .query_row(
+                "SELECT tool_calls FROM messages WHERE session_id = 'sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(raw.contains("ghp_abcdefghij"), "raw kept");
+
+        // FTS must not surface the PAT.
+        let hits = db
+            .search_messages("ghp_abcdefghijklmnopqrstuvwxyz0123456789", None)
+            .unwrap();
+        assert!(hits.is_empty(), "PAT must be redacted from FTS");
+
+        // Non-secret tool name + content still searchable.
+        let hits = db.search_messages("bash", None).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
     /// Ensures v2→v3→v4→v5 chain works from a v2 database.
     #[test]
     fn migration_from_v2_to_v5_adds_trigram_and_columns() {
@@ -1225,7 +1646,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(ver, 5, "should be at schema version 5 after migration");
+        assert_eq!(ver, 6, "should be at schema version 6 after migration");
 
         // Trigram table should exist.
         let trigram_exists: i64 = db

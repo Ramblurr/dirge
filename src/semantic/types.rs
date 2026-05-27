@@ -104,4 +104,13 @@ pub struct ExtractedFile {
     /// (anything but a same-size in-place patch) without the cost
     /// of hashing the whole file.
     pub size: u64,
+    /// EXT-2: hash of the first 4 KiB of the file at extract time.
+    /// Closes the same-mtime+same-size collision case that mtime+
+    /// size alone misses (most real edits don't preserve both; the
+    /// exception is `touch -t` to restore an old mtime after an
+    /// in-place patch of identical length — uncommon but possible).
+    /// Hashing the head is O(4 KiB) regardless of file size, so the
+    /// overhead is negligible vs the full extract that runs on cache
+    /// miss.
+    pub head_hash: u64,
 }

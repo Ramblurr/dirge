@@ -79,14 +79,54 @@ pub fn before_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> BeforeT
             };
 
             // 2. Build context, lock manager, dispatch.
+            //
+            // LOOP-8: wrap the synchronous Janet dispatch in a
+            // tokio timeout so a runaway hook can't block the
+            // agent loop forever. `spawn_blocking` moves the
+            // sync work off the runtime thread; the timeout
+            // detaches the call (it keeps running on the
+            // blocking pool but we proceed). The plugin worker
+            // has its own internal HOOK_TIMEOUT but layering
+            // both is cheap and defensive.
             let janet_ctx = format!(
                 "@{{:tool \"{}\" :args \"{}\"}}",
                 escape_janet_string(&ctx.tool_call_name),
                 escape_janet_string(&args_json),
             );
-            let dispatch_result = {
-                let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
-                mgr.dispatch_tool_hook("on-tool-start", &janet_ctx)
+            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            let pm_for_dispatch = pm.clone();
+            let janet_ctx_clone = janet_ctx.clone();
+            let tool_name = ctx.tool_call_name.clone();
+            let dispatch_future = tokio::task::spawn_blocking(move || {
+                let mut mgr = pm_for_dispatch.lock().unwrap_or_else(|e| e.into_inner());
+                mgr.dispatch_tool_hook("on-tool-start", &janet_ctx_clone)
+            });
+            let dispatch_result = match tokio::time::timeout(HOOK_TIMEOUT, dispatch_future).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(join_err)) => {
+                    tracing::warn!(
+                        target: "dirge::agent_loop::plugin_hooks",
+                        tool = %tool_name,
+                        error = %join_err,
+                        "on-tool-start hook panicked; proceeding without hook",
+                    );
+                    return BeforeToolCallReturn {
+                        result: None,
+                        args: ctx.args,
+                    };
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "dirge::agent_loop::plugin_hooks",
+                        tool = %tool_name,
+                        timeout_ms = HOOK_TIMEOUT.as_millis() as u64,
+                        "on-tool-start hook exceeded timeout; proceeding without hook",
+                    );
+                    return BeforeToolCallReturn {
+                        result: None,
+                        args: ctx.args,
+                    };
+                }
             };
 
             let hook_result = match dispatch_result {
@@ -168,15 +208,42 @@ pub fn after_hook_from_plugin_manager(pm: Arc<Mutex<PluginManager>>) -> AfterToo
             //    flatten_content shape used by the bridge).
             let output_text = flatten_text(&ctx.result.content);
 
-            // 2. Build context, lock manager, dispatch.
+            // 2. Build context, lock manager, dispatch. LOOP-8:
+            // same outer tokio timeout as the before-hook so a
+            // runaway `on-tool-end` doesn't strand the loop.
             let janet_ctx = format!(
                 "@{{:tool \"{}\" :output \"{}\"}}",
                 escape_janet_string(&ctx.tool_call_name),
                 escape_janet_string(&output_text),
             );
-            let dispatch_result = {
-                let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
-                mgr.dispatch_tool_hook("on-tool-end", &janet_ctx)
+            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            let pm_for_dispatch = pm.clone();
+            let janet_ctx_clone = janet_ctx.clone();
+            let tool_name = ctx.tool_call_name.clone();
+            let dispatch_future = tokio::task::spawn_blocking(move || {
+                let mut mgr = pm_for_dispatch.lock().unwrap_or_else(|e| e.into_inner());
+                mgr.dispatch_tool_hook("on-tool-end", &janet_ctx_clone)
+            });
+            let dispatch_result = match tokio::time::timeout(HOOK_TIMEOUT, dispatch_future).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(join_err)) => {
+                    tracing::warn!(
+                        target: "dirge::agent_loop::plugin_hooks",
+                        tool = %tool_name,
+                        error = %join_err,
+                        "on-tool-end hook panicked; proceeding without hook",
+                    );
+                    return None;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "dirge::agent_loop::plugin_hooks",
+                        tool = %tool_name,
+                        timeout_ms = HOOK_TIMEOUT.as_millis() as u64,
+                        "on-tool-end hook exceeded timeout; proceeding without hook",
+                    );
+                    return None;
+                }
             };
 
             let hook_result = match dispatch_result {

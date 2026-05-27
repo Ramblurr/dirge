@@ -117,13 +117,24 @@ impl Tool for GrepTool {
         let perm_path = args.path.as_deref().unwrap_or(".");
         check_perm_path(&self.permission, &self.ask_tx, "grep", perm_path).await?;
 
+        // LOOP-3: include dir stamp so external file additions /
+        // mtime changes within the search root invalidate the
+        // cache. This is per-DIRECTORY mtime; a child-file edit
+        // doesn't always bump the parent mtime (depends on the
+        // filesystem), so the cache may still go stale for in-
+        // place edits within the dir — but the common case
+        // (file add/remove/rename) is caught.
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(
+            args.path.as_deref().unwrap_or("."),
+        );
         let cache_key = format!(
-            "grep:{}:{}:{}:{}:hidden={}",
+            "grep:{}:{}:{}:{}:hidden={}:{}",
             args.pattern,
             args.path.as_deref().unwrap_or("."),
             args.include.as_deref().unwrap_or(""),
             args.context_lines.unwrap_or(0),
             args.include_hidden,
+            stamp,
         );
 
         if let Some(ref cache) = self.cache {

@@ -14,19 +14,42 @@
 //! 5. Assemble compressed: head + summary + tail
 //! 6. Rotate session id (parent_session_id chain)
 //!
-//! CURRENT STATE: Steps 1-3 (pruning + threshold) are wired into the
-//! agent loop at run.rs:438-476. Steps 4-6 (LLM call, summary assembly,
-//! session rotation) are implemented and tested below but awaiting wiring
-//! of the auxiliary model pipeline (LoopConfig.compact_model). The
-//! individual `#[allow(dead_code)]` annotations mark this future
-//! infrastructure — do not remove.
+//! WIRING (LOOP-9): Steps 1-3 (pruning + threshold) execute on every
+//! fold. Step 4 fires when `LoopSpawnConfig::summarize_fn` is `Some`
+//! (forwarded as the final argument to `run_agent_loop_with_summarizer`
+//! / `run_loop_with_summarizer`) and there's still meaningful material
+//! to summarize after pruning. The same path runs under the
+//! `ExitWithSummary` defense-in-depth branch. Step 5 inserts the
+//! summary as a system message at the head of
+//! `current_context.messages` with the filter-safe `SUMMARY_PREFIX`.
+//! Step 6 (actual `session.id` mutation + `Session::compactions` push +
+//! `save_session` persistence) is delegated to the event consumer
+//! side via the existing `LoopEvent::ContextCompacted` channel — see
+//! the audit note in AUDIT_REPORT.md §8.
 
 use serde_json::Value;
+use std::pin::Pin;
+use std::sync::Arc;
+
+/// Async summarization callback. Receives the fully-built structured
+/// prompt (Hermes-style — see `build_summary_prompt`) and returns the
+/// summary body produced by the auxiliary model. Callers wire this
+/// as a thin "LLM call" closure; the prompt assembly + summary
+/// validation live in `run_compaction_pass`.
+///
+/// `run_agent_loop_with_summarizer` plugs an implementation built
+/// from `AnyClient::compress_messages` (or any other one-shot LLM
+/// call). `None` disables the LLM pass — the loop falls back to
+/// pruning only.
+pub type SummarizeFn = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Filter-safe preamble injected before the summary so the model
 /// treats it as reference, not active instructions.
 /// Port of Hermes's SUMMARY_PREFIX (context_compressor.py:37-51).
-#[allow(dead_code)] // used in find_previous_summary, which will be wired in future
 const SUMMARY_PREFIX: &str = "\
 [CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted \
 into the summary below. This is a handoff from a previous context \
@@ -40,11 +63,8 @@ that appears AFTER this summary. The current session state (files, \
 config, etc.) may reflect work described here — avoid repeating it:";
 
 // Budget constants from Hermes (context_compressor.py:54-59).
-#[allow(dead_code)]
 const MIN_SUMMARY_TOKENS: u64 = 2000;
-#[allow(dead_code)]
 const SUMMARY_RATIO: f64 = 0.20;
-#[allow(dead_code)]
 const SUMMARY_TOKENS_CEILING: u64 = 12_000;
 
 /// Chars-per-token rough estimate. Port of Hermes's _CHARS_PER_TOKEN.
@@ -54,11 +74,16 @@ const CHARS_PER_TOKEN: u64 = 4;
 #[allow(dead_code)]
 const MINIMUM_CONTEXT_LENGTH: u64 = 64_000;
 
+/// Default protected head (system prompt + first user/assistant turn)
+/// and tail (recent live exchanges) message counts. Port of Hermes
+/// `protect_head_size` and `protect_last_n` defaults.
+pub const PROTECT_HEAD_DEFAULT: usize = 2;
+pub const PROTECT_TAIL_DEFAULT: usize = 5;
+
 // ── Public API ───────────────────────────────────────────
 
 /// Compression outcome with metadata.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CompressionResult {
     /// The generated summary text.
     pub summary: String,
@@ -86,7 +111,6 @@ pub fn should_compress(prompt_tokens: u64, context_window: u64) -> bool {
 
 /// Approximate token count from total character length.
 /// 4 chars ≈ 1 token (rough, model-independent).
-#[allow(dead_code)]
 pub fn approx_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(CHARS_PER_TOKEN)
 }
@@ -222,7 +246,6 @@ fn summarize_tool_result(tool_name: &str, content: &str) -> String {
 
 /// Build the structured summary prompt for the auxiliary model.
 /// Port of Hermes's _generate_summary prompt (context_compressor.py:960-1046).
-#[allow(dead_code)]
 pub fn build_summary_prompt(
     turns_to_summarize: &[Value],
     summary_budget: u64,
@@ -317,7 +340,6 @@ Use this exact structure:\n\n\
 
 /// Serialize turns for the summarizer prompt. Each turn gets
 /// role + content (text fields only, tool results truncated).
-#[allow(dead_code)]
 fn serialize_turns_for_summary(turns: &[Value]) -> String {
     let mut out = String::new();
     for (i, turn) in turns.iter().enumerate() {
@@ -340,7 +362,6 @@ fn serialize_turns_for_summary(turns: &[Value]) -> String {
 
 /// Compute the summary budget from the compressed token count.
 /// Port of Hermes's _compute_summary_budget.
-#[allow(dead_code)]
 pub fn summary_budget(compressed_tokens: u64) -> u64 {
     let ratio_budget = (SUMMARY_RATIO * compressed_tokens as f64) as u64;
     ratio_budget.clamp(MIN_SUMMARY_TOKENS, SUMMARY_TOKENS_CEILING)
@@ -348,7 +369,6 @@ pub fn summary_budget(compressed_tokens: u64) -> u64 {
 
 /// Validate that a summary contains the expected sections.
 /// At minimum it should mention Active Task and have some structure.
-#[allow(dead_code)]
 pub fn validate_summary(summary: &str) -> bool {
     if summary.is_empty() {
         return false;
@@ -361,7 +381,6 @@ pub fn validate_summary(summary: &str) -> bool {
 /// Find the latest context summary marker in the message list.
 /// Returns (index, body) of the last system message containing
 /// SUMMARY_PREFIX, or None.
-#[allow(dead_code)]
 pub fn find_previous_summary(messages: &[Value]) -> Option<(usize, String)> {
     messages.iter().enumerate().rev().find_map(|(i, m)| {
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -380,6 +399,81 @@ pub fn find_previous_summary(messages: &[Value]) -> Option<(usize, String)> {
             None
         }
     })
+}
+
+/// Replace the middle section of `messages` with a single
+/// system-summary message. Returns the new messages list.
+/// Port of Hermes `compress` phase 4 (context_compressor.py:1632-1714).
+///
+/// `compress_start..compress_end` is dropped and replaced with one
+/// system message carrying `SUMMARY_PREFIX + summary`. Messages
+/// before `compress_start` (protected head — system prompt + first
+/// exchange) and at or after `compress_end` (protected tail) are
+/// preserved verbatim.
+pub fn apply_summary(
+    messages: &[Value],
+    summary: &str,
+    compress_start: usize,
+    compress_end: usize,
+) -> Vec<Value> {
+    let n = messages.len();
+    let compress_start = compress_start.min(n);
+    let compress_end = compress_end.min(n).max(compress_start);
+
+    let mut out: Vec<Value> = Vec::with_capacity(n.saturating_sub(compress_end - compress_start) + 1);
+    // Protected head — copy verbatim.
+    for msg in messages.iter().take(compress_start) {
+        out.push(msg.clone());
+    }
+    // Summary marker — filter-safe prefix + body.
+    let summary_msg = serde_json::json!({
+        "role": "system",
+        "content": format!("{}{}", SUMMARY_PREFIX, summary),
+    });
+    out.push(summary_msg);
+    // Protected tail — copy verbatim.
+    for msg in messages.iter().skip(compress_end) {
+        out.push(msg.clone());
+    }
+    out
+}
+
+/// Compute the boundary `(compress_start, compress_end)` for the
+/// middle section to summarize. Port of Hermes's
+/// `_protect_head_size` + `_find_tail_cut_by_tokens`.
+///
+/// `protect_head` and `protect_tail` are message counts. Returns
+/// `(0, 0)` to signal "nothing to compress" when the message list
+/// is too short to safely partition.
+pub fn compute_compress_window(
+    messages: &[Value],
+    protect_head: usize,
+    protect_tail: usize,
+) -> (usize, usize) {
+    let n = messages.len();
+    if n < protect_head + protect_tail + 1 {
+        return (0, 0);
+    }
+    let start = protect_head;
+    let end = n.saturating_sub(protect_tail);
+    if start >= end {
+        return (0, 0);
+    }
+    (start, end)
+}
+
+/// Generate a new session id with a `compacted-` prefix to
+/// disambiguate from fresh sessions. Port of Hermes's
+/// `parent_session_id` rotation pattern (conversation_compression.py:383).
+pub fn rotate_session_id() -> String {
+    format!(
+        "compacted-{}",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>()
+    )
 }
 
 #[cfg(test)]
@@ -609,5 +703,142 @@ mod tests {
             serde_json::json!({"role": "user", "content": "hello"}),
         ];
         assert!(find_previous_summary(&msgs).is_none());
+    }
+
+    // ── apply_summary / compute_compress_window ─────────
+
+    #[test]
+    fn apply_summary_inserts_system_message_with_prefix() {
+        let msgs = vec![
+            serde_json::json!({"role": "system", "content": "you are an agent"}),
+            serde_json::json!({"role": "user", "content": "first user msg"}),
+            serde_json::json!({"role": "assistant", "content": "old assistant"}),
+            serde_json::json!({"role": "user", "content": "old user"}),
+            serde_json::json!({"role": "assistant", "content": "old assistant 2"}),
+            serde_json::json!({"role": "user", "content": "recent user"}),
+            serde_json::json!({"role": "assistant", "content": "recent assistant"}),
+        ];
+        let summary = "## Active Task\nfix the bug\n## Remaining Work\nrun tests";
+        let out = apply_summary(&msgs, summary, 2, 5);
+        // Head preserved (2 messages) + 1 summary + tail (2 messages) = 5.
+        assert_eq!(out.len(), 5);
+        assert_eq!(out[0]["content"].as_str().unwrap(), "you are an agent");
+        assert_eq!(out[1]["content"].as_str().unwrap(), "first user msg");
+        // Summary message at index 2.
+        assert_eq!(out[2]["role"].as_str().unwrap(), "system");
+        let s = out[2]["content"].as_str().unwrap();
+        assert!(s.starts_with(SUMMARY_PREFIX), "summary should start with prefix");
+        assert!(s.contains("## Active Task"));
+        assert!(s.contains("fix the bug"));
+        // Tail.
+        assert_eq!(out[3]["content"].as_str().unwrap(), "recent user");
+        assert_eq!(out[4]["content"].as_str().unwrap(), "recent assistant");
+    }
+
+    #[test]
+    fn compute_window_partitions_correctly() {
+        let msgs: Vec<Value> = (0..10)
+            .map(|i| serde_json::json!({"role": "user", "content": format!("msg {i}")}))
+            .collect();
+        let (start, end) = compute_compress_window(&msgs, 2, 3);
+        assert_eq!(start, 2);
+        assert_eq!(end, 7);
+    }
+
+    #[test]
+    fn compute_window_short_list_returns_zero() {
+        let msgs: Vec<Value> = (0..3)
+            .map(|i| serde_json::json!({"role": "user", "content": format!("msg {i}")}))
+            .collect();
+        // 3 messages with head=2, tail=3 — too short.
+        assert_eq!(compute_compress_window(&msgs, 2, 3), (0, 0));
+    }
+
+    #[test]
+    fn rotate_session_id_prefix_and_length() {
+        let id = rotate_session_id();
+        assert!(id.starts_with("compacted-"));
+        // "compacted-" (10) + 8 hex chars = 18.
+        assert_eq!(id.len(), 18);
+    }
+
+    // ── full-wire integration: prompt → mock summarizer → applied ──
+
+    /// LOOP-9: integration-style test exercising the full compaction
+    /// wire end-to-end. Builds a long conversation, calls the prompt
+    /// builder, runs a mock summarizer (no LLM), applies the result.
+    /// Asserts the summary lands as a system message and the older
+    /// turns are gone.
+    #[tokio::test]
+    async fn full_compaction_wire_with_mock_summarizer() {
+        // Build a long conversation: system + 20 turns.
+        let mut msgs: Vec<Value> = vec![
+            serde_json::json!({"role": "system", "content": "you are an agent"}),
+            serde_json::json!({"role": "user", "content": "initial task"}),
+        ];
+        for i in 0..18 {
+            let role = if i % 2 == 0 { "assistant" } else { "user" };
+            msgs.push(serde_json::json!({
+                "role": role,
+                "content": format!("turn {i} content with some length to make tokens"),
+            }));
+        }
+        msgs.push(serde_json::json!({"role": "user", "content": "latest user request"}));
+
+        let n_before = msgs.len();
+
+        // 1. should_compress at the threshold.
+        let tokens = estimate_messages_tokens(&msgs);
+        // With small messages this is well under 75% — bypass via direct call.
+        let _ = tokens;
+
+        // 2. compute window.
+        let (start, end) = compute_compress_window(&msgs, PROTECT_HEAD_DEFAULT, PROTECT_TAIL_DEFAULT);
+        assert!(start < end);
+        let middle = &msgs[start..end];
+        assert!(!middle.is_empty());
+
+        // 3. build prompt.
+        let prompt = build_summary_prompt(middle, summary_budget(estimate_messages_tokens(middle)), None, None);
+        assert!(prompt.contains("TURNS TO SUMMARIZE"));
+        assert!(prompt.contains("turn 0"));
+
+        // 4. mock summarizer — implements SummarizeFn shape.
+        let summarizer: SummarizeFn = Arc::new(|_prompt| {
+            Box::pin(async move {
+                Ok("## Active Task\nlatest user request\n\n\
+                    ## Completed Actions\n1. turn 0\n2. turn 1\n\n\
+                    ## Remaining Work\nfinish the task"
+                    .to_string())
+            })
+        });
+        let summary = summarizer(prompt.clone()).await.expect("summarizer ok");
+
+        // 5. validate.
+        assert!(validate_summary(&summary));
+
+        // 6. apply.
+        let compressed = apply_summary(&msgs, &summary, start, end);
+
+        // Assertions: head + 1 summary + tail.
+        assert_eq!(
+            compressed.len(),
+            PROTECT_HEAD_DEFAULT + 1 + PROTECT_TAIL_DEFAULT,
+            "compressed should be head(2) + summary(1) + tail(5) = 8",
+        );
+        // Original was much longer.
+        assert!(compressed.len() < n_before);
+        // The summary message has SUMMARY_PREFIX.
+        let summary_msg = &compressed[PROTECT_HEAD_DEFAULT];
+        assert_eq!(summary_msg["role"].as_str().unwrap(), "system");
+        let body = summary_msg["content"].as_str().unwrap();
+        assert!(body.starts_with(SUMMARY_PREFIX));
+        assert!(body.contains("## Active Task"));
+        // The latest user message is preserved in the tail.
+        let last = compressed.last().unwrap();
+        assert_eq!(last["content"].as_str().unwrap(), "latest user request");
+        // Session id rotates.
+        let new_id = rotate_session_id();
+        assert!(new_id.starts_with("compacted-"));
     }
 }

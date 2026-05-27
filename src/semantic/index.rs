@@ -55,19 +55,27 @@ impl SymbolIndex {
         let mtime = meta.as_ref().and_then(|m| m.modified().ok());
         let size = meta.as_ref().map(|m| m.len());
 
+        // EXT-2: hash the first 4 KiB of the file to close the
+        // same-mtime+same-size collision case (a `touch -t` to
+        // restore an old mtime after an identical-length in-place
+        // patch). Reading 4 KiB is cheap; the alternative — re-
+        // extracting the whole file on every call — is much more
+        // expensive. We compute the head hash up-front so the
+        // freshness check can use it.
+        let head_hash = compute_head_hash(&canonical).unwrap_or(0);
+
         // Audit C5+M7: mtime alone is unreliable on filesystems with
         // second (or worse) granularity — a same-second write after
         // the cache fill produces an identical mtime and we serve
-        // stale extracts. Combine mtime + size; size catches almost
-        // every real edit (anything but a same-size in-place patch)
-        // without the cost of hashing the file content.
+        // stale extracts. Combine mtime + size + head_hash.
         // Fast-path: check cache freshness under a brief lock.
         {
             let cache = self.cache_lock();
             if let Some(entry) = cache.get(&canonical) {
                 let mtime_unchanged = mtime.map_or(false, |mt| mt == entry.mtime);
                 let size_unchanged = size.map_or(false, |sz| sz == entry.size);
-                if mtime_unchanged && size_unchanged {
+                let head_unchanged = head_hash == entry.head_hash;
+                if mtime_unchanged && size_unchanged && head_unchanged {
                     return Ok(entry.clone());
                 }
             }
@@ -91,6 +99,7 @@ impl SymbolIndex {
         if let Some(sz) = size {
             extracted.size = sz;
         }
+        extracted.head_hash = head_hash;
 
         let mut cache = self.cache_lock();
         // Audit L14: LRU-evict the oldest entry before insert if
@@ -205,8 +214,53 @@ impl SymbolIndex {
         let mut results = Vec::new();
 
         let extensions = self.registry.all_extensions();
+        // EXT-10: word-boundary on the bare name catches every call,
+        // every comment mention, and every same-named method on an
+        // unrelated class. We refine BELOW by filtering against the
+        // symbol table at result-emission time: if the target name
+        // resolves uniquely to a method (has a parent_class), keep
+        // only lines that look like a method call (`.name(` or
+        // `name(` or `::name`). Bare-name standalone hits are
+        // dropped — they're almost always comments or unrelated
+        // identifiers. This is heuristic, not a full tree-sitter
+        // call-expression query, but eliminates the noisy class
+        // of false-positives the audit flagged.
         let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(name)))
             .map_err(|e| format!("Regex error: {e}"))?;
+        // If `name` resolves to exactly one symbol in our cache that's
+        // a method or function-shape callable, prepare a call-site
+        // refinement regex that looks like `(.|::)?name\s*\(` —
+        // common across all supported languages.
+        let call_site_re = regex::Regex::new(&format!(
+            r"(?:[.:]|::)?\b{}\b\s*\(",
+            regex::escape(name)
+        ))
+        .ok();
+        let target_is_callable = {
+            let cache = self.cache_lock();
+            let mut callable_count = 0usize;
+            let mut method_with_parent = false;
+            for entry in cache.values() {
+                for sym in &entry.symbols {
+                    if sym.name == name {
+                        match sym.kind {
+                            SymbolKind::Function | SymbolKind::Method => {
+                                callable_count += 1;
+                                if sym.parent_class.is_some() {
+                                    method_with_parent = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // Use the refinement only when (a) we found at least one
+            // callable, AND (b) it's a method (parent_class set) — for
+            // free functions the bare name is the canonical call form
+            // and refining would over-filter.
+            callable_count > 0 && method_with_parent
+        };
 
         let mut walker = WalkBuilder::new(root);
         walker
@@ -270,21 +324,33 @@ impl SymbolIndex {
             let entry = self.ensure_file(&path_canonical).ok();
 
             for (line_num, line) in content.lines().enumerate() {
-                if re.is_match(line) {
-                    if let Some(ref entry) = entry {
-                        let is_definition = entry.symbols.iter().any(|s| {
-                            s.name == name
-                                && s.range.start_line <= line_num + 1
-                                && s.range.end_line >= line_num + 1
-                        });
-                        if is_definition {
-                            continue;
-                        }
+                if !re.is_match(line) {
+                    continue;
+                }
+                if let Some(ref entry) = entry {
+                    let is_definition = entry.symbols.iter().any(|s| {
+                        s.name == name
+                            && s.range.start_line <= line_num + 1
+                            && s.range.end_line >= line_num + 1
+                    });
+                    if is_definition {
+                        continue;
                     }
-                    results.push(format!("{}:{}: {}", path_str, line_num + 1, line.trim()));
-                    if results.len() >= MAX_GREP_RESULTS {
-                        break;
-                    }
+                }
+                // EXT-10: when the target is a method (has at least
+                // one definition with parent_class set in the
+                // cache), require the line to look like a call site
+                // — `.name(` / `::name(` / bare `name(`. Drops
+                // comment mentions and unrelated identifier hits.
+                if target_is_callable
+                    && let Some(ref cs_re) = call_site_re
+                    && !cs_re.is_match(line)
+                {
+                    continue;
+                }
+                results.push(format!("{}:{}: {}", path_str, line_num + 1, line.trim()));
+                if results.len() >= MAX_GREP_RESULTS {
+                    break;
                 }
             }
         }
@@ -413,4 +479,25 @@ impl SymbolIndex {
 
         Ok(result)
     }
+}
+
+/// EXT-2: cheap head hash for cache-freshness validation. Reads
+/// up to the first 4 KiB of the file and returns a 64-bit FNV-1a
+/// hash. Combined with mtime+size in `ensure_file` to detect
+/// edits that preserve both (e.g. `touch -t` after an in-place
+/// patch of identical length — uncommon but possible). Failure
+/// (file disappeared, permissions) returns `None` and the cache
+/// path treats it as a mismatch.
+fn compute_head_hash(path: &std::path::Path) -> Option<u64> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = [0u8; 4096];
+    let n = f.read(&mut buf).ok()?;
+    // FNV-1a 64-bit.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in &buf[..n] {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    Some(h)
 }

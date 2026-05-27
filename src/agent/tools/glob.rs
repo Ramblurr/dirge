@@ -134,11 +134,16 @@ impl Tool for GlobTool {
         let perm_path = args.path.as_deref().unwrap_or(".");
         check_perm_path(&self.permission, &self.ask_tx, "glob", perm_path).await?;
 
+        // LOOP-3: dir stamp catches file add/remove/rename.
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(
+            args.path.as_deref().unwrap_or("."),
+        );
         let cache_key = format!(
-            "glob:{}:{}:hidden={}",
+            "glob:{}:{}:hidden={}:{}",
             args.pattern,
             args.path.as_deref().unwrap_or("."),
             args.include_hidden,
+            stamp,
         );
         if let Some(ref cache) = self.cache
             && let Some(cached) = cache.get(&cache_key)

@@ -244,6 +244,36 @@ fn compile_lsp_commands(cfg: &config::Config) -> std::collections::HashMap<Strin
     commands
 }
 
+/// SESS-8: print a stderr warning when resuming a session whose
+/// working_dir differs from the current cwd or whose `updated_at`
+/// is more than 24h old. Tool results captured during the original
+/// session may no longer match reality; without a visible signal
+/// the agent confidently acts on stale `git status` / `read`
+/// content. Warnings only — never refuse to load.
+fn warn_on_stale_resume(session: &session::Session) {
+    let cwd = std::env::current_dir().ok();
+    let session_wd = session.working_dir.as_str();
+    if !session_wd.is_empty()
+        && let Some(cwd) = &cwd
+        && cwd.to_string_lossy() != session_wd
+    {
+        eprintln!(
+            "warning: resumed session was created in {:?}, current cwd is {:?}. Tool results captured against the old tree may be stale.",
+            session_wd,
+            cwd.display().to_string(),
+        );
+    }
+    if let Ok(updated) = chrono::DateTime::parse_from_rfc3339(session.updated_at.as_str()) {
+        let age = chrono::Utc::now().signed_duration_since(updated.with_timezone(&chrono::Utc));
+        if age.num_hours() >= 24 {
+            eprintln!(
+                "warning: resumed session is {} hours old. Captured tool results (read/git/bash) may no longer reflect the current state of the working tree.",
+                age.num_hours(),
+            );
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
@@ -415,6 +445,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // SESS-8: warn when resuming a session whose working_dir
+        // differs from the current cwd or whose updated_at is
+        // stale (>24h). Tool results stored in the session were
+        // captured against that earlier state; resuming silently
+        // can lead the agent to act on outdated `git status` /
+        // `read` output that no longer matches reality.
+        warn_on_stale_resume(&session);
     }
 
     // Restore the active prompt from the loaded session so resumed

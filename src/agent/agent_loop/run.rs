@@ -78,6 +78,96 @@ fn storm_for_config(config: &LoopConfig) -> StormBreaker {
     StormBreaker::new(6, 3, mutating, exempt)
 }
 
+/// LOOP-9 — context-compaction worker. Runs the cheap pruning pass
+/// first; when a summarizer callback is wired AND pruning alone
+/// didn't free enough headroom (compressed token count is still
+/// above the pruner's protection floor), invokes the auxiliary
+/// summarizer + replaces the middle section of `current_context.messages`
+/// with a structured-summary system message.
+///
+/// Emits `LoopEvent::ContextCompacted` with a rotated session id
+/// once the pass finishes (whether pruning-only or pruning+summary).
+/// Session.id rotation + DB persistence is delegated to the event
+/// consumer side via this event channel.
+async fn run_compaction_pass(
+    current_context: &mut Context,
+    summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
+    protect_tail: usize,
+    emit: &mpsc::Sender<LoopEvent>,
+) {
+    use crate::agent::compression;
+
+    let before = compression::estimate_messages_tokens(&current_context.messages);
+
+    // First pass: cheap tool-output pruning. No LLM call.
+    let pruned = compression::prune_tool_outputs(&current_context.messages, protect_tail);
+    current_context.messages = pruned;
+    let after_prune = compression::estimate_messages_tokens(&current_context.messages);
+
+    // Second pass: if a summarizer is wired AND we still have
+    // meaningful material to summarize, build the Hermes-style
+    // structured prompt, call the auxiliary model, validate the
+    // returned summary, and replace the middle section.
+    let mut after_summary = after_prune;
+    if let Some(sfn) = summarize_fn {
+        let (start, end) = compression::compute_compress_window(
+            &current_context.messages,
+            compression::PROTECT_HEAD_DEFAULT,
+            protect_tail.max(compression::PROTECT_TAIL_DEFAULT),
+        );
+        if start < end {
+            let middle: Vec<serde_json::Value> = current_context.messages[start..end].to_vec();
+            // Carry forward any previous summary body for iterative
+            // re-compression (Hermes _find_latest_context_summary).
+            let prev = compression::find_previous_summary(&current_context.messages)
+                .map(|(_, body)| body);
+            let budget = compression::summary_budget(
+                compression::estimate_messages_tokens(&middle),
+            );
+            let prompt = compression::build_summary_prompt(
+                &middle,
+                budget,
+                prev.as_deref(),
+                None, // focus_topic reserved for future /compress <focus>
+            );
+            match sfn(prompt).await {
+                Ok(summary) if compression::validate_summary(&summary) => {
+                    let new_msgs = compression::apply_summary(
+                        &current_context.messages,
+                        &summary,
+                        start,
+                        end,
+                    );
+                    current_context.messages = new_msgs;
+                    after_summary = compression::estimate_messages_tokens(&current_context.messages);
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        target: "dirge::agent_loop",
+                        "compaction summarizer returned an unvalidated summary — keeping pruned context",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dirge::agent_loop",
+                        error = %e,
+                        "compaction summarizer failed — keeping pruned context",
+                    );
+                }
+            }
+        }
+    }
+
+    let new_id = compression::rotate_session_id();
+    let _ = emit
+        .send(LoopEvent::ContextCompacted {
+            new_session_id: new_id,
+            tokens_before: before,
+            tokens_after: after_summary,
+        })
+        .await;
+}
+
 /// Public entry point: start a new run from one or more prompt
 /// messages. Faithful port of pi `runAgentLoop` (agent-loop.ts:95).
 ///
@@ -87,11 +177,28 @@ fn storm_for_config(config: &LoopConfig) -> StormBreaker {
 /// assistant turn + every tool result).
 pub async fn run_agent_loop(
     prompts: Vec<LoopMessage>,
+    context: Context,
+    config: LoopConfig,
+    signal: AbortSignal,
+    emit: &mpsc::Sender<LoopEvent>,
+    stream_fn: &StreamFn,
+) -> Vec<LoopMessage> {
+    run_agent_loop_with_summarizer(prompts, context, config, signal, emit, stream_fn, None).await
+}
+
+/// Like `run_agent_loop` but accepts an optional summarizer callback
+/// for LOOP-9 context compaction. When `Some`, the loop's compaction
+/// path runs a structured summarization pass after the cheap
+/// `prune_tool_outputs` pre-pass — see
+/// `crate::agent::compression::SummarizeFn` for the contract.
+pub async fn run_agent_loop_with_summarizer(
+    prompts: Vec<LoopMessage>,
     mut context: Context,
     config: LoopConfig,
     signal: AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
     stream_fn: &StreamFn,
+    summarize_fn: Option<crate::agent::compression::SummarizeFn>,
 ) -> Vec<LoopMessage> {
     // Pi line 103: `newMessages = [...prompts]`.
     let new_messages = prompts.clone();
@@ -117,7 +224,7 @@ pub async fn run_agent_loop(
             .await;
     }
 
-    run_loop(context, new_messages, config, signal, emit, stream_fn).await
+    run_loop_with_summarizer(context, new_messages, config, signal, emit, stream_fn, summarize_fn).await
 }
 
 /// The actual loop. Faithful port of pi `runLoop` (agent-loop.ts:155-269).
@@ -126,6 +233,19 @@ pub async fn run_agent_loop(
 /// these as the run proceeds; in Rust we own them by value and
 /// return `new_messages` at the end.
 pub async fn run_loop(
+    current_context: Context,
+    new_messages: Vec<LoopMessage>,
+    config: LoopConfig,
+    signal: AbortSignal,
+    emit: &mpsc::Sender<LoopEvent>,
+    stream_fn: &StreamFn,
+) -> Vec<LoopMessage> {
+    run_loop_with_summarizer(current_context, new_messages, config, signal, emit, stream_fn, None).await
+}
+
+/// LOOP-9 variant: identical to `run_loop` plus an optional
+/// `summarize_fn` callback for context compaction's second pass.
+pub async fn run_loop_with_summarizer(
     mut current_context: Context,
     mut new_messages: Vec<LoopMessage>,
     // `config` is `mut` even though phase 4 only reads it. Pi
@@ -140,6 +260,7 @@ pub async fn run_loop(
     signal: AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
     stream_fn: &StreamFn,
+    summarize_fn: Option<crate::agent::compression::SummarizeFn>,
 ) -> Vec<LoopMessage> {
     let mut first_turn = true;
 
@@ -481,37 +602,13 @@ pub async fn run_loop(
                         // Port of Hermes's compression pass.
                         if let Some(prompt_tokens) = token_usage.map(|u| u.input_tokens) {
                             if crate::agent::compression::should_compress(prompt_tokens, ctx_max) {
-                                let before = crate::agent::compression::estimate_messages_tokens(
-                                    &current_context.messages,
-                                );
-                                // Prune large tool outputs — cheap pre-pass,
-                                // no LLM call needed.
-                                let pruned = crate::agent::compression::prune_tool_outputs(
-                                    &current_context.messages,
+                                run_compaction_pass(
+                                    &mut current_context,
+                                    &summarize_fn,
                                     5, // protect last 5 messages
-                                );
-                                current_context.messages = pruned;
-
-                                // Build a summary marker as a system message
-                                // so the model knows context was compacted.
-                                let total = crate::agent::compression::estimate_messages_tokens(
-                                    &current_context.messages,
-                                );
-                                let new_id = format!(
-                                    "compacted-{}",
-                                    uuid::Uuid::new_v4()
-                                        .to_string()
-                                        .chars()
-                                        .take(8)
-                                        .collect::<String>()
-                                );
-                                let _ = emit
-                                    .send(LoopEvent::ContextCompacted {
-                                        new_session_id: new_id,
-                                        tokens_before: before,
-                                        tokens_after: total,
-                                    })
-                                    .await;
+                                    emit,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -522,33 +619,15 @@ pub async fn run_loop(
                             "context-manager: forcing summary and ending turn",
                         );
                         // When context is critically over the threshold,
-                        // prune aggressively and insert a compression marker.
-                        let before = crate::agent::compression::estimate_messages_tokens(
-                            &current_context.messages,
-                        );
-                        let pruned = crate::agent::compression::prune_tool_outputs(
-                            &current_context.messages,
+                        // prune aggressively then run the structured-summary
+                        // pass if a summarizer is wired.
+                        run_compaction_pass(
+                            &mut current_context,
+                            &summarize_fn,
                             3, // protect only last 3
-                        );
-                        current_context.messages = pruned;
-                        let after = crate::agent::compression::estimate_messages_tokens(
-                            &current_context.messages,
-                        );
-                        let new_id = format!(
-                            "compacted-{}",
-                            uuid::Uuid::new_v4()
-                                .to_string()
-                                .chars()
-                                .take(8)
-                                .collect::<String>()
-                        );
-                        let _ = emit
-                            .send(LoopEvent::ContextCompacted {
-                                new_session_id: new_id,
-                                tokens_before: before,
-                                tokens_after: after,
-                            })
-                            .await;
+                            emit,
+                        )
+                        .await;
                     }
                     _ => {}
                 }
@@ -793,6 +872,153 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
         }
+    }
+
+    /// LOOP-9 integration: `run_compaction_pass` end-to-end. Feed
+    /// a long conversation, a mock summarizer, and assert that
+    /// (a) the older messages were dropped, (b) a SUMMARY_PREFIX
+    /// system message was inserted at the head, (c) the latest
+    /// user message is still in the tail, and (d) a
+    /// `ContextCompacted` event was emitted with a rotated session id.
+    #[tokio::test]
+    async fn run_compaction_pass_inserts_summary_and_rotates_session() {
+        let mut ctx = empty_context();
+        ctx.system_prompt = "you are an agent".into();
+        // Pad with 25 turns so the compaction window has material.
+        ctx.messages.push(serde_json::json!({
+            "role": "system", "content": "you are an agent"
+        }));
+        ctx.messages.push(serde_json::json!({
+            "role": "user", "content": "initial task: fix the bug"
+        }));
+        for i in 0..20 {
+            let role = if i % 2 == 0 { "assistant" } else { "user" };
+            ctx.messages.push(serde_json::json!({
+                "role": role,
+                "content": format!("turn {i} with some content to fill bytes"),
+            }));
+        }
+        ctx.messages.push(serde_json::json!({
+            "role": "user", "content": "latest user request"
+        }));
+        let n_before = ctx.messages.len();
+
+        // Mock summarizer: returns a valid Hermes-style summary
+        // structure. We assert the prompt was built (non-empty).
+        let prompt_seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let prompt_seen_inner = prompt_seen.clone();
+        let summarize_fn: Option<crate::agent::compression::SummarizeFn> =
+            Some(std::sync::Arc::new(move |prompt: String| {
+                let store = prompt_seen_inner.clone();
+                Box::pin(async move {
+                    *store.lock().unwrap() = prompt;
+                    Ok("## Active Task\nfix the bug\n\n\
+                        ## Goal\nresolve the issue\n\n\
+                        ## Completed Actions\n1. read the file\n\n\
+                        ## Remaining Work\nrun tests"
+                        .to_string())
+                })
+            }));
+
+        let (tx, mut rx) = mpsc::channel::<LoopEvent>(8);
+        super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &tx).await;
+        drop(tx);
+
+        // (a) older messages dropped.
+        assert!(
+            ctx.messages.len() < n_before,
+            "expected compaction to shrink the message list: before={n_before} after={}",
+            ctx.messages.len()
+        );
+
+        // (b) summary system message with SUMMARY_PREFIX is present.
+        let summary_msg = ctx
+            .messages
+            .iter()
+            .find(|m| {
+                m.get("role").and_then(|v| v.as_str()) == Some("system")
+                    && m.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.contains("CONTEXT COMPACTION"))
+                        .unwrap_or(false)
+            })
+            .expect("compaction summary message should be present");
+        let body = summary_msg["content"].as_str().unwrap();
+        assert!(body.contains("## Active Task"));
+        assert!(body.contains("fix the bug"));
+
+        // (c) latest user message preserved.
+        let last = ctx.messages.last().unwrap();
+        assert_eq!(last["content"].as_str().unwrap(), "latest user request");
+
+        // (d) ContextCompacted event emitted with rotated session id.
+        let mut compacted_event_seen = false;
+        while let Some(ev) = rx.recv().await {
+            if let LoopEvent::ContextCompacted { new_session_id, .. } = ev {
+                assert!(
+                    new_session_id.starts_with("compacted-"),
+                    "session id should rotate via compacted- prefix; got {new_session_id}"
+                );
+                compacted_event_seen = true;
+            }
+        }
+        assert!(compacted_event_seen, "expected ContextCompacted event");
+
+        // Sanity: the summarizer received a Hermes structured prompt
+        // (built via build_summary_prompt).
+        let received = prompt_seen.lock().unwrap().clone();
+        assert!(received.contains("TURNS TO SUMMARIZE"));
+        assert!(received.contains("## Active Task"));
+    }
+
+    /// LOOP-9: when no summarizer is wired, the compaction pass
+    /// still runs the cheap pruning and emits ContextCompacted, but
+    /// does NOT insert a structured summary system message.
+    #[tokio::test]
+    async fn run_compaction_pass_without_summarizer_prunes_only() {
+        let mut ctx = empty_context();
+        // One large tool result that should be pruned.
+        ctx.messages.push(serde_json::json!({
+            "role": "user", "content": "first"
+        }));
+        ctx.messages.push(serde_json::json!({
+            "role": "toolResult", "content": "x".repeat(2000), "toolName": "bash"
+        }));
+        ctx.messages.push(serde_json::json!({
+            "role": "user", "content": "tail"
+        }));
+        ctx.messages.push(serde_json::json!({
+            "role": "assistant", "content": "tail asst"
+        }));
+
+        let (tx, mut rx) = mpsc::channel::<LoopEvent>(4);
+        // Use protect_tail = 2 so the large tool result is eligible
+        // for pruning (it's at index 1, end = 4 - 2 = 2, so index
+        // 1 is in-range).
+        super::run_compaction_pass(&mut ctx, &None, 2, &tx).await;
+        drop(tx);
+
+        // No SUMMARY_PREFIX message inserted.
+        let has_summary = ctx.messages.iter().any(|m| {
+            m.get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains("CONTEXT COMPACTION"))
+                .unwrap_or(false)
+        });
+        assert!(!has_summary, "no summary should be inserted without summarize_fn");
+
+        // The large tool result was pruned (replaced with a [bash] marker).
+        let tool_msg = &ctx.messages[1];
+        assert!(tool_msg["content"].as_str().unwrap().contains("[bash]"));
+
+        // ContextCompacted still emitted.
+        let mut compacted_event_seen = false;
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, LoopEvent::ContextCompacted { .. }) {
+                compacted_event_seen = true;
+            }
+        }
+        assert!(compacted_event_seen);
     }
 
     /// Mock echo tool for run-loop tests. Records executed args

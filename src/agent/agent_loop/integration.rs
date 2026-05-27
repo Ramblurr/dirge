@@ -69,7 +69,7 @@ use crate::event::AgentEvent;
 use super::bridge::EventBridge;
 use super::heal;
 use super::message::{LoopMessage, UserMessage};
-use super::run::run_agent_loop;
+use super::run::run_agent_loop_with_summarizer;
 use super::steering::steering_from_queue;
 use super::stream::StreamFn;
 use super::tool::{AbortSignal, LoopTool};
@@ -337,6 +337,12 @@ pub struct LoopSpawnConfig {
     /// repair_kind)`. `None` is acceptable — telemetry falls back
     /// to `"unknown"`.
     pub model_name: Option<String>,
+
+    /// LOOP-9 — optional summarizer callback forwarded to
+    /// `LoopConfig.summarize_fn` so the run-loop's compaction path
+    /// can call the auxiliary model. Production code builds this
+    /// from `AnyClient::compress_messages`; tests can mock it.
+    pub summarize_fn: Option<crate::agent::compression::SummarizeFn>,
 }
 
 impl LoopSpawnConfig {
@@ -358,6 +364,7 @@ impl LoopSpawnConfig {
             steering_queue: None,
             tool_execution: ToolExecutionMode::Parallel,
             event_channel_capacity: 256,
+            summarize_fn: None,
         }
     }
 }
@@ -450,6 +457,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         content: cfg.initial_prompt,
     })];
     let stream_fn = cfg.stream_fn;
+    let summarize_fn = cfg.summarize_fn.clone();
 
     let task = tokio::spawn(async move {
         // Inner channel for LoopEvents emitted by run_agent_loop.
@@ -488,13 +496,14 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         // killing both. Tools that poll the AbortSignal still
         // observe the cancellation cooperatively.
         let loop_future = async move {
-            let _final_messages = run_agent_loop(
+            let _final_messages = run_agent_loop_with_summarizer(
                 prompts,
                 context,
                 loop_config,
                 signal_inner,
                 &loop_tx,
                 &stream_fn,
+                summarize_fn,
             )
             .await;
             // Drop the sender so the pump observes channel

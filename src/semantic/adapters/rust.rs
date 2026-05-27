@@ -415,6 +415,7 @@ impl LanguageAdapter for RustAdapter {
             warnings,
             mtime: std::time::SystemTime::now(),
             size: 0,
+            head_hash: 0,
         })
     }
 

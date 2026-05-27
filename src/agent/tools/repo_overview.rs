@@ -106,7 +106,12 @@ impl Tool for RepoOverviewTool {
             .max(1);
         let want_lines = args.include_line_counts.unwrap_or(false);
 
-        let cache_key = format!("repo_overview:{}:{}:{}", path, depth, want_lines);
+        // LOOP-3: include root-dir stamp so external edits invalidate.
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(path);
+        let cache_key = format!(
+            "repo_overview:{}:{}:{}:{}",
+            path, depth, want_lines, stamp,
+        );
         if let Some(ref cache) = self.cache
             && let Some(cached) = cache.get(&cache_key)
         {

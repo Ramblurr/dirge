@@ -46,6 +46,10 @@ const DIALOG_POLL: Duration = Duration::from_millis(50);
 /// timeout fires the caller gets a clean error instead of hanging.
 #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
 const EVAL_TIMEOUT: Duration = Duration::from_secs(600);
+/// UI-3: default for interactive `eval()` calls (slash commands,
+/// provider list lookups, UI-driven plugin queries). A runaway
+/// plugin shouldn't freeze the UI for the full `EVAL_TIMEOUT`.
+const INTERACTIVE_EVAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Upper bound on how long `Worker::Drop` will wait for the worker
 /// thread to exit. Short by design: shutdown is best-effort. If the
@@ -664,14 +668,28 @@ impl Worker {
     }
 
     /// Send a Janet expression to the worker and block until it returns
-    /// the stringified result (or a Janet error message). Uses the
-    /// generous default `EVAL_TIMEOUT` (10 min) — appropriate for
-    /// explicit `(harness/...)` long-running operations the plugin
-    /// might initiate from the REPL or top-level. For per-hook
-    /// dispatch, use [`eval_with_timeout`] with a tighter bound
-    /// (audit L6: a hung `on-tool-start` hook used to block every
-    /// subsequent tool for up to EVAL_TIMEOUT).
+    /// the stringified result (or a Janet error message). Uses a
+    /// moderate default (`INTERACTIVE_EVAL_TIMEOUT`, 30s) appropriate
+    /// for slash-command dispatch, provider list lookups, and any
+    /// UI-driven path where a hung plugin would otherwise freeze the
+    /// session. For deliberately long-running operations
+    /// (`harness/...` jobs from a plugin's top-level setup), use
+    /// [`eval_long`].
+    ///
+    /// UI-3 (audit follow-up): the previous default was 10 minutes,
+    /// inherited from `EVAL_TIMEOUT`. A runaway `(while true)` in any
+    /// non-hook plugin code would block every UI interaction for 10
+    /// minutes per call.
     pub fn eval(&mut self, code: &str) -> Result<String, String> {
+        self.eval_with_timeout(code, INTERACTIVE_EVAL_TIMEOUT)
+    }
+
+    /// Long-running variant: same as `eval` but uses the global
+    /// `EVAL_TIMEOUT` (10 min). Call this only for explicit
+    /// long-running operations — anything user-interactive should
+    /// use `eval()`.
+    #[allow(dead_code)]
+    pub fn eval_long(&mut self, code: &str) -> Result<String, String> {
         self.eval_with_timeout(code, EVAL_TIMEOUT)
     }
 
