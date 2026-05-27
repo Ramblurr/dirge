@@ -235,10 +235,23 @@ async fn prepare_tool_call(
                 "tool input repaired"
             );
             // Phase-1 telemetry: bump the per-kind aggregate
-            // counters so the run-finish event can emit a summary
-            // ("repaired 3 inputs: 1 md-link, 2 null-strip").
+            // counters once per call, not once per occurrence.
+            // The repair pass can push the same kind multiple
+            // times (e.g. `NullStripped` once per stripped null
+            // field) — counting per-field would inflate the
+            // session summary into "repaired N inputs" when only
+            // one tool call actually had inputs touched. Dedupe
+            // by kind so the user-visible counter is "tool calls
+            // touched by this repair", which is the meaningful
+            // metric. The full kinds vec is still passed to the
+            // tracing event for per-call detail.
+            let mut seen_kinds: std::collections::HashSet<
+                crate::agent::agent_loop::tool_input_repair::RepairKind,
+            > = std::collections::HashSet::new();
             for kind in &rr.kinds {
-                config.repair_stats.record(*kind);
+                if seen_kinds.insert(*kind) {
+                    config.repair_stats.record(*kind);
+                }
             }
             rr.repaired
         }

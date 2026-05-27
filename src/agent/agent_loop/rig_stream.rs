@@ -109,20 +109,28 @@ where
             std::collections::HashMap::new();
         // Phase-1 item #4 (docs/AGENTIC_LOOP_PLAN.md): set of tool
         // calls whose `ToolCallEnd` hasn't fired yet. While any
-        // entry is open we apply a TIGHTER chunk timeout — a
-        // provider that stalls mid-tool-call surfaces an error
-        // within ~30s instead of waiting the full
-        // `stream_chunk_timeout_secs` (default 300s). Tool-call
-        // reassembly is the failure mode the catalogue
-        // specifically calls out (§2.2: "Implement a timeout
-        // (e.g., 2 seconds) after which a repair attempt is made,
-        // or an error is returned to the model"). We're more
-        // conservative than 2s — provider tail latency is real —
-        // but much tighter than the broad chunk timeout.
+        // entry is open we cap the WAIT FOR THE NEXT CHUNK at
+        // `TOOL_CALL_GAP_TIMEOUT` — but the cap is reset every
+        // time the provider sends ANY chunk (text, reasoning,
+        // another tool-call delta). A model that legitimately
+        // interleaves text + tool-call deltas keeps making
+        // forward progress and never trips the gap timeout; only
+        // a true mid-assembly stall (no chunks of ANY kind for
+        // 30s while a tool call is open) fires.
+        //
+        // This addresses the review finding that the prior
+        // "any chunk subject to the 30s timeout while a tool
+        // call is open" semantic spuriously killed providers
+        // that interleave reasoning between tool-call deltas.
         let mut open_tool_calls: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         const TOOL_CALL_GAP_TIMEOUT: std::time::Duration =
             std::time::Duration::from_secs(30);
+        // Wall-clock instant when the last forward-progress chunk
+        // arrived. Used to compute the remaining gap budget while
+        // a tool call is mid-assembly. Initialized to "now" so
+        // the first wait starts with the full budget.
+        let mut last_chunk_at = std::time::Instant::now();
 
         // Token usage captured from the Final(R) provider response.
         let mut token_usage: Option<super::message::TokenUsage> = None;
@@ -145,14 +153,28 @@ where
                 };
                 return;
             }
-            // Apply per-chunk timeout if configured. When a tool
-            // call is mid-assembly, narrow the wait to the gap
-            // timeout so a stalled reassembly surfaces fast.
-            let effective_timeout = match chunk_timeout {
-                Some(t) if !open_tool_calls.is_empty() => Some(t.min(TOOL_CALL_GAP_TIMEOUT)),
-                Some(t) => Some(t),
-                None if !open_tool_calls.is_empty() => Some(TOOL_CALL_GAP_TIMEOUT),
-                None => None,
+            // Apply per-chunk timeout. When a tool call is
+            // mid-assembly we narrow to the remaining gap budget
+            // (TOOL_CALL_GAP_TIMEOUT minus elapsed since the last
+            // chunk of any kind). Otherwise the configured
+            // `chunk_timeout` is used as-is.
+            let effective_timeout = if !open_tool_calls.is_empty() {
+                let remaining = TOOL_CALL_GAP_TIMEOUT.saturating_sub(last_chunk_at.elapsed());
+                let gap_budget = if remaining.is_zero() {
+                    // The forward-progress window already
+                    // expired between iterations. Fire the
+                    // timeout immediately rather than racing
+                    // an effectively-zero `tokio::time::timeout`.
+                    std::time::Duration::from_millis(1)
+                } else {
+                    remaining
+                };
+                match chunk_timeout {
+                    Some(t) => Some(t.min(gap_budget)),
+                    None => Some(gap_budget),
+                }
+            } else {
+                chunk_timeout
             };
             let next = match effective_timeout {
                 Some(t) => match tokio::time::timeout(t, raw.next()).await {
@@ -184,6 +206,13 @@ where
                 Some(item) => item,
                 None => break,
             };
+            // Forward-progress signal — refresh the gap window
+            // so the next iteration's tool-call-gap budget
+            // starts fresh. Applied to every chunk regardless
+            // of kind (text, reasoning, tool-call-delta, final
+            // ToolCall): any forward motion from the provider
+            // is enough to reset the stall detector.
+            last_chunk_at = std::time::Instant::now();
             match item {
                 Ok(StreamedAssistantContent::Text(t)) => {
                     match current_text_idx {
@@ -947,6 +976,92 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, StreamEvent::Error { .. }))
+        );
+    }
+
+    /// Phase-1 #4 fix: forward-progress chunks (text, reasoning,
+    /// another tool-call delta) reset the gap budget. A
+    /// provider that emits one ToolCallDelta, then a few
+    /// TextDeltas across e.g. 25s, then more ToolCallDeltas
+    /// should NOT trigger the gap timeout — only true silence
+    /// of 30s does. Regression test for the review finding.
+    #[tokio::test]
+    async fn gap_timeout_resets_on_interleaved_text_delta() {
+        use rig::streaming::ToolCallDeltaContent;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        tokio::time::pause();
+        let step = Arc::new(AtomicU32::new(0));
+        let step_clone = step.clone();
+        let raw: Pin<
+            Box<
+                dyn Stream<Item = Result<StreamedAssistantContent<TestResponse>, CompletionError>>
+                    + Send,
+            >,
+        > = Box::pin(futures::stream::unfold(0u32, move |n| {
+            let step = step_clone.clone();
+            async move {
+                step.store(n, Ordering::SeqCst);
+                match n {
+                    0 => Some((
+                        Ok(StreamedAssistantContent::ToolCallDelta {
+                            id: "c1".to_string(),
+                            internal_call_id: "ic1".to_string(),
+                            content: ToolCallDeltaContent::Name("read".to_string()),
+                        }),
+                        1,
+                    )),
+                    1 => {
+                        // Sleep 20s — within the 30s gap budget.
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                        Some((
+                            Ok(StreamedAssistantContent::Text(Text {
+                                text: "thinking…".to_string(),
+                            })),
+                            2,
+                        ))
+                    }
+                    2 => {
+                        // Sleep another 20s — still under 30s
+                        // since the previous text delta reset
+                        // the budget.
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                        Some((
+                            Ok(StreamedAssistantContent::Text(Text {
+                                text: "more thinking…".to_string(),
+                            })),
+                            3,
+                        ))
+                    }
+                    _ => None,
+                }
+            }
+        }));
+        let drain_task = tokio::spawn(async move {
+            drain(wrap_streamed_assistant(
+                raw,
+                Some(Duration::from_secs(300)),
+                None,
+            ))
+            .await
+        });
+        tokio::time::advance(Duration::from_secs(50)).await;
+        let events = drain_task.await.unwrap();
+
+        // The stream should complete naturally (Done) rather
+        // than timeout. The 30s gap budget never expires
+        // because each ~20s wait is followed by a chunk.
+        let has_timeout_error = events.iter().any(|e| {
+            matches!(
+                e,
+                StreamEvent::Error { error } if error.contains("timed out")
+            )
+        });
+        assert!(
+            !has_timeout_error,
+            "gap timeout should NOT fire when forward progress \
+             (text deltas) keeps arriving within the 30s window: \
+             events = {events:?}",
         );
     }
 

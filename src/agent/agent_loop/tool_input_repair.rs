@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::sync::LazyLock;
 
 /// Kinds of repair applied. Used for telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RepairKind {
     NullStripped,
     JsonStringToArray,
