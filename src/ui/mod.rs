@@ -3575,10 +3575,65 @@ pub async fn run_interactive(
                         #[cfg(not(feature = "plugin"))]
                         let _ = index;
                     }
+                    AgentEvent::ContextCompacted {
+                        ref new_session_id,
+                        tokens_before,
+                        tokens_after,
+                    } => {
+                        // Persist session rotation to DB: end the old session
+                        // with reason "compression", insert the new session.
+                        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                        let paths = crate::extras::dirge_paths::ProjectPaths::new(&cwd);
+                        if let Ok(db) = crate::extras::session_db::SessionDb::open(
+                            &paths.session_db_path(),
+                        ) {
+                            let old_sid = format!(
+                                "dirge-{}",
+                                session
+                                    .id
+                                    .as_str()
+                                    .chars()
+                                    .take(8)
+                                    .collect::<String>()
+                            );
+                            let _ = db.end_session(&old_sid, "compression");
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let _ = db.insert_session(
+                                new_session_id,
+                                "cli",
+                                &session.model,
+                                &session.provider,
+                                &now,
+                            );
+                            let _ = db.set_parent_session(new_session_id, &old_sid);
+                        }
+                        renderer.write_line(
+                            &format!(
+                                "  context compacted: {} → {} tokens (session {})",
+                                tokens_before, tokens_after, new_session_id
+                            ),
+                            Color::DarkGrey,
+                        )?;
+                    }
                     AgentEvent::UserMessage { content } => {
                         write_user_lines(&mut renderer, &content)?;
                         renderer.write_line("", Color::White)?;
                         // session.add_message handled at input time (line ~2119)
+                    }
+                    AgentEvent::RetryNotice {
+                        attempt,
+                        delay_ms,
+                        error: _error,
+                    } => {
+                        // PROV-2: surface a temporary banner so the
+                        // user isn't staring at silence during backoff.
+                        let _ = _error;
+                        renderer.write_line(
+                            &format!(
+                                "  ⟳ retry {attempt} ({delay_ms}ms)…",
+                            ),
+                            theme::dim(),
+                        )?;
                     }
                 }
                 renderer.draw_bottom(
@@ -4618,13 +4673,23 @@ pub async fn run_interactive(
                 // confirm/select dialog renders INSIDE the chamber.
                 match dialog_req {
                     DialogRequest::Confirm { title, question, reply } => {
+                        // Strip ANSI escapes from plugin-controlled strings
+                        // to prevent repaint/screen-manipulation attacks.
+                        let safe_title = crate::ui::ansi::strip_escapes(
+                            &title,
+                            crate::ui::ansi::StripPolicy::KEEP_NEWLINE,
+                        );
+                        let safe_question = crate::ui::ansi::strip_escapes(
+                            &question,
+                            crate::ui::ansi::StripPolicy::KEEP_NEWLINE,
+                        );
                         write_outside_chamber(
                             &mut renderer,
                             &mut last_tool_name,
                             &mut tool_chamber_open,
                                     &mut chamber_top_start,
                                     &mut chamber_top_end,
-                            &format!("[plugin {}] {}", title, question),
+                            &format!("[plugin {}] {}", safe_title, safe_question),
                             c_perm(),
                         )?;
                         renderer.write_line(

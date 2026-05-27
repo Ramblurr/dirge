@@ -114,7 +114,23 @@ impl EventBridge {
                     tokens_after,
                     "context compacted — session rotated"
                 );
-                Vec::new()
+                vec![AgentEvent::ContextCompacted {
+                    new_session_id: CompactString::new(new_session_id),
+                    tokens_before,
+                    tokens_after,
+                }]
+            }
+
+            LoopEvent::RetryNotice {
+                attempt,
+                delay_ms,
+                error,
+            } => {
+                vec![AgentEvent::RetryNotice {
+                    attempt,
+                    delay_ms,
+                    error: CompactString::from(error),
+                }]
             }
 
             LoopEvent::AgentEnd { messages } => {
@@ -226,6 +242,15 @@ impl EventBridge {
                     index: self.turn_index,
                 };
                 self.turn_index += 1;
+                // LOOP-9: reset the text and reasoning emission
+                // trackers at each turn boundary. Without this,
+                // `last_text_emitted` from turn 1 is still set
+                // when turn 2 starts — if the model says the same
+                // words again (e.g. "Sure, let me..."), those
+                // bytes are already in the tracker and the second
+                // turn's streaming text is silently dropped.
+                self.last_text_emitted.clear();
+                self.last_reasoning_emitted.clear();
                 vec![evt]
             }
 
@@ -1026,9 +1051,11 @@ mod tests {
                 AgentEvent::Done { .. } => "Done",
                 AgentEvent::Error(_) => "Error",
                 AgentEvent::ContextOverflow { .. } => "ContextOverflow",
+                AgentEvent::ContextCompacted { .. } => "ContextCompacted",
                 AgentEvent::Interjected { .. } => "Interjected",
                 AgentEvent::CustomMessage { .. } => "CustomMessage",
                 AgentEvent::UserMessage { .. } => "UserMessage",
+                AgentEvent::RetryNotice { .. } => "RetryNotice",
             })
             .collect();
         assert_eq!(

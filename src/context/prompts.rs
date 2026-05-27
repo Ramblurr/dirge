@@ -67,8 +67,11 @@ fn parse_frontmatter(raw: &str) -> Prompt {
 
     let mut deny_tools: Vec<String> = Vec::new();
     let mut description: Option<String> = None;
-    for line in front.lines() {
-        let line = line.trim();
+    let lines: Vec<&str> = front.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        i += 1;
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -79,32 +82,48 @@ fn parse_frontmatter(raw: &str) -> Prompt {
         let value = value.trim();
         match key {
             "deny_tools" => {
-                // Inline list form: `[a, b, c]`. Tolerant of spaces.
-                // Adversarial-review #7: lowercase tool names so a
-                // prompt that says `deny_tools: [Edit]` correctly
-                // denies the tool registered as `edit`.
-                //
-                // Review-batch #5: ASCII-lowercase here (not the
-                // Unicode-aware `to_lowercase`) so the parser's
-                // output matches the matcher's `eq_ignore_ascii_case`
-                // contract. A tool name with non-ASCII characters
-                // (rare; only realistic for MCP-exported names) keeps
-                // its non-ASCII bytes — the matcher still hits when
-                // the registered name and the deny entry agree on
-                // those bytes. Mixing Unicode lower at parse with
-                // ASCII-only ignore-case at match would produce
-                // silent skip-by-character-class bugs.
-                let stripped = value.trim_start_matches('[').trim_end_matches(']');
-                deny_tools = stripped
-                    .split(',')
-                    .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\''))
-                    .filter(|s| !s.is_empty())
-                    .map(|s| {
-                        let mut owned = s.to_string();
-                        owned.make_ascii_lowercase();
-                        owned
-                    })
-                    .collect();
+                if value.starts_with('[') {
+                    // Inline list form: `[a, b, c]`. Tolerant of spaces.
+                    let stripped = value.trim_start_matches('[').trim_end_matches(']');
+                    deny_tools = stripped
+                        .split(',')
+                        .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\''))
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            let mut owned = s.to_string();
+                            owned.make_ascii_lowercase();
+                            owned
+                        })
+                        .collect();
+                } else if value.is_empty() && i < lines.len() && lines[i].trim().starts_with('-') {
+                    // PERM-15: YAML block form:
+                    //   deny_tools:
+                    //     - edit
+                    //     - write
+                    // Collect indented `- name` entries until a
+                    // non-list line or end of frontmatter.
+                    let mut items: Vec<String> = Vec::new();
+                    while i < lines.len() {
+                        let next = lines[i].trim();
+                        if let Some(rest) = next.strip_prefix('-') {
+                            let name = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                            if !name.is_empty() {
+                                let mut owned = name.to_string();
+                                owned.make_ascii_lowercase();
+                                items.push(owned);
+                            }
+                            i += 1;
+                        } else if next.is_empty() || next.starts_with('#') {
+                            i += 1; // skip blank/comment lines between items
+                        } else {
+                            break;
+                        }
+                    }
+                    deny_tools = items;
+                } else {
+                    // Unrecognized form — empty value but not block list.
+                    // Treat as empty deny list (defensive).
+                }
             }
             "description" => {
                 let v = value.trim_matches(|c| c == '"' || c == '\'');
@@ -295,5 +314,43 @@ mod tests {
         let p = parse_frontmatter(raw);
         assert_eq!(p.deny_tools, vec!["edit"]);
         assert_eq!(p.body, "body\n");
+    }
+
+    /// PERM-15: YAML block-form `deny_tools:` with indented `- name`
+    /// entries must NOT silently produce an empty list. Plan-mode
+    /// prompts using block form would otherwise fail open.
+    #[test]
+    fn block_form_deny_tools_is_parsed() {
+        let raw = "\
+---
+deny_tools:
+  - edit
+  - write
+  - apply_patch
+  - bash
+description: Plan mode
+---
+body
+";
+        let p = parse_frontmatter(raw);
+        assert_eq!(p.deny_tools, vec!["edit", "write", "apply_patch", "bash"]);
+        assert_eq!(p.description.as_deref(), Some("Plan mode"));
+    }
+
+    /// PERM-15: Block form with quoted entries and extra whitespace.
+    #[test]
+    fn block_form_deny_tools_with_quotes() {
+        let raw = "\
+---
+deny_tools:
+  - edit
+  - \"write\"
+  - 'bash'
+description: Mixed quotes
+---
+body
+";
+        let p = parse_frontmatter(raw);
+        assert_eq!(p.deny_tools, vec!["edit", "write", "bash"]);
     }
 }

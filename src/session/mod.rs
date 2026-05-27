@@ -622,9 +622,25 @@ impl Session {
             return Err(format!("unknown entry id: {}", new_leaf_id));
         }
         // Walk back to root, collecting IDs.
+        // SESS-1: cycle detection. If entries contain a cycle
+        // (malformed JSON, tampered file, or a bug), the walk
+        // loops forever. Cap hops and use a visited set.
         let mut chain: Vec<CompactString> = Vec::new();
         let mut cursor: Option<CompactString> = Some(new_leaf_id.clone());
+        let mut visited = std::collections::HashSet::new();
+        let mut hops = 0usize;
+        const MAX_HOPS: usize = 10_000;
         while let Some(id) = cursor {
+            if hops >= MAX_HOPS {
+                return Err(format!(
+                    "cycle or excessive depth in session tree (>{} hops from leaf {})",
+                    MAX_HOPS, new_leaf_id
+                ));
+            }
+            hops += 1;
+            if !visited.insert(id.clone()) {
+                return Err(format!("cycle detected in session tree at node {}", id));
+            }
             let node = self
                 .tree
                 .entries

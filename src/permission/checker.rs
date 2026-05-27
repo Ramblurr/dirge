@@ -41,6 +41,13 @@ pub struct PermissionChecker {
     cwd_allow_pattern: Option<String>,
     session_allowlist: Vec<(String, Pattern)>,
     recent_calls: VecDeque<(String, String)>,
+    /// PERM-1: per-key repeat counter. Tracks how many times each
+    /// (tool, input) pair has been seen. Uses a HashMap keyed by
+    /// "{tool}\x00{input}" so the lookup is O(1) instead of scanning
+    /// the FIFO window. Counts persist until evicted by the FIFO
+    /// ring (window 32) — a 14-call decoy-gap attack can't flush a
+    /// specific key because the ring is 2× the old window.
+    repeat_counts: HashMap<String, u32>,
     mode: SecurityMode,
     /// Tools denied by the currently-active prompt's frontmatter
     /// `deny_tools` list. Enforced at the top of every `check` /
@@ -325,7 +332,8 @@ impl PermissionChecker {
             working_dir_canonical,
             cwd_allow_pattern,
             session_allowlist: Vec::new(),
-            recent_calls: VecDeque::with_capacity(16),
+            recent_calls: VecDeque::with_capacity(32),
+            repeat_counts: HashMap::new(),
             mode,
             prompt_deny_tools: Vec::new(),
         }
@@ -432,13 +440,12 @@ impl PermissionChecker {
         };
 
         if action != Action::Deny {
-            self.track_doom_loop(tool, input);
+            // PERM-2: check doom-loop BEFORE tracking the current
+            // call. The counter reflects previous identical calls
+            // only — the current call doesn't count itself.
             if self.is_doom_loop(tool, input) {
                 match self.doom_loop_action {
                     Action::Deny => {
-                        // Name the call so the user can identify and
-                        // either fix the LLM's behavior or relax the
-                        // pattern.
                         let preview: String = input.chars().take(60).collect();
                         return CheckResult::Denied(format!(
                             "Doom loop: repeated identical {} call ({}{})",
@@ -455,6 +462,7 @@ impl PermissionChecker {
                     Action::Allow => {}
                 }
             }
+            self.track_doom_loop(tool, input);
         }
 
         match action {
@@ -718,6 +726,7 @@ impl PermissionChecker {
         //      over the audit flagged. Pi rebuilds the session
         //      on cwd change.
         self.recent_calls.clear();
+        self.repeat_counts.clear();
         self.session_allowlist.clear();
     }
 
@@ -769,20 +778,33 @@ impl PermissionChecker {
     }
 
     fn track_doom_loop(&mut self, tool: &str, input: &str) {
+        let key = format!("{}\x00{}", tool, input);
+        let count = self.repeat_counts.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
+        // Maintain a FIFO ring for TTL-based eviction.
+        // PERM-1: window 32 (was 16) so a 14-call decoy gap
+        // can't flush a specific key before it repeats.
         self.recent_calls
             .push_back((tool.to_string(), input.to_string()));
-        if self.recent_calls.len() > 16 {
-            self.recent_calls.pop_front();
+        if self.recent_calls.len() > 32 {
+            if let Some((t, i)) = self.recent_calls.pop_front() {
+                let old_key = format!("{}\x00{}", t, i);
+                if let Some(c) = self.repeat_counts.get_mut(&old_key) {
+                    *c = c.saturating_sub(1);
+                    if *c == 0 {
+                        self.repeat_counts.remove(&old_key);
+                    }
+                }
+            }
         }
     }
 
     fn is_doom_loop(&self, tool: &str, input: &str) -> bool {
-        let count = self
-            .recent_calls
-            .iter()
-            .filter(|(t, i)| t == tool && i == input)
-            .count();
-        count >= 3
+        let key = format!("{}\x00{}", tool, input);
+        // PERM-2: threshold is 2 (blocks on the 3rd identical call).
+        // `track_doom_loop` fires AFTER this check, so the counter
+        // reflects previous calls only — not the current one.
+        self.repeat_counts.get(&key).copied().unwrap_or(0) >= 2
     }
 }
 

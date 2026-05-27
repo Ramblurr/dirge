@@ -352,6 +352,16 @@ async fn check_bash_segments(
             // Force a prompt on the WHOLE command so the user
             // confirms the unfamiliar shape. Maki does the same
             // (maki-agent/src/permissions.rs:441-455).
+            //
+            // PERM-6: even when complex, still extract redirect
+            // targets and mutation paths so that `echo "$(rm /etc/passwd)"`
+            // doesn't slip through when the outer `echo` is allowed.
+            for target in bash::extract_redirect_targets(command) {
+                enforce(permission, ask_tx, "write", Scope::PathResolve(&target)).await?;
+            }
+            for path in bash::extract_mutation_paths(command) {
+                enforce(permission, ask_tx, "write", Scope::PathResolve(&path)).await?;
+            }
             enforce(permission, ask_tx, "bash", Scope::Raw(command)).await?;
             return Ok(());
         }
@@ -426,7 +436,12 @@ async fn check_bash_segments(
             || command.contains('`')
             || command.contains("<(")
             || command.contains(">(")
-            || command.contains("$'");
+            || command.contains("$'")
+            // PERM-5: heredocs (`<<` / `<<-`). The heredoc body
+            // is invisible to `quote_aware_split` — the redirect
+            // operator is one token but the body starting on the
+            // next line can contain any command. Treat as complex.
+            || command.contains("<<");
         if has_substitution {
             enforce(permission, ask_tx, "bash", Scope::Raw(command)).await?;
             return Ok(());

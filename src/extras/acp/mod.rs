@@ -310,7 +310,10 @@ async fn run_prompt(
                 // message from a plugin doesn't break the structured
                 // stream.
             }
-            AgentEvent::TurnStart { .. } | AgentEvent::TurnEnd { .. } => {}
+            AgentEvent::TurnStart { .. }
+            | AgentEvent::TurnEnd { .. }
+            | AgentEvent::ContextCompacted { .. }
+            | AgentEvent::RetryNotice { .. } => {}
             AgentEvent::UserMessage { .. } => {
                 // Steering-injected user message mid-run — ACP
                 // doesn't support mid-stream interjection; drop.

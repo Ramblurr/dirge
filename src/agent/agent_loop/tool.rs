@@ -23,6 +23,13 @@ use super::types::ToolExecutionMode;
 /// (Ctrl+C / `/quit` / Esc-Esc) and every tool currently running
 /// observes the same flag.
 ///
+/// LOOP-4: separate `interjected` flag from `cancelled`. The
+/// `cancelled` flag is for hard aborts (Ctrl+C, kill signal) —
+/// tools see it and return synthetic errors. The `interjected`
+/// flag is for graceful interjection (user hits Esc) — it stops
+/// the loop at the next turn boundary but lets in-flight tools
+/// complete normally. Tools never check `is_interjected()`.
+///
 /// Implemented as `Arc<AtomicBool>` rather than `tokio_util`'s
 /// `CancellationToken` so we don't pull in a new dep for the
 /// trivial case. If we ever need `.cancelled().await` (notifier
@@ -30,21 +37,40 @@ use super::types::ToolExecutionMode;
 /// upgrade to `tokio_util::sync::CancellationToken` in a later
 /// phase.
 #[derive(Debug, Clone, Default)]
-pub struct AbortSignal(Arc<AtomicBool>);
+pub struct AbortSignal {
+    cancelled: Arc<AtomicBool>,
+    interjected: Arc<AtomicBool>,
+}
 
 impl AbortSignal {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            interjected: Arc::new(AtomicBool::new(false)),
+        }
     }
-    /// Trigger cancellation. Idempotent — subsequent calls are
-    /// no-ops.
+    /// Trigger hard cancellation. Idempotent — subsequent calls
+    /// are no-ops. Tools poll `is_cancelled()` and bail out
+    /// cleanly when true.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::SeqCst);
     }
-    /// Read the current state. Tools call this from inside their
-    /// `execute` loops.
+    /// Read the cancelled state. Tools call this from inside
+    /// their `execute` loops.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst)
+    }
+    /// LOOP-4: Trigger graceful interjection. Idempotent. The
+    /// loop checks this at turn boundaries and stops accepting
+    /// new turns, but in-flight tools complete normally. Tools
+    /// never check this flag — they only check `is_cancelled()`.
+    pub fn interject(&self) {
+        self.interjected.store(true, Ordering::SeqCst);
+    }
+    /// LOOP-4: Read the interjected state. The loop checks this
+    /// at turn boundaries. Tools never call this.
+    pub fn is_interjected(&self) -> bool {
+        self.interjected.load(Ordering::SeqCst)
     }
 }
 

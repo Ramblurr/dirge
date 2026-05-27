@@ -123,32 +123,172 @@ fn validate_url_host_safety(url: &str) -> Result<(), String> {
         ));
     }
     // IP literal check. Both IPv4 dotted-quad and IPv6 bracketed.
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let blocked = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()       // 127.0.0.0/8
-                    || v4.is_private() // 10/172.16/192.168
-                    || v4.is_link_local() // 169.254/16 — AWS metadata
-                    || v4.is_unspecified() // 0.0.0.0
-                    || v4.octets()[0] >= 240 // class E + multicast
-                    || v4.is_broadcast()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
-                // unique-local fc00::/7
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                // link-local fe80::/10
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
-        if blocked {
-            return Err(format!(
-                "webfetch refused {url:?}: IP {ip} is private/loopback/link-local. \
-                 Set DIRGE_WEBFETCH_ALLOW_PRIVATE=1 to allow this."
-            ));
+    // Also handles alternative IPv4 notations (decimal, octal, hex)
+    // that std::net::IpAddr doesn't parse — e.g. `http://2852039166/`
+    // (decimal 127.0.0.1) or `http://0x7f.0.0.1/`.
+    let is_blocked_ip = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        is_private_or_loopback(ip)
+    } else {
+        // Try alternative IPv4 notations.
+        match parse_alt_ipv4(host) {
+            Some(octets) => is_private_ipv4(octets),
+            None => false,
         }
+    };
+    if is_blocked_ip {
+        return Err(format!(
+            "webfetch refused {url:?}: host {host} resolves to a private/loopback/link-local address. \
+             Set DIRGE_WEBFETCH_ALLOW_PRIVATE=1 to allow this."
+        ));
     }
     Ok(())
+}
+
+/// Check whether a parsed `IpAddr` is a private/loopback/link-local address.
+fn is_private_or_loopback(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.octets()[0] >= 240 // class E + multicast
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                // IPv4-mapped IPv6: ::ffff:x.x.x.x
+                // segments[0..5] are all zero, segments[5] is 0xffff,
+                // the last 32 bits encode an IPv4 address.
+                // TOOL-1: explicit check so ::ffff:127.0.0.1 is blocked.
+                || is_ipv4_mapped_ipv6(v6)
+        }
+    }
+}
+
+/// Check whether a V6 address is an IPv4-mapped address
+/// (e.g. ::ffff:127.0.0.1) and if so, whether the embedded
+/// IPv4 address is private/loopback.
+/// TOOL-1: SSRF bypass — std::net::Ipv6Addr doesn't expose
+/// `to_ipv4_mapped()` in stable Rust, so we check the segment
+/// pattern manually.
+fn is_ipv4_mapped_ipv6(v6: std::net::Ipv6Addr) -> bool {
+    let segs = v6.segments();
+    // IPv4-mapped: first 80 bits are zero, next 16 bits are 0xffff.
+    if segs[0] == 0 && segs[1] == 0 && segs[2] == 0
+        && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff
+    {
+        // The last 32 bits are the IPv4 address.
+        let v4_bytes = v6.octets();
+        let octets = [v4_bytes[12], v4_bytes[13], v4_bytes[14], v4_bytes[15]];
+        return is_private_ipv4(octets);
+    }
+    false
+}
+
+/// Check whether 4 octets represent a private/loopback address.
+fn is_private_ipv4(octets: [u8; 4]) -> bool {
+    match octets {
+        // Loopback: 127.0.0.0/8
+        [127, _, _, _] => true,
+        // Private: 10.0.0.0/8
+        [10, _, _, _] => true,
+        // Private: 172.16.0.0/12
+        [172, b, _, _] => (16..=31).contains(&b),
+        // Private: 192.168.0.0/16
+        [192, 168, _, _] => true,
+        // Link-local: 169.254.0.0/16
+        [169, 254, _, _] => true,
+        // Unspecified
+        [0, 0, 0, 0] => true,
+        // Class E + multicast (240+)
+        [a, _, _, _] => a >= 240,
+        _ => false,
+    }
+}
+
+/// Parse alternative IPv4 notations that `std::net::IpAddr` rejects:
+/// - Decimal: `http://2852039166/` → 127.0.0.1
+/// - Hex (no dots): `http://0xa9fea9fe/` → 169.254.169.254
+/// - Octal: `http://0177.0.0.1/` → 127.0.0.1
+/// - Hex (dotted): `http://0x7f.0.0.1/` → 127.0.0.1
+/// - Mixed: `http://0x7f.0.0x1/` → 127.0.0.1
+fn parse_alt_ipv4(s: &str) -> Option<[u8; 4]> {
+    // TOOL-1: hex-without-dots — e.g. "0xa9fea9fe"
+    // std::net::IpAddr rejects hex literals without dots, but
+    // many HTTP libraries resolve them. Parse as a single u32.
+    // Only trigger when the ENTIRE string is a hex number (no dots,
+    // no colons — those fall through to dotted-quad or IPv6 parsing).
+    let lower = s.to_ascii_lowercase();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        if !hex.contains('.') && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(n) = u32::from_str_radix(hex, 16) {
+                return Some([
+                    (n >> 24) as u8,
+                    (n >> 16) as u8,
+                    (n >> 8) as u8,
+                    n as u8,
+                ]);
+            }
+        }
+        // Don't return None here — the "0x" prefix on a dotted-quad
+        // (e.g. "0x7f.0.0.1") falls through to per-octet parsing below.
+    }
+    // Try pure-decimal (no dots): e.g. "2852039166" → 127.0.0.1
+    if !s.contains('.') && s.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(n) = s.parse::<u64>() {
+            if n <= u32::MAX as u64 {
+                return Some([
+                    (n >> 24) as u8,
+                    (n >> 16) as u8,
+                    (n >> 8) as u8,
+                    n as u8,
+                ]);
+            }
+        }
+        return None;
+    }
+    // Try dotted-quad with per-octet parsing (handles octal, hex, mixed).
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        // Not a dotted-quad — let std::net handle it.
+        return None;
+    }
+    // Check if this is a normal all-decimal dotted-quad (no leading zeros).
+    // std::net::IpAddr handles those fine.
+    let all_simple_decimal = parts.iter().all(|p| {
+        !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit())
+            && (p.len() == 1 || !p.starts_with('0'))
+    });
+    if all_simple_decimal {
+        return None;
+    }
+    // Per-octet parsing for non-standard notations.
+    let mut octets = [0u8; 4];
+    for (i, part) in parts.iter().enumerate() {
+        octets[i] = parse_alt_octet(part)?;
+    }
+    Some(octets)
+}
+
+/// Parse a single octet in decimal, hex (0x…), or octal (0…).
+fn parse_alt_octet(s: &str) -> Option<u8> {
+    if s.is_empty() {
+        return None;
+    }
+    if s.starts_with("0x") || s.starts_with("0X") {
+        u8::from_str_radix(&s[2..], 16).ok()
+    } else if s.starts_with('0') && s.len() > 1 {
+        // Leading zero → octal (e.g. "0177" = 127)
+        u8::from_str_radix(s, 8).ok()
+    } else {
+        s.parse::<u8>().ok()
+    }
 }
 
 async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<String, String> {
@@ -534,5 +674,74 @@ mod tests {
         assert!(md.contains("emph"));
         assert!(!md.contains("<strong>"));
         assert!(!md.contains("<em>"));
+    }
+
+    // ============================================================
+    // TOOL-1: SSRF defenses against alternative IPv4 notations
+    // ============================================================
+
+    #[test]
+    fn decimal_ipv4_loopback_is_blocked() {
+        // 2130706433 = 127.0.0.1 in decimal
+        assert!(validate_url_host_safety("http://2130706433/").is_err());
+    }
+
+    #[test]
+    fn decimal_ipv4_private_is_blocked() {
+        // 167772160 = 10.0.0.0 in decimal
+        assert!(validate_url_host_safety("http://167772160/").is_err());
+    }
+
+    #[test]
+    fn hex_ipv4_loopback_is_blocked() {
+        assert!(validate_url_host_safety("http://0x7f.0.0.1/").is_err());
+    }
+
+    #[test]
+    fn octal_ipv4_loopback_is_blocked() {
+        assert!(validate_url_host_safety("http://0177.0.0.1/").is_err());
+    }
+
+    #[test]
+    fn mixed_hex_octal_ipv4_is_blocked() {
+        assert!(validate_url_host_safety("http://0x7f.0.0.0x1/").is_err());
+    }
+
+    #[test]
+    fn normal_public_ip_passes() {
+        assert!(validate_url_host_safety("https://93.184.216.34/").is_ok());
+    }
+
+    /// TOOL-1: hex-without-dots — http://0xa9fea9fe/ = 169.254.169.254
+    /// (link-local, AWS IMDS metadata endpoint). std::net::IpAddr
+    /// rejects this format, but many HTTP stacks resolve it.
+    #[test]
+    fn hex_without_dots_link_local_is_blocked() {
+        // 0xa9fea9fe = 169.254.169.254 (link-local)
+        assert!(validate_url_host_safety("http://0xa9fea9fe/").is_err());
+    }
+
+    #[test]
+    fn hex_without_dots_loopback_is_blocked() {
+        // 0x7f000001 = 127.0.0.1
+        assert!(validate_url_host_safety("http://0x7f000001/").is_err());
+    }
+
+    /// TOOL-1: IPv4-mapped IPv6 — http://[::ffff:127.0.0.1]/
+    /// std::net parses this but is_private_or_loopback only checked
+    /// the V6 flags (not the embedded V4 address).
+    #[test]
+    fn ipv4_mapped_ipv6_loopback_is_blocked() {
+        assert!(validate_url_host_safety("http://[::ffff:127.0.0.1]/").is_err());
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_private_is_blocked() {
+        assert!(validate_url_host_safety("http://[::ffff:10.0.0.1]/").is_err());
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_public_passes() {
+        assert!(validate_url_host_safety("https://[::ffff:93.184.216.34]/").is_ok());
     }
 }

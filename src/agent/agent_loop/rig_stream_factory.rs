@@ -763,6 +763,9 @@ mod tests {
                 StreamEvent::Error { error } => {
                     panic!("unexpected error: {error}");
                 }
+                StreamEvent::Retry { .. } => {
+                    panic!("unexpected retry event in non-retried stream");
+                }
             });
         }
         // Expect at minimum Start + Done. No Error.

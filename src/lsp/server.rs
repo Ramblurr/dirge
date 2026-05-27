@@ -43,6 +43,14 @@ pub fn nearest_root(
     let stop_at = stop_at.canonicalize().unwrap_or_else(|_| stop_at.into());
 
     let mut cursor = start.canonicalize().unwrap_or_else(|_| start.into());
+    // EXT-7: assert file is a descendant of stop_at BEFORE walking.
+    // If the file lives outside the worktree (e.g. a symlink to /etc),
+    // the loop would walk past stop_at all the way to `/`, picking
+    // up the nearest Cargo.toml it finds. Guard: cursor must start
+    // with stop_at as prefix; otherwise bail immediately.
+    if !cursor.starts_with(&stop_at) {
+        return None;
+    }
     loop {
         for marker in exclude_markers {
             if cursor.join(marker).exists() {

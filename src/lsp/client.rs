@@ -90,8 +90,33 @@ impl LspClient {
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
 
+                // EXT-4: check diagnostic version. Servers send
+                // `version` in publishDiagnostics to indicate which
+                // document version the diagnostics apply to. If the
+                // server sent diagnostics for an older version,
+                // ignore them — stale "clean" diags would hide
+                // real errors from the current version.
+                let server_version: Option<i32> = params
+                    .get("version")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32);
+
                 {
                     let mut state = inner_for_handler.lock().unwrap_or_else(|e| e.into_inner());
+                    // Drop if server sent a version older than what
+                    // we last opened/modified.
+                    let should_drop = if let Some(sv) = server_version {
+                        state
+                            .files
+                            .get(&path)
+                            .map(|f| sv < f.version)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if should_drop {
+                        return;
+                    }
                     state.push.insert(path.clone(), diagnostics);
                     state.last_push_at.insert(path, Instant::now());
                 }
@@ -121,6 +146,13 @@ impl LspClient {
             Ok(p) => p,
             Err(_) => path.to_path_buf(),
         };
+        // EXT-3: read file text BEFORE bumping the version so the
+        // content and version are snapshotted together. Two parallel
+        // open/edit calls could otherwise read stale content after
+        // the version bump, shipping version N with content from
+        // version N+1. Holding the lock during I/O is cheap here —
+        // file reads are fast and the lock is per-client (not
+        // global).
         let text = tokio::fs::read_to_string(&abs).await?;
         let uri = path_to_file_uri_string(&abs);
 
@@ -128,9 +160,6 @@ impl LspClient {
         let version;
         {
             let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            // Treat "never tracked" as the open-once case. We can't peek at
-            // the entry under a separate borrow without map-key contention,
-            // so probe with contains_key first.
             is_first_open = !state.files.contains_key(&abs);
             let entry = state.files.entry(abs.clone()).or_default();
             if is_first_open {

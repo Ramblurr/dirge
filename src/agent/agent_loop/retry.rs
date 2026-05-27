@@ -140,6 +140,13 @@ pub fn retrying_stream_fn(inner: StreamFn, policy: RecoveryPolicy) -> StreamFn {
                             // expected sequence.
                             yield evt;
                         }
+                        StreamEvent::Retry { .. } => {
+                            // Inner stream should never produce
+                            // Retry — only the outer retry loop
+                            // does. Treat as unexpected terminal.
+                            yield evt;
+                            return;
+                        }
                     }
                 }
 
@@ -161,6 +168,13 @@ pub fn retrying_stream_fn(inner: StreamFn, policy: RecoveryPolicy) -> StreamFn {
                             return;
                         }
                         attempts += 1;
+                        // PROV-2: surface the retry so the UI can
+                        // show a banner instead of freezing.
+                        yield StreamEvent::Retry {
+                            attempt: attempts as u32,
+                            delay_ms: backoff.as_millis() as u64,
+                            error: err_msg,
+                        };
                         // Loop continues — next outer iteration
                         // calls the inner stream again.
                     }
@@ -338,9 +352,10 @@ mod tests {
                 StreamEvent::Delta { .. } => "delta",
                 StreamEvent::Done { .. } => "done",
                 StreamEvent::Error { .. } => "error",
+                StreamEvent::Retry { .. } => "retry",
             })
             .collect();
-        assert_eq!(kinds, vec!["start", "done"]);
+        assert_eq!(kinds, vec!["retry", "start", "done"]);
     }
 
     /// Auth error → no retry, error passes through.

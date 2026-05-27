@@ -110,6 +110,11 @@ pub fn estimate_messages_tokens(messages: &[Value]) -> u64 {
 /// summarization. Replaces tool-result content > 500 chars
 /// with a 1-line summary of what the tool did.
 /// Port of Hermes's _prune_old_tool_results (context_compressor.py).
+///
+/// LOOP-7: matches both `role: "tool"` (heal/legacy shape) and
+/// `role: "toolResult"` (loop transcript shape). Also reads both
+/// `"tool_name"` (snake_case) and `"toolName"` (camelCase)
+/// for the tool name field.
 pub fn prune_tool_outputs(messages: &[Value], protect_tail: usize) -> Vec<Value> {
     let n = messages.len();
     if n <= protect_tail {
@@ -126,7 +131,7 @@ pub fn prune_tool_outputs(messages: &[Value], protect_tail: usize) -> Vec<Value>
                 return msg.clone();
             }
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-            if role != "tool" {
+            if role != "tool" && role != "toolResult" {
                 return msg.clone();
             }
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -136,6 +141,7 @@ pub fn prune_tool_outputs(messages: &[Value], protect_tail: usize) -> Vec<Value>
             // Summarize: 1-line tool result.
             let tool_name = msg
                 .get("tool_name")
+                .or_else(|| msg.get("toolName"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool");
             pruned += 1;
@@ -456,6 +462,29 @@ mod tests {
 
         // Tail protected.
         assert_eq!(pruned[4]["content"].as_str().unwrap(), "tail");
+    }
+
+    /// LOOP-7: loop transcripts use `role: "toolResult"` and
+    /// `"toolName"` (camelCase), not `role: "tool"` and `"tool_name"`.
+    /// Pruning must recognize both formats.
+    #[test]
+    fn prune_handles_tool_result_role_and_camelcase_toolname() {
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": "hello"}),
+            serde_json::json!({"role": "toolResult", "content": "x".repeat(1000), "toolName": "bash"}),
+            serde_json::json!({"role": "toolResult", "content": "small", "toolName": "grep"}),
+            serde_json::json!({"role": "user", "content": "tail"}),
+        ];
+
+        let pruned = prune_tool_outputs(&msgs, 2);
+        // The large toolResult should be summarized now (contains "[bash]" marker).
+        let summary = pruned[1]["content"].as_str().unwrap();
+        assert!(summary.contains("[bash]"), "should summarize bash tool result: {summary}");
+        // The summary should be MUCH shorter than the original 1000 chars
+        // (it contains the escaped command + metadata, but the 1000 x's are truncated).
+        assert!(summary.len() < 500, "summary should be under 500 chars: {}", summary.len());
+        // Small result in tail should be untouched.
+        assert_eq!(pruned[2]["content"].as_str().unwrap(), "small");
     }
 
     #[test]

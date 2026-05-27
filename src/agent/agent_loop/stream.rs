@@ -232,6 +232,21 @@ pub async fn stream_assistant_response(
                 final_message = Some((finalised, None));
                 break;
             }
+            StreamEvent::Retry {
+                attempt,
+                delay_ms,
+                error,
+            } => {
+                // PROV-2: surface the retry as a status event so
+                // the UI can show a banner instead of freezing.
+                let _ = emit
+                    .send(LoopEvent::RetryNotice {
+                        attempt,
+                        delay_ms,
+                        error,
+                    })
+                    .await;
+            }
         }
     }
 

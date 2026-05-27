@@ -583,6 +583,14 @@ pub async fn run_loop(
         }
         // INNER END
 
+        // LOOP-4: check for graceful interjection at the turn
+        // boundary. In-flight tools already completed normally
+        // (they never check `is_interjected()`). Stop here rather
+        // than starting a new turn or processing follow-ups.
+        if signal.is_interjected() {
+            break;
+        }
+
         // Pi lines 256-262: outer-loop follow-up poll.
         let follow_up = match &config.get_followup_messages {
             Some(get) => get().await,

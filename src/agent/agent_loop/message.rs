@@ -153,6 +153,16 @@ pub enum StreamEvent {
 
     /// Terminal: stream ended with a provider-side error.
     Error { error: String },
+
+    /// Non-terminal: the retry layer is about to re-attempt the
+    /// stream after sleeping. `attempt` is 1-indexed (this is the
+    /// N-th retry about to start). Consumers can surface a banner
+    /// so the user isn't staring at silence during backoff.
+    Retry {
+        attempt: u32,
+        delay_ms: u64,
+        error: String,
+    },
 }
 
 /// Token usage from the API response. Carried on the terminal
@@ -356,6 +366,16 @@ pub enum LoopEvent {
         tokens_before: u64,
         tokens_after: u64,
     },
+
+    /// PROV-2: the retry layer is about to re-attempt the stream.
+    /// Carries the attempt number (1-indexed), the backoff delay,
+    /// and the original error. The UI can show a banner instead
+    /// of freezing during the backoff.
+    RetryNotice {
+        attempt: u32,
+        delay_ms: u64,
+        error: String,
+    },
 }
 
 impl LoopEvent {
@@ -376,6 +396,7 @@ impl LoopEvent {
             LoopEvent::TurnStart => "turn_start",
             LoopEvent::TurnEnd { .. } => "turn_end",
             LoopEvent::ContextCompacted { .. } => "context_compacted",
+            LoopEvent::RetryNotice { .. } => "retry_notice",
         }
     }
 }

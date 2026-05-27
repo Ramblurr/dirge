@@ -83,6 +83,14 @@ pub fn atomic_write_sync(target: &Path, content: &[u8]) -> io::Result<()> {
     let result: io::Result<()> = (|| {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
+        // SESS-3: Session files contain user prompts, file contents,
+        // and command outputs — restrict to owner-only (0600).
+        // Only set on new files; existing file mode is preserved below.
+        #[cfg(unix)]
+        if prev_mode.is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
         f.write_all(content)?;
         // Best-effort fsync — non-fatal on filesystems that
         // don't support it (e.g. some networked mounts).

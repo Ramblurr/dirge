@@ -11,13 +11,25 @@ triggers:
 
 Systematic approach for porting Hermes Python features to dirge Rust.
 
-## Phase 1: Audit (1-2 hours)
+## Phase 0: PLAN_LEARNING.md Cross-Check (periodic, before starting new feature)
+
+PLAN_LEARNING.md goes stale fast — features get implemented but the plan isn't updated. Before working on any feature listed in the plan, cross-check:
 
 1. Read the PLAN_LEARNING.md section for the feature
-2. Read the Hermes reference file(s) in full — every line
-3. Read the corresponding dirge source — compare line by line
-4. Enumerate gaps with severity: CRITICAL (non-functional), HIGH (wrong), MEDIUM (incomplete), LOW (cosmetic)
-5. Document each gap with: Hermes line numbers, what Hermes does, what dirge does, why it matters
+2. Read the relevant dirge source file(s) to see what's actually implemented
+3. Read the Hermes reference file(s) to see the canonical behavior
+4. Mark gaps as: ✅ Fixed (already done), 🔴 Open (still needs work), 🟡 New (not in plan, found during cross-check)
+5. For 🔴 and 🟡 gaps, document: Hermes line numbers, what Hermes does, what dirge does, why it matters
+
+**Parallel Hermes reads:** Use background subagents (`task` with `background=true`) for reading large Hermes files. Cap is 4 in-flight subagents — check `task_status` before spawning more, and don't spawn replacement tasks while others are running. Failed subagents (e.g. filesystem access issues) are unhelpful — prefer inline reads for small files.
+
+**Gap severity levels:**
+- CRITICAL: non-functional (e.g. per-turn writes missing → session search useless)
+- HIGH: wrong behavior or missing major feature
+- MEDIUM: incomplete but functional
+- LOW: cosmetic, future optimization
+
+**Update PLAN_LEARNING.md after cross-check** — mark fixed gaps and add newly discovered ones so the next audit starts from accuracy.
 
 ## Phase 2: Architecture (30 min)
 

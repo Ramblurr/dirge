@@ -87,6 +87,13 @@ pub enum AgentEvent {
         prompt: CompactString,
         error: CompactString,
     },
+    /// Context was compacted mid-run — old tool results pruned,
+    /// session rotated. The UI persists the split via session DB.
+    ContextCompacted {
+        new_session_id: CompactString,
+        tokens_before: u64,
+        tokens_after: u64,
+    },
     Done {
         response: CompactString,
         tokens: u64,
@@ -139,6 +146,15 @@ pub enum AgentEvent {
     /// processes it at a turn boundary.
     UserMessage {
         content: CompactString,
+    },
+    /// The retry layer is about to re-attempt a stream request after
+    /// a transient error. `attempt` is 1-indexed (the Nth retry).
+    /// PROV-2: consumers should surface a temporary banner so the
+    /// user isn't staring at silence during backoff.
+    RetryNotice {
+        attempt: u32,
+        delay_ms: u64,
+        error: CompactString,
     },
 }
 

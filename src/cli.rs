@@ -199,12 +199,23 @@ pub struct Cli {
     )]
     pub loop_run: Option<String>,
 
-    #[arg(
-        long = "auto-confirm",
+    #[arg(long = "auto-confirm",
         value_enum,
         help = "Auto-respond to plugin harness/confirm and harness/select dialogs in headless modes. Without this flag, dialogs hang waiting for an interactive UI."
     )]
     pub auto_confirm: Option<AutoConfirmMode>,
+
+    /// EXT-6: lock the session to a specific prompt at launch.
+    /// Equivalent to `/prompt <name>` but applied before the first
+    /// turn. Takes precedence over the config `default_prompt`.
+    /// Primarily useful in ACP mode (`--server`) where no
+    /// interactive `/prompt` slash command is available.
+    #[arg(
+        long = "prompt",
+        value_name = "NAME",
+        help = "Lock the session to a specific prompt at launch (e.g. --prompt plan)"
+    )]
+    pub prompt: Option<String>,
 
     #[arg(help = "Prompt message(s)")]
     pub message: Vec<String>,

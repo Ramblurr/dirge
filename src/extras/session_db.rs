@@ -619,9 +619,9 @@ impl SessionDb {
     /// wins (compression splits keep their end_reason).
     /// Port of Hermes's `end_session()` (hermes_state.py:732-748).
     ///
-    /// Currently test-only. Will be wired for compression splits
-    /// and explicit user exit paths.
-    #[cfg(test)]
+    /// Mark a session as ended with the given reason.
+    /// No-ops when the session is already ended — the first end_reason
+    /// wins (compression splits keep their end_reason).
     pub fn end_session(&self, session_id: &str, end_reason: &str) -> Result<(), String> {
         self.conn
             .execute(

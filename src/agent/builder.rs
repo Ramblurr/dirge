@@ -156,12 +156,13 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             Err(_) => None,
         };
     let skill_manager = crate::extras::skills::manager::SkillManager::new(&paths);
-    let usage_store = crate::extras::skills::usage::UsageStore::load(&paths).ok();
+    let mut usage_store = crate::extras::skills::usage::UsageStore::load(&paths).ok();
 
     // Inject available project skills into the preamble so the
     // model knows what procedural knowledge exists for this project.
     // Skills are listed with name + description; the model loads
     // full content on demand via the `skill` tool.
+    // Bumps view counters for each listed skill (best-effort).
     match skill_manager.list() {
         Ok(names) if !names.is_empty() => {
             let mut skill_lines = Vec::new();
@@ -187,6 +188,12 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 for line in &skill_lines {
                     preamble.push_str(line);
                     preamble.push('\n');
+                }
+                // Bump view counters for each skill listed in preamble (best-effort).
+                if let Some(ref mut u) = usage_store {
+                    for name in &names {
+                        u.record_view(name);
+                    }
                 }
             }
         }

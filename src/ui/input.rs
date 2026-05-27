@@ -380,6 +380,21 @@ impl InputEditor {
         if cleaned.is_empty() {
             return;
         }
+        // UI-6: reject pastes over ~1MB. Multi-MB pastes accumulate in
+        // the buffer, allocate for line wrapping, and bloat re-renders.
+        // The terminal is for text, not binary blobs — truncate with a
+        // visible warning so the user knows.
+        const MAX_PASTE_BYTES: usize = 1_048_576; // 1 MB
+        if cleaned.len() > MAX_PASTE_BYTES {
+            let truncated: String = cleaned.chars().take(MAX_PASTE_BYTES).collect();
+            self.insert_str(&truncated);
+            // Append a truncation notice so it's clear the paste was cut.
+            self.insert_str(&format!(
+                "\n\n[paste truncated: {} chars → 1 MB limit]",
+                cleaned.len()
+            ));
+            return;
+        }
         let line_count = cleaned.matches('\n').count() + 1;
         if line_count < PASTE_COLLAPSE_LINES {
             self.insert_str(&cleaned);

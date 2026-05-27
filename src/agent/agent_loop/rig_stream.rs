@@ -456,6 +456,7 @@ mod tests {
             StreamEvent::Delta { phase, .. } => format!("delta:{phase:?}"),
             StreamEvent::Done { reason, .. } => format!("done:{reason:?}"),
             StreamEvent::Error { .. } => "error".into(),
+            StreamEvent::Retry { .. } => "retry".into(),
         }
     }
 
@@ -949,6 +950,7 @@ mod tests {
                 StreamEvent::Delta { .. } => "delta",
                 StreamEvent::Done { .. } => "done",
                 StreamEvent::Error { .. } => "error",
+                StreamEvent::Retry { .. } => "retry",
             })
             .collect();
         assert_eq!(kinds, vec!["start", "error"]);

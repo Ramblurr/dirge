@@ -34,14 +34,17 @@ pub const DEFAULT_MAX_RESULT_CHARS: usize = 40_000;
 // ================================================================
 
 /// Shrink any tool-result message whose content string exceeds
-/// `max_chars`. Only `role: "tool"` messages are touched.
+/// `max_chars`. Matches both `role: "tool"` (heal shape) and
+/// `role: "toolResult"` (loop transcript shape).
+/// LOOP-7: added toolResult role support.
 pub fn shrink_oversized_tool_results(messages: &[Value], max_chars: usize) -> HealResult {
     let mut healed_count = 0usize;
     let mut chars_saved = 0usize;
     let out: Vec<Value> = messages
         .iter()
         .map(|msg| {
-            if msg.get("role").and_then(|r| r.as_str()) != Some("tool") {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "tool" && role != "toolResult" {
                 return msg.clone();
             }
             let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
@@ -150,7 +153,7 @@ pub fn fix_tool_call_pairing(messages: &[Value]) -> (Vec<Value>, usize, usize) {
                 }
             }
             out.push(msg.clone());
-        } else if role == "tool" {
+        } else if role == "tool" || role == "toolResult" {
             dropped_stray_tools += 1;
         } else {
             out.push(msg.clone());

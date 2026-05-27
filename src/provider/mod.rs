@@ -96,6 +96,16 @@ pub fn resolve_provider_info(
         .or_else(|| custom_providers.get(&lower))
     {
         let kind = parse_provider(&custom.provider_type)?;
+        if let Err(err) =
+            validate_custom_provider(name, &custom.base_url, custom.allow_insecure)
+        {
+            tracing::error!(
+                target: "dirge::provider",
+                "{err}"
+            );
+            eprintln!("error: {err}");
+            return None;
+        }
         return Some(ProviderInfo {
             kind,
             base_url: Some(custom.base_url.clone()),
@@ -107,6 +117,16 @@ pub fn resolve_provider_info(
     // in this process.
     if let Some(custom) = plugin_provider(name).or_else(|| plugin_provider(&lower)) {
         let kind = parse_provider(&custom.provider_type)?;
+        if let Err(err) =
+            validate_custom_provider(name, &custom.base_url, custom.allow_insecure)
+        {
+            tracing::error!(
+                target: "dirge::provider",
+                "{err}"
+            );
+            eprintln!("error: {err}");
+            return None;
+        }
         return Some(ProviderInfo {
             kind,
             base_url: Some(custom.base_url),
@@ -119,6 +139,48 @@ pub fn resolve_provider_info(
         base_url: None,
         api_key_env: None,
     })
+}
+
+/// Built-in provider names — custom/plugin providers are rejected
+/// if they collide with one of these. Protects against a malicious
+/// plugin that registers "openai" to silently intercept credentials.
+const BUILTIN_PROVIDER_NAMES: &[&str] = &[
+    "openai", "anthropic", "gemini", "google",
+    "deepseek", "glm", "zhipu", "ollama",
+    "openrouter", "custom",
+];
+
+/// Validate a custom/plugin provider's configuration.
+/// - Rejects names that collide with built-in providers.
+/// - Rejects non-https base_url unless `allow_insecure: true`.
+fn validate_custom_provider(
+    name: &str,
+    base_url: &str,
+    allow_insecure: bool,
+) -> Result<(), String> {
+    let lower = name.to_ascii_lowercase();
+    if BUILTIN_PROVIDER_NAMES.iter().any(|b| b.eq_ignore_ascii_case(&lower)) {
+        return Err(format!(
+            "Custom provider '{}' collides with built-in provider name. \
+             Choose a different name.",
+            name
+        ));
+    }
+    // URL scheme validation: only https:// is safe by default.
+    // http:// sends plaintext over the network — every prompt,
+    // file content, and tool result is exposed. Only allow when
+    // the user explicitly opts in via `allow_insecure: true`,
+    // which is appropriate for local-only proxies (ollama, vllm).
+    if !allow_insecure && !base_url.starts_with("https://") {
+        return Err(format!(
+            "Custom provider '{}' has insecure base_url '{}'. \
+             Set allow_insecure: true in config.json if this is a \
+             local-only endpoint (e.g. ollama, vllm). All other \
+             http:// URLs send your data in plaintext.",
+            name, base_url
+        ));
+    }
+    Ok(())
 }
 
 /// Process-global map of plugin-registered providers, populated once
@@ -1308,5 +1370,78 @@ mod tests {
         // last turn is present.
         assert!(out.contains("turn 199"), "tail must be present: {out}");
         assert!(out.contains("turn 0"), "head must be present: {out}");
+    }
+
+    // ============================================================
+    // PROV-1: Custom-provider validation tests
+    // ============================================================
+
+    /// Custom provider with https base_url is accepted.
+    #[test]
+    fn custom_provider_https_is_allowed() {
+        let custom = std::collections::HashMap::from([(
+            "my-proxy".to_string(),
+            CustomProviderConfig {
+                provider_type: "custom".to_string(),
+                base_url: "https://my-proxy.example.com/v1".to_string(),
+                api_key_env: None,
+                allow_insecure: false,
+                stream_chunk_timeout_secs: None,
+            },
+        )]);
+        let result = resolve_provider_info("my-proxy", &custom);
+        assert!(result.is_some(), "https provider should resolve");
+    }
+
+    /// Custom provider with http base_url is rejected unless allow_insecure.
+    #[test]
+    fn custom_provider_http_rejected_without_allow_insecure() {
+        let custom = std::collections::HashMap::from([(
+            "bad-proxy".to_string(),
+            CustomProviderConfig {
+                provider_type: "custom".to_string(),
+                base_url: "http://bad-proxy.example.com/v1".to_string(),
+                api_key_env: None,
+                allow_insecure: false,
+                stream_chunk_timeout_secs: None,
+            },
+        )]);
+        let result = resolve_provider_info("bad-proxy", &custom);
+        assert!(result.is_none(), "http provider without allow_insecure should be rejected");
+    }
+
+    /// Custom provider with http base_url + allow_insecure: true is accepted.
+    #[test]
+    fn custom_provider_http_allowed_with_allow_insecure() {
+        let custom = std::collections::HashMap::from([(
+            "local-ollama".to_string(),
+            CustomProviderConfig {
+                provider_type: "custom".to_string(),
+                base_url: "http://localhost:11434/v1".to_string(),
+                api_key_env: None,
+                allow_insecure: true,
+                stream_chunk_timeout_secs: None,
+            },
+        )]);
+        let result = resolve_provider_info("local-ollama", &custom);
+        assert!(result.is_some(), "http provider with allow_insecure should be accepted");
+    }
+
+    /// Custom provider name colliding with built-in is rejected.
+    #[test]
+    fn custom_provider_builtin_name_collision_rejected() {
+        // Plugin tries to shadow "openai".
+        let custom = std::collections::HashMap::from([(
+            "openai".to_string(),
+            CustomProviderConfig {
+                provider_type: "custom".to_string(),
+                base_url: "https://evil.example.com/v1".to_string(),
+                api_key_env: None,
+                allow_insecure: false,
+                stream_chunk_timeout_secs: None,
+            },
+        )]);
+        let result = resolve_provider_info("openai", &custom);
+        assert!(result.is_none(), "builtin name collision should be rejected");
     }
 }

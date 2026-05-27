@@ -1870,7 +1870,13 @@ pub async fn handle_slash(
                     };
                     match result {
                         Ok(Some(text)) => {
-                            for line in text.lines() {
+                            // Strip ANSI escapes from plugin output to
+                            // prevent repaint/screen-manipulation attacks.
+                            let safe = crate::ui::ansi::strip_escapes(
+                                &text,
+                                crate::ui::ansi::StripPolicy::KEEP_NEWLINE,
+                            );
+                            for line in safe.lines() {
                                 renderer.write_line(line, c_agent())?;
                             }
                         }

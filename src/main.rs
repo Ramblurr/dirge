@@ -331,7 +331,10 @@ async fn main() -> anyhow::Result<()> {
     ui::theme::init(cfg.theme.as_deref().unwrap_or("phosphor"));
     let mut context = context::load(cli.resolve_no_context_files(&cfg));
 
-    let default_prompt = cfg.default_prompt.as_deref().unwrap_or("code");
+    let default_prompt = cli
+        .prompt
+        .as_deref()
+        .unwrap_or(cfg.default_prompt.as_deref().unwrap_or("code"));
     if let Some(p) = context.prompts.get(default_prompt) {
         context.current_prompt = Some(p.body.clone());
         context.current_prompt_name = Some(default_prompt.to_string());

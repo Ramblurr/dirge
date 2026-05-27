@@ -16,6 +16,13 @@ pub struct CustomProviderConfig {
     pub provider_type: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
+    /// Set to true to allow `http://` URLs (insecure). Default false —
+    /// only `https://` is accepted. Non-https endpoints send every
+    /// prompt, file content, and tool result in plaintext over the
+    /// network. Only enable for local-only proxies (ollama, vllm, etc.)
+    /// that are NOT reachable from other hosts.
+    #[serde(default)]
+    pub allow_insecure: bool,
     /// Per-provider override for the streaming chunk timeout. Same
     /// units / semantics as the top-level `stream_chunk_timeout_secs`
     /// but takes precedence for this specific provider. Useful when

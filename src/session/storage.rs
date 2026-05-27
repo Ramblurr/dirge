@@ -56,6 +56,15 @@ pub fn save_session(session: &Session) -> anyhow::Result<()> {
     validate_session_id(&session.id)?;
     let dir = session_dir();
     std::fs::create_dir_all(&dir)?;
+    // SESS-3: restrict session directory to owner-only (0700).
+    // Session files contain user prompts, file contents, and
+    // command outputs — other users on multi-user hosts should
+    // not be able to list session IDs.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     let path = dir.join(format!("{}.json", session.id));
     let json = serde_json::to_string_pretty(session)?;
 

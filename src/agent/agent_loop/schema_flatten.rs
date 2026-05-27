@@ -172,6 +172,13 @@ fn collect(
 /// an object so the deeper key can nest inside (the model sent both a
 /// leaf value and a subtree at the same path prefix).
 fn set_by_path(target: &mut serde_json::Map<String, Value>, path: Vec<&str>, value: Value) {
+    // LOOP-1: handle empty path gracefully — an adversarial flattened
+    // tool input can produce an empty path slice, which would
+    // underflow `path.len() - 1` below.
+    if path.is_empty() {
+        tracing::warn!("schema_flatten: set_by_path called with empty path — skipping");
+        return;
+    }
     let mut cur = target;
     let last = path.len() - 1;
     for (i, key) in path.iter().enumerate() {
@@ -188,10 +195,20 @@ fn set_by_path(target: &mut serde_json::Map<String, Value>, path: Vec<&str>, val
                 }
                 cur.insert(key.to_string(), Value::Object(serde_json::Map::new()));
             }
-            cur = cur
-                .get_mut(&key.to_string())
-                .and_then(|v| v.as_object_mut())
-                .expect("guaranteed object after check/insert");
+            // LOOP-1: replace the .expect with a graceful skip.
+            // If the key cannot be obtained as an object (race
+            // between the check and the get_mut, or an adversarial
+            // schema that inserts a non-object between our insert
+            // and read), skip instead of panicking.
+            cur = match cur.get_mut(&key.to_string()).and_then(|v| v.as_object_mut()) {
+                Some(obj) => obj,
+                None => {
+                    tracing::warn!(
+                        "schema_flatten: key \"{key}\" could not be resolved as object, skipping subtree"
+                    );
+                    return;
+                }
+            };
         }
     }
 }

@@ -108,11 +108,14 @@ impl LoopRunner {
     pub fn into_agent_runner(self) -> crate::agent::runner::AgentRunner {
         let (interject_tx, mut interject_rx) = mpsc::channel::<()>(64);
         let signal_for_bridge = self.signal.clone();
-        // Spawn a small bridge: first interject signal cancels
-        // the loop. Subsequent signals are no-ops (drained).
+        // Spawn a small bridge: first interject signal triggers
+        // a GRACEFUL interjection (LOOP-4). The loop stops at
+        // the next turn boundary; in-flight tools complete
+        // normally. Hard cancellation (Ctrl+C) uses signal.cancel()
+        // directly and is NOT routed through this channel.
         tokio::spawn(async move {
             if interject_rx.recv().await.is_some() {
-                signal_for_bridge.cancel();
+                signal_for_bridge.interject();
                 // Drain remaining signals so the UI's bounded
                 // channel doesn't backpressure on the second
                 // press.
@@ -885,6 +888,8 @@ mod tests {
             AgentEvent::Interjected { .. } => "Interjected",
             AgentEvent::CustomMessage { .. } => "CustomMessage",
             AgentEvent::UserMessage { .. } => "UserMessage",
+            AgentEvent::ContextCompacted { .. } => "ContextCompacted",
+            AgentEvent::RetryNotice { .. } => "RetryNotice",
         }
     }
 

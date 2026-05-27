@@ -243,7 +243,7 @@ impl Curator {
     }
 
     /// Move a skill to the `.archive/` directory.
-    fn archive_skill(&self, name: &str) -> Result<(), String> {
+    pub(crate) fn archive_skill(&self, name: &str) -> Result<(), String> {
         let src = self.paths.skills_dir().join(name);
         if !src.is_dir() {
             return Ok(());
