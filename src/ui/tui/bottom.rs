@@ -379,14 +379,15 @@ fn paint_overlay_box(
     // always shown.
     let sticky_len = sticky_last.len();
     let head_budget = inner_h.saturating_sub(sticky_len);
-    let head_to_show: Vec<&(String, crossterm::style::Color)>;
+
     let need_ellipsis = head_visual.len() > head_budget;
     let head_keep = if need_ellipsis {
         head_budget.saturating_sub(1)
     } else {
         head_budget
     };
-    head_to_show = head_visual.iter().take(head_keep).collect();
+    let head_to_show: Vec<&(String, crossterm::style::Color)> =
+        head_visual.iter().take(head_keep).collect();
 
     // Paint head rows LEFT-aligned with 1 leading space of padding.
     let mut row_idx = 0usize;

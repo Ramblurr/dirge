@@ -112,10 +112,10 @@ pub(super) async fn cmd_cd(ctx: &mut SlashCtx<'_>, text: &str) -> anyhow::Result
         Ok(()) => {
             let canonical = std::fs::canonicalize(&path).unwrap_or(path);
             ctx.session.working_dir = compact_str::CompactString::new(canonical.to_string_lossy());
-            if let Some(perm) = ctx.permission {
-                if let Ok(mut guard) = perm.lock() {
-                    guard.set_working_dir(&ctx.session.working_dir);
-                }
+            if let Some(perm) = ctx.permission
+                && let Ok(mut guard) = perm.lock()
+            {
+                guard.set_working_dir(&ctx.session.working_dir);
             }
             ctx.context.reload();
             let model = ctx.client.completion_model(ctx.session.model.to_string());

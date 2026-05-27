@@ -67,6 +67,10 @@ struct RecentEntry {
 ///
 /// Mutating calls clear prior read-only entries while still
 /// counting amongst themselves. Storm-exempt calls never trigger.
+// The `Option<Box<dyn Fn ...>>` predicate type is more readable inline
+// than aliased; both fields use the exact same shape so the lint's
+// "factor into a type" suggestion would just rename without clarifying.
+#[allow(clippy::type_complexity)]
 pub struct StormBreaker {
     window_size: usize,
     threshold: usize,
@@ -76,6 +80,7 @@ pub struct StormBreaker {
 }
 
 impl StormBreaker {
+    #[allow(clippy::type_complexity)]
     pub fn new(
         window_size: usize,
         threshold: usize,
@@ -104,10 +109,10 @@ impl StormBreaker {
         if name.is_empty() {
             return StormVerdict::pass();
         }
-        if let Some(ref exempt) = self.is_storm_exempt {
-            if exempt(call) {
-                return StormVerdict::pass();
-            }
+        if let Some(ref exempt) = self.is_storm_exempt
+            && exempt(call)
+        {
+            return StormVerdict::pass();
         }
         // serde_json::Map is a BTreeMap — key order is already
         // canonical. to_string produces compact form so integer/

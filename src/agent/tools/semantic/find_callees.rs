@@ -75,7 +75,7 @@ impl Tool for FindCalleesTool {
                 .read()
                 .map_err(|e| ToolError::Msg(format!("Index read-lock error: {e}")))?;
             idx.find_callees(&file_path, &args.name)
-                .map_err(|e| ToolError::Msg(e))?
+                .map_err(ToolError::Msg)?
         };
 
         if callees.is_empty() {

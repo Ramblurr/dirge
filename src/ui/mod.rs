@@ -534,9 +534,10 @@ pub async fn run_interactive(
                         _ => None,
                     };
                     if let Some(ev) = ev
-                        && user_tx_clone.blocking_send(ev).is_err() {
-                            break;
-                        }
+                        && user_tx_clone.blocking_send(ev).is_err()
+                    {
+                        break;
+                    }
                 }
                 Ok(event::Event::Paste(text)) => {
                     if user_tx_clone.blocking_send(UserEvent::Paste(text)).is_err() {
@@ -590,11 +591,12 @@ pub async fn run_interactive(
         // visible to the next keystroke.
         #[cfg(feature = "plugin")]
         if let Some(pm_arc) = crate::plugin::hook::global()
-            && let Ok(mut mgr) = pm_arc.try_lock() {
-                let metas = mgr.list_shortcuts();
-                drop(mgr);
-                plugin_shortcuts = crate::plugin::extension::parse_shortcuts(metas);
-            }
+            && let Ok(mut mgr) = pm_arc.try_lock()
+        {
+            let metas = mgr.list_shortcuts();
+            drop(mgr);
+            plugin_shortcuts = crate::plugin::extension::parse_shortcuts(metas);
+        }
 
         // Drain any pending plugin notifications and surface each as a
         // colored chat line. Done at loop top so notifications posted

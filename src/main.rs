@@ -574,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
                 //     `*.janet` contents are concatenated into one Janet
                 //     env (multi-file plugins)
                 let is_janet_file =
-                    path.is_file() && path.extension().map_or(false, |e| e == "janet");
+                    path.is_file() && path.extension().is_some_and(|e| e == "janet");
                 let is_plugin_dir = path.is_dir();
                 if !is_janet_file && !is_plugin_dir {
                     continue;
@@ -777,21 +777,20 @@ async fn main() -> anyhow::Result<()> {
         // honor it — surface a warning to stderr so the plugin
         // author can see why their model swap didn't take effect.
         #[cfg(feature = "plugin")]
-        if let Some(pm_arc) = plugin_manager.as_ref() {
-            if let Some(m) = pm_arc
+        if let Some(pm_arc) = plugin_manager.as_ref()
+            && let Some(m) = pm_arc
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take_pending_next_model()
-            {
-                let t = m.trim();
-                if !t.is_empty() {
-                    eprintln!(
-                        "[plugin] prepare-next-run requested model={} — \
+        {
+            let t = m.trim();
+            if !t.is_empty() {
+                eprintln!(
+                    "[plugin] prepare-next-run requested model={} — \
                         --print is single-shot; ignored. Use --loop or \
                         interactive mode for model swap.",
-                        t
-                    );
-                }
+                    t
+                );
             }
         }
         if !cli.no_session {

@@ -81,7 +81,7 @@ impl Tool for GetSymbolBodyTool {
                 .read()
                 .map_err(|e| ToolError::Msg(format!("Index read-lock error: {e}")))?;
             idx.get_symbol_body(&file_path, &args.name)
-                .map_err(|e| ToolError::Msg(e))?
+                .map_err(ToolError::Msg)?
         };
 
         Ok(format!(

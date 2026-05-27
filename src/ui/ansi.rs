@@ -147,11 +147,7 @@ pub fn strip_escapes(s: &str, policy: StripPolicy) -> String {
                 Some(']') => {
                     // OSC: ESC ]...BEL or ESC ]...ESC \
                     let mut n = 0;
-                    loop {
-                        let next = match chars.next() {
-                            Some(c) => c,
-                            None => break,
-                        };
+                    while let Some(next) = chars.next() {
                         if next == '\x07' {
                             break;
                         }

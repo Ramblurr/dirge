@@ -557,10 +557,9 @@ impl SessionDb {
             if let Err(e) = self
                 .conn
                 .execute(&format!("ALTER TABLE messages ADD COLUMN {col}"), [])
+                && !e.to_string().contains("duplicate column name")
             {
-                if !e.to_string().contains("duplicate column name") {
-                    return Err(format!("Migration v5 failed on {col}: {e}"));
-                }
+                return Err(format!("Migration v5 failed on {col}: {e}"));
             }
         }
         Ok(())

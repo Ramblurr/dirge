@@ -124,7 +124,7 @@ impl BrokenState {
         // footgun and keeps the same 1s → 2s → 4s → … → 10min
         // ladder.
         const CAP: std::time::Duration = std::time::Duration::from_secs(600);
-        let attempts = self.attempts.saturating_sub(1) as u32;
+        let attempts = self.attempts.saturating_sub(1);
         // Cap the exponent before the shift so the multiplication
         // can't overflow even if `attempts` becomes pathological.
         let mul = 1u64.checked_shl(attempts.min(20)).unwrap_or(u64::MAX);

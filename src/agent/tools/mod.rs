@@ -70,6 +70,7 @@ pub const MAX_FIND_RESULTS: usize = 200;
 ///     an MCP-exported tool with a colliding name.
 ///   - `context/prompts.rs` `deny_tools` validation — warns when a
 ///     prompt's frontmatter names something not in this set.
+///
 /// Previously these two sites maintained independent lists; review-
 /// batch #7 unified them so adding a new tool only requires one edit.
 pub const BUILTIN_TOOL_NAMES: &[&str] = &[

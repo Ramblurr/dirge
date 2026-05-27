@@ -269,10 +269,10 @@ fn backspace_range(s: &str, cursor: usize) -> Option<(usize, usize)> {
     if cursor == 0 {
         return None;
     }
-    if let Some((start, end, _)) = marker_containing(s, cursor.saturating_sub(1)) {
-        if cursor == end {
-            return Some((start, end));
-        }
+    if let Some((start, end, _)) = marker_containing(s, cursor.saturating_sub(1))
+        && cursor == end
+    {
+        return Some((start, end));
     }
     Some((prev_char_boundary(s, cursor), cursor))
 }
@@ -283,10 +283,10 @@ fn delete_range(s: &str, cursor: usize) -> Option<(usize, usize)> {
     if cursor >= s.len() {
         return None;
     }
-    if let Some((start, end, _)) = marker_containing(s, cursor + 1) {
-        if cursor == start {
-            return Some((start, end));
-        }
+    if let Some((start, end, _)) = marker_containing(s, cursor + 1)
+        && cursor == start
+    {
+        return Some((start, end));
     }
     Some((cursor, next_char_boundary(s, cursor)))
 }
@@ -305,12 +305,12 @@ fn marker_blocks(s: &str) -> Vec<(usize, usize, usize)> {
                 .position(|&b| b == PASTE_MARK as u8)
             {
                 let close = body_start + rel;
-                if let Ok(digits) = std::str::from_utf8(&bytes[body_start..close]) {
-                    if let Ok(idx) = digits.parse::<usize>() {
-                        out.push((start, close + 1, idx));
-                        i = close + 1;
-                        continue;
-                    }
+                if let Ok(digits) = std::str::from_utf8(&bytes[body_start..close])
+                    && let Ok(idx) = digits.parse::<usize>()
+                {
+                    out.push((start, close + 1, idx));
+                    i = close + 1;
+                    continue;
                 }
             }
         }
@@ -450,10 +450,11 @@ impl InputEditor {
         // Detect any marker block fully contained in the removed range and
         // free its stored body.
         for (mstart, mend, idx) in marker_blocks(&self.buffer) {
-            if mstart >= start && mend <= end {
-                if let Some(slot) = self.pastes.get_mut(idx) {
-                    *slot = None;
-                }
+            if mstart >= start
+                && mend <= end
+                && let Some(slot) = self.pastes.get_mut(idx)
+            {
+                *slot = None;
             }
         }
         self.buffer.replace_range(start..end, "");

@@ -152,10 +152,10 @@ pub fn load_plugin(
 pub struct PluginManager {
     hooks: HashMap<String, Vec<String>>,
     /// All Janet evaluation goes through this handle to the worker
-    /// thread. The handle is naturally `Send + Sync` (only an mpsc Sender
-    /// + JoinHandle inside) so no unsafe impl is needed — the previous
-    /// `unsafe impl Send for PluginManager` is gone now that Janet lives
-    /// on its own OS thread.
+    /// thread. The handle is naturally `Send + Sync` (only an mpsc
+    /// Sender + JoinHandle inside) so no unsafe impl is needed — the
+    /// previous `unsafe impl Send for PluginManager` is gone now that
+    /// Janet lives on its own OS thread.
     worker: Worker,
     /// One-shot consumer end of the dialog channel. Taken out by
     /// `take_dialog_rx` on first call so the UI can register it in its
@@ -253,6 +253,8 @@ impl PluginManager {
             // entirely. Plugin authors got no feedback on broken
             // hooks. opencode logged but didn't notify; pi notified.
             // dirge now does both.
+            let hook_escaped = escape_janet_string(hook);
+            let name_escaped = escape_janet_string(name);
             let code = format!(
                 r#"(try (do (def ctx {ctx}) ({fname} ctx))
                        ([err fib]
@@ -260,17 +262,15 @@ impl PluginManager {
                            (def sanitized
                              (harness/sanitize-hook-err
                                (string "[plugin] hook "
-                                       {hook_lit}
+                                       "\"{hook_escaped}\""
                                        "."
-                                       {fname_lit}
+                                       "\"{name_escaped}\""
                                        " errored: "
                                        err)))
                            (harness/push-hook-err sanitized)
                            (string "DIRGE_HOOK_ERR:" err))))"#,
                 ctx = context_janet,
                 fname = name,
-                hook_lit = format!("\"{}\"", escape_janet_string(hook)),
-                fname_lit = format!("\"{}\"", escape_janet_string(name)),
             );
             if let Ok(s) = self.eval(&code) {
                 if let Some(msg) = s.strip_prefix("DIRGE_HOOK_ERR:") {
@@ -466,6 +466,8 @@ impl PluginManager {
             // harness-block slot AFTER each plugin's hook returns
             // and break out early. Sharing `dispatch` would require
             // a flag parameter to either run all or stop-on-block.
+            let hook_escaped = escape_janet_string(hook);
+            let name_escaped = escape_janet_string(name);
             let code = format!(
                 r#"(try (do (def ctx {ctx}) ({fname} ctx))
                        ([err fib]
@@ -473,17 +475,15 @@ impl PluginManager {
                            (def sanitized
                              (harness/sanitize-hook-err
                                (string "[plugin] hook "
-                                       {hook_lit}
+                                       "\"{hook_escaped}\""
                                        "."
-                                       {fname_lit}
+                                       "\"{name_escaped}\""
                                        " errored: "
                                        err)))
                            (harness/push-hook-err sanitized)
                            (string "DIRGE_HOOK_ERR:" err))))"#,
                 ctx = context_janet,
                 fname = name,
-                hook_lit = format!("\"{}\"", escape_janet_string(hook)),
-                fname_lit = format!("\"{}\"", escape_janet_string(name)),
             );
             // Audit L6: tighter per-hook timeout than the default
             // EVAL_TIMEOUT (10 min). A hung `on-tool-start` used to
@@ -605,6 +605,7 @@ impl PluginManager {
         // exception, queue a `[plugin] command <name> errored: <err>`
         // notification AND return `DIRGE_HOOK_ERR:<msg>` so the Rust
         // side can also tracing::warn. Caller still sees Ok(None).
+        let handler_fn_escaped = escape_janet_string(handler_fn);
         let code = format!(
             r#"(try
                  (let [f (get (curenv) (symbol "{fname}"))]
@@ -616,14 +617,13 @@ impl PluginManager {
                      (def sanitized
                        (harness/sanitize-hook-err
                          (string "[plugin] command "
-                                 {fname_lit}
+                                 "{handler_fn_escaped}"
                                  " errored: "
                                  err)))
                      (harness/push-hook-err sanitized)
                      (string "DIRGE_HOOK_ERR:" err))))"#,
             fname = escaped_fn,
             args = escaped_args,
-            fname_lit = format!("\"{}\"", escape_janet_string(handler_fn)),
         );
         let result = self.eval(&code)?;
         if let Some(msg) = result.strip_prefix("DIRGE_HOOK_ERR:") {

@@ -257,9 +257,7 @@ fn looks_like_local_host(base_url: &str) -> bool {
         return false;
     };
     let after = &base_url[scheme_len..];
-    let end = after
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
-        .unwrap_or(after.len());
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
     let host_and_port = &after[..end];
     let host: &str = if let Some(rest) = host_and_port.strip_prefix('[')
         && let Some(end) = rest.find(']')
@@ -1358,6 +1356,9 @@ pub fn create_client(
     client::create_client(provider_name, api_key, providers)
 }
 
+// Arity matches `build_agent_inner` — explicit DI signature kept
+// grep-able, refactoring into a struct is tracked separately.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_agent(
     model: AnyModel,
     cli: &Cli,

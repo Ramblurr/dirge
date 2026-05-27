@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use include_dir::{Dir, include_dir};
 
@@ -257,7 +257,7 @@ pub fn regen() -> anyhow::Result<()> {
     copy_embedded(&dir)
 }
 
-fn copy_embedded(dest: &PathBuf) -> anyhow::Result<()> {
+fn copy_embedded(dest: &Path) -> anyhow::Result<()> {
     for file in EMBEDDED.files() {
         if let Some(name) = file.path().file_name().and_then(|s| s.to_str()) {
             let dest_path = dest.join(name);

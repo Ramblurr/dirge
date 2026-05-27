@@ -56,7 +56,7 @@ pub(crate) fn fit_banner_header(name_upper: &str, value: &str, frame_w: usize) -
     use unicode_width::UnicodeWidthStr;
 
     let value_owned: String;
-    let value: &str = if value.contains(|c: char| c == '\n' || c == '\r' || c == '\t') {
+    let value: &str = if value.contains(['\n', '\r', '\t']) {
         value_owned = value
             .chars()
             .map(|c| {

@@ -201,7 +201,13 @@ pub(crate) async fn handle_done(
                     .write_line(&format!("[plugin] prepare-next-run error: {e}"), c_error())?;
             }
         }
-        if let Some(next_model) = mgr.take_pending_next_model() {
+        let pending_next_model = mgr.take_pending_next_model();
+        // Release the plugin-manager guard before any `.await` below —
+        // `std::sync::MutexGuard` is `!Send`, and the agent rebuild
+        // path awaits a future. Re-acquire after the await for the
+        // final `set harness-response nil`.
+        drop(mgr);
+        if let Some(next_model) = pending_next_model {
             // Validate: empty string is a
             // misconfiguration. Don't replace the
             // active model with nothing.
@@ -250,8 +256,13 @@ pub(crate) async fn handle_done(
             }
         }
         // Clear `harness-response` so the next hook
-        // doesn't see stale text from this turn.
-        let _ = mgr.eval("(set harness-response nil)");
+        // doesn't see stale text from this turn. Re-acquire the
+        // lock here since we released it above to satisfy
+        // `clippy::await_holding_lock`.
+        {
+            let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = mgr.eval("(set harness-response nil)");
+        }
     }
 
     if !ctx.response_buf.is_empty() {
@@ -516,13 +527,13 @@ pub(crate) async fn handle_done(
         // Curator check: run periodic skill maintenance
         // if the interval has elapsed. Fire-and-forget.
         tokio::spawn(async move {
-            if let Ok(mut curator) = crate::extras::skills::curator::Curator::new(&paths) {
-                if curator.should_run_now() {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = curator.apply_automatic_transitions();
-                    })
-                    .await;
-                }
+            if let Ok(mut curator) = crate::extras::skills::curator::Curator::new(&paths)
+                && curator.should_run_now()
+            {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = curator.apply_automatic_transitions();
+                })
+                .await;
             }
         });
     }

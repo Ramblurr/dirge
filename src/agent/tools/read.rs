@@ -230,10 +230,10 @@ impl Tool for ReadTool {
             stamp,
         );
 
-        if let Some(ref cache) = self.cache {
-            if let Some(cached) = cache.get(&cache_key) {
-                return Ok(cached);
-            }
+        if let Some(ref cache) = self.cache
+            && let Some(cached) = cache.get(&cache_key)
+        {
+            return Ok(cached);
         }
 
         // F4: stream the file line-by-line via BufReader instead of

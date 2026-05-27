@@ -39,6 +39,12 @@ fn hookify(tools: Vec<Box<dyn rig::tool::ToolDyn>>) -> Vec<Box<dyn rig::tool::To
     }
 }
 
+// Arity reflects the wide dependency-injection signature the agent
+// builder uses — every collaborator (model, CLI, config, permission,
+// channels, plugin manager, semantic index, hooks, …) is passed
+// explicitly so wiring stays grep-able. Refactoring into a builder
+// struct is tracked separately; silence the lint here.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_agent_inner<M: CompletionModel + 'static>(
     model: M,
     cli: &Cli,
@@ -182,17 +188,16 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         Ok(names) if !names.is_empty() => {
             let mut skill_lines = Vec::new();
             for name in &names {
-                if let Ok(content) = skill_manager.read_content(name) {
-                    if let Some(spec) =
+                if let Ok(content) = skill_manager.read_content(name)
+                    && let Some(spec) =
                         crate::extras::skills::format::parse_skill_spec(&content, name)
-                    {
-                        let desc = if spec.description.is_empty() {
-                            "(no description)".to_string()
-                        } else {
-                            spec.description.clone()
-                        };
-                        skill_lines.push(format!("  - **{name}**: {desc}"));
-                    }
+                {
+                    let desc = if spec.description.is_empty() {
+                        "(no description)".to_string()
+                    } else {
+                        spec.description.clone()
+                    };
+                    skill_lines.push(format!("  - **{name}**: {desc}"));
                 }
             }
             if !skill_lines.is_empty() {

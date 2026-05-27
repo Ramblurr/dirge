@@ -134,10 +134,8 @@ impl CAdapter {
         for i in 0..n.named_child_count() {
             let Some(c) = n.named_child(i) else { continue };
             match c.kind() {
-                "type_identifier" => {
-                    if name.is_none() {
-                        name = Some(node_text(c, s).to_string());
-                    }
+                "type_identifier" if name.is_none() => {
+                    name = Some(node_text(c, s).to_string());
                 }
                 "enumerator_list" => enumerator_list = Some(c),
                 _ => {}

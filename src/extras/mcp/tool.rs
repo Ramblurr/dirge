@@ -33,7 +33,7 @@ pub struct McpTool {
     /// Shared connection — peer + running_service co-owned with the
     /// manager and every other McpTool from this server. M-R1 review
     /// fix: previously each tool held a bare `Peer<RoleClient>` clone
-    /// + a separately leaked `RunningService`; the new shape keeps
+    /// plus a separately leaked `RunningService`; the new shape keeps
     /// the running_service alive THROUGH the swap so reconnects
     /// don't leak the spawned child process.
     pub connection: Arc<SharedConnection>,

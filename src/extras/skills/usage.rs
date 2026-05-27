@@ -276,18 +276,18 @@ fn acquire_usage_lock(lock_path: &PathBuf) -> Result<UsageLock, String> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Check staleness on first attempt only.
-                if attempt == 0 {
-                    if let Ok(content) = std::fs::read_to_string(lock_path) {
-                        let pid: Result<u32, _> = content.trim().parse();
-                        if let Ok(pid) = pid {
-                            // Check if process is still alive.
-                            #[cfg(unix)]
-                            {
-                                unsafe {
-                                    if libc::kill(pid as i32, 0) != 0 {
-                                        let _ = std::fs::remove_file(lock_path);
-                                        continue;
-                                    }
+                if attempt == 0
+                    && let Ok(content) = std::fs::read_to_string(lock_path)
+                {
+                    let pid: Result<u32, _> = content.trim().parse();
+                    if let Ok(pid) = pid {
+                        // Check if process is still alive.
+                        #[cfg(unix)]
+                        {
+                            unsafe {
+                                if libc::kill(pid as i32, 0) != 0 {
+                                    let _ = std::fs::remove_file(lock_path);
+                                    continue;
                                 }
                             }
                         }

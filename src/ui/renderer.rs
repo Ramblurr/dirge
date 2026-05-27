@@ -498,8 +498,7 @@ impl Renderer {
         // they're identical. The terminal::size() probe used here
         // matches what render_frame sees because both go through the
         // same /dev/tty winsize.
-        let layout_now =
-            crate::ui::tui::layout::Layout::new(cols_q, rows_q, effective_input_rows);
+        let layout_now = crate::ui::tui::layout::Layout::new(cols_q, rows_q, effective_input_rows);
         let chat_rect_now = layout_now.chat;
         *cached_chat_rect = Some(chat_rect_now);
 
@@ -661,10 +660,9 @@ impl Renderer {
         self.chats.remove(idx);
         if idx < self.active_chat {
             self.active_chat -= 1;
-        } else if idx == self.active_chat
-            && self.active_chat >= self.chats.len() {
-                self.active_chat = 0;
-            }
+        } else if idx == self.active_chat && self.active_chat >= self.chats.len() {
+            self.active_chat = 0;
+        }
     }
 
     pub fn active_chat(&self) -> usize {

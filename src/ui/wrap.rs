@@ -285,10 +285,10 @@ fn tokenize(line: &str) -> Vec<Token<'_>> {
 }
 
 fn utf8_char_len(first_byte: u8) -> usize {
-    if first_byte < 0x80 {
+    if first_byte < 0xC0 {
+        // ASCII (<0x80), or a stray continuation byte (shouldn't
+        // appear in a valid str): advance by 1 in both cases.
         1
-    } else if first_byte < 0xC0 {
-        1 // continuation byte alone (shouldn't happen on a valid str)
     } else if first_byte < 0xE0 {
         2
     } else if first_byte < 0xF0 {

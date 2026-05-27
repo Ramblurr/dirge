@@ -62,7 +62,7 @@ impl QuestionTool {
     }
 
     /// Builder for the production path: wires the permission checker
-    /// + ask channel so `question` invocations go through the same
+    /// and ask channel so `question` invocations go through the same
     /// allow/ask/deny rules as every other behaviour-altering tool.
     pub fn with_permission(
         mut self,

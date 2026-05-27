@@ -73,7 +73,7 @@ impl StatusLine {
 
         let ctx = session.context_window;
         let used = session.total_estimated_tokens;
-        let pct = if ctx > 0 { (used * 100) / ctx } else { 0 };
+        let pct = (used * 100).checked_div(ctx).unwrap_or(0);
 
         // TODO(cost-tracking): `session.total_cost` is always 0.0
         // because dirge doesn't yet have a per-provider pricing

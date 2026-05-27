@@ -62,10 +62,7 @@ pub fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span>> {
 /// Normalize fence info strings to a stable language id.
 fn normalize_lang(lang: &str) -> &str {
     // Some markdown sources include attributes like ```rust,no_run.
-    let head = lang
-        .split(|c: char| c == ',' || c == ' ')
-        .next()
-        .unwrap_or("");
+    let head = lang.split([',', ' ']).next().unwrap_or("");
     match head {
         "ts" | "tsx" | "typescript" | "typescriptreact" => "typescript",
         "js" | "jsx" | "javascript" | "javascriptreact" | "mjs" | "cjs" => "javascript",
@@ -370,9 +367,9 @@ fn looks_like_type(word: &str, _rules: &Rules) -> bool {
 }
 
 fn utf8_char_len(first_byte: u8) -> usize {
-    if first_byte < 0x80 {
-        1
-    } else if first_byte < 0xC0 {
+    if first_byte < 0xC0 {
+        // ASCII (<0x80) or invalid continuation byte (0x80..0xC0):
+        // advance by 1 in both cases.
         1
     } else if first_byte < 0xE0 {
         2

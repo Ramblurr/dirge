@@ -774,7 +774,7 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "json") {
+        if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
         let mtime = entry
@@ -784,7 +784,7 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
         entries.push((path, mtime));
     }
     // Newest first.
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
     entries.truncate(limit);
 
     let mut sessions: Vec<Session> = Vec::with_capacity(entries.len());

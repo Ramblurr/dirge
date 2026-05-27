@@ -75,6 +75,10 @@ async fn poll_steering_and_reminder(config: &LoopConfig) -> Vec<LoopMessage> {
 
 /// Build a `StormBreaker` from `LoopConfig`, merging custom
 /// mutating/exempt tool name lists with the built-in defaults.
+// The two `Option<Box<dyn Fn ...>>` predicates match `StormBreaker::new`
+// exactly; aliasing once here would only force readers to jump to find
+// the same shape they'd otherwise read inline. Silence locally.
+#[allow(clippy::type_complexity)]
 fn storm_for_config(config: &LoopConfig) -> StormBreaker {
     let has_custom = config.storm_mutating_tools.is_some() || config.storm_exempt_tools.is_some();
     if !has_custom {
@@ -651,16 +655,16 @@ pub async fn run_loop(
                         // Context compaction: prune old tool results and
                         // compress the middle section of the conversation.
                         // Port of Hermes's compression pass.
-                        if let Some(prompt_tokens) = token_usage.map(|u| u.input_tokens) {
-                            if crate::agent::compression::should_compress(prompt_tokens, ctx_max) {
-                                run_compaction_pass(
-                                    &mut current_context,
-                                    &summarize_fn,
-                                    5, // protect last 5 messages
-                                    emit,
-                                )
-                                .await;
-                            }
+                        if let Some(prompt_tokens) = token_usage.map(|u| u.input_tokens)
+                            && crate::agent::compression::should_compress(prompt_tokens, ctx_max)
+                        {
+                            run_compaction_pass(
+                                &mut current_context,
+                                &summarize_fn,
+                                5, // protect last 5 messages
+                                emit,
+                            )
+                            .await;
                         }
                     }
                     PostUsageDecisionKind::ExitWithSummary => {

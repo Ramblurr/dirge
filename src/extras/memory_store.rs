@@ -433,7 +433,7 @@ impl MemoryToolStore {
         let store = self.store_for(target);
         let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
         guard.add(content)?;
-        Ok(self.success_response(&*guard, target, "Entry added."))
+        Ok(self.success_response(&guard, target, "Entry added."))
     }
 
     pub fn replace(
@@ -445,20 +445,20 @@ impl MemoryToolStore {
         let store = self.store_for(target);
         let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
         guard.replace(old_text, new_content)?;
-        Ok(self.success_response(&*guard, target, "Entry replaced."))
+        Ok(self.success_response(&guard, target, "Entry replaced."))
     }
 
     pub fn remove(&self, target: &str, old_text: &str) -> Result<serde_json::Value, String> {
         let store = self.store_for(target);
         let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
         guard.remove(old_text)?;
-        Ok(self.success_response(&*guard, target, "Entry removed."))
+        Ok(self.success_response(&guard, target, "Entry removed."))
     }
 
     pub fn view(&self, target: &str) -> serde_json::Value {
         let store = self.store_for(target);
         let guard = store.lock().unwrap_or_else(|e| e.into_inner());
-        self.success_response(&*guard, target, "")
+        self.success_response(&guard, target, "")
     }
 
     fn success_response(

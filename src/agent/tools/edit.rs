@@ -279,7 +279,7 @@ impl Tool for EditTool {
             // order so earlier offsets stay valid.
             let mut out = content.clone();
             let mut ranges = match_ranges.clone();
-            ranges.sort_by(|a, b| b.0.cmp(&a.0));
+            ranges.sort_by_key(|r| std::cmp::Reverse(r.0));
             for (start, end) in ranges {
                 out.replace_range(start..end, &args.new_text);
             }

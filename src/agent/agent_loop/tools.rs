@@ -985,7 +985,7 @@ pub async fn execute_tool_calls(
         execute_tool_calls_sequential(
             context,
             assistant_message,
-            &tool_calls,
+            tool_calls,
             config,
             signal,
             emit,
@@ -996,7 +996,7 @@ pub async fn execute_tool_calls(
         execute_tool_calls_parallel(
             context,
             assistant_message,
-            &tool_calls,
+            tool_calls,
             config,
             signal,
             emit,

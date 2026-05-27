@@ -111,15 +111,15 @@ fn truncate_for_model(content: &str, max_chars: usize) -> String {
 /// Returns a set of IDs that need matching tool results to follow.
 fn extract_tool_call_ids(msg: &Value) -> Option<std::collections::HashSet<String>> {
     // Legacy format: top-level tool_calls array
-    if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
-        if !calls.is_empty() {
-            let ids: std::collections::HashSet<String> = calls
-                .iter()
-                .filter_map(|c| c.get("id").and_then(|id| id.as_str()).map(String::from))
-                .collect();
-            if !ids.is_empty() {
-                return Some(ids);
-            }
+    if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array())
+        && !calls.is_empty()
+    {
+        let ids: std::collections::HashSet<String> = calls
+            .iter()
+            .filter_map(|c| c.get("id").and_then(|id| id.as_str()).map(String::from))
+            .collect();
+        if !ids.is_empty() {
+            return Some(ids);
         }
     }
 

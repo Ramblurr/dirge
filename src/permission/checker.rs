@@ -814,14 +814,14 @@ impl PermissionChecker {
         // can't flush a specific key before it repeats.
         self.recent_calls
             .push_back((tool.to_string(), input.to_string()));
-        if self.recent_calls.len() > 32 {
-            if let Some((t, i)) = self.recent_calls.pop_front() {
-                let old_key = format!("{}\x00{}", t, i);
-                if let Some(c) = self.repeat_counts.get_mut(&old_key) {
-                    *c = c.saturating_sub(1);
-                    if *c == 0 {
-                        self.repeat_counts.remove(&old_key);
-                    }
+        if self.recent_calls.len() > 32
+            && let Some((t, i)) = self.recent_calls.pop_front()
+        {
+            let old_key = format!("{}\x00{}", t, i);
+            if let Some(c) = self.repeat_counts.get_mut(&old_key) {
+                *c = c.saturating_sub(1);
+                if *c == 0 {
+                    self.repeat_counts.remove(&old_key);
                 }
             }
         }

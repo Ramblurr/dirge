@@ -23,10 +23,10 @@ fn is_git_root_marker(path: &Path) -> bool {
         return true;
     }
     // Git worktrees: .git is a file containing "gitdir: <path>".
-    if git.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&git) {
-            return content.starts_with("gitdir:");
-        }
+    if git.is_file()
+        && let Ok(content) = std::fs::read_to_string(&git)
+    {
+        return content.starts_with("gitdir:");
     }
     false
 }

@@ -72,7 +72,7 @@ pub fn load_plugin(
         let mut janet_files: Vec<std::path::PathBuf> = std::fs::read_dir(path)
             .map_err(|e| format!("cannot read plugin dir {}: {}", path.display(), e))?
             .filter_map(|e| e.ok().map(|x| x.path()))
-            .filter(|p| p.is_file() && p.extension().map_or(false, |ext| ext == "janet"))
+            .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "janet"))
             .collect();
         janet_files.sort();
         if janet_files.is_empty() {

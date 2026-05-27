@@ -22,10 +22,10 @@ pub(crate) fn needs_compaction(
 
 /// Return the latest compaction summary (if any) and the first
 /// message index still live in `messages`.
-pub(crate) fn compacted_context<'a>(
-    compactions: &'a [Compaction],
+pub(crate) fn compacted_context(
+    compactions: &[Compaction],
     messages_len: usize,
-) -> (Option<&'a str>, usize) {
+) -> (Option<&str>, usize) {
     match compactions.last() {
         Some(c) => (
             Some(c.summary.as_str()),

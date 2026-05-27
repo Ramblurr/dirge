@@ -418,7 +418,7 @@ fn apply_relational_defaults(schema: &Value, args: &mut Value, notes: &mut Vec<S
                 .iter()
                 .map(|(n, v)| format!("{n}={v}"))
                 .collect();
-            let provided: Vec<&str> = present.iter().copied().collect();
+            let provided: Vec<&str> = present.to_vec();
             notes.push(format!(
                 "Note: {} was provided but {} was not — defaulted to {}. To change, retry with all of [{}] set explicitly.",
                 provided.join(", "),
@@ -546,13 +546,12 @@ fn unwrap_md_links_in_args(schema: &Value, args: &Value, kinds: &mut Vec<RepairK
         for (key, val) in out.iter_mut() {
             let prop_schema = props.and_then(|p| p.get(key));
             if let Some(ps) = prop_schema {
-                if is_path_field(key, ps) {
-                    if let Value::String(s) = val {
-                        if let Some(unwrapped) = unwrap_md_link(s) {
-                            *val = Value::String(unwrapped);
-                            kinds.push(RepairKind::MdLinkUnwrapped);
-                        }
-                    }
+                if is_path_field(key, ps)
+                    && let Value::String(s) = val
+                    && let Some(unwrapped) = unwrap_md_link(s)
+                {
+                    *val = Value::String(unwrapped);
+                    kinds.push(RepairKind::MdLinkUnwrapped);
                 }
                 // Recurse into nested objects.
                 if let Value::Object(_) = val {
@@ -681,21 +680,18 @@ fn strip_null_optionals(
     // Recursively strip nulls in nested objects and arrays.
     for (key, value) in obj.iter_mut() {
         let child_schema = properties.and_then(|p| p.get(key));
-        if let Value::Object(child) = value {
-            if let Some(cs) = child_schema {
-                strip_null_optionals(child, cs, kinds);
-            }
+        if let Value::Object(child) = value
+            && let Some(cs) = child_schema
+        {
+            strip_null_optionals(child, cs, kinds);
         }
         if let Value::Array(arr) = value {
             let items_schema = child_schema.and_then(|cs| cs.get("items"));
             for item in arr.iter_mut() {
-                match item {
-                    Value::Object(child_obj) => {
-                        if let Some(is) = items_schema {
-                            strip_null_optionals(child_obj, is, kinds);
-                        }
-                    }
-                    _ => {}
+                if let Value::Object(child_obj) = item
+                    && let Some(is) = items_schema
+                {
+                    strip_null_optionals(child_obj, is, kinds);
                 }
             }
         }
@@ -756,10 +752,10 @@ fn apply_repair_at_parts(
             }
         }
         Value::Array(arr) => {
-            if let Ok(i) = part.parse::<usize>() {
-                if let Some(child) = arr.get_mut(i) {
-                    apply_repair_at_parts(child, parts, idx + 1, complaint, kinds);
-                }
+            if let Ok(i) = part.parse::<usize>()
+                && let Some(child) = arr.get_mut(i)
+            {
+                apply_repair_at_parts(child, parts, idx + 1, complaint, kinds);
             }
         }
         _ => {}
@@ -775,38 +771,37 @@ fn try_repairs_at_value(value: &mut Value, complaint: &str, kinds: &mut Vec<Repa
     let lower = complaint.to_lowercase();
 
     // 1. JSON-string-as-array
-    if lower.contains("array") || lower.contains("string") {
-        if let Value::String(s) = value {
-            let trimmed = s.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                    if parsed.is_array() {
-                        *value = parsed;
-                        kinds.push(RepairKind::JsonStringToArray);
-                        return;
-                    }
-                }
-            }
+    if (lower.contains("array") || lower.contains("string"))
+        && let Value::String(s) = value
+    {
+        let trimmed = s.trim();
+        if trimmed.starts_with('[')
+            && trimmed.ends_with(']')
+            && let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
+            && parsed.is_array()
+        {
+            *value = parsed;
+            kinds.push(RepairKind::JsonStringToArray);
+            return;
         }
     }
 
     // 2. Empty-object-to-array
-    if lower.contains("array") {
-        if let Value::Object(obj) = value {
-            if obj.is_empty() {
-                *value = Value::Array(vec![]);
-                kinds.push(RepairKind::ObjectToArray);
-                return;
-            }
-        }
+    if lower.contains("array")
+        && let Value::Object(obj) = value
+        && obj.is_empty()
+    {
+        *value = Value::Array(vec![]);
+        kinds.push(RepairKind::ObjectToArray);
+        return;
     }
 
     // 3. Bare-string-to-singleton-array
-    if lower.contains("array") {
-        if let Value::String(s) = value.clone() {
-            *value = Value::Array(vec![Value::String(s)]);
-            kinds.push(RepairKind::BareStringToArray);
-        }
+    if lower.contains("array")
+        && let Value::String(s) = value.clone()
+    {
+        *value = Value::Array(vec![Value::String(s)]);
+        kinds.push(RepairKind::BareStringToArray);
     }
 }
 

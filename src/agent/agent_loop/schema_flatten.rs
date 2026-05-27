@@ -185,7 +185,7 @@ fn set_by_path(target: &mut serde_json::Map<String, Value>, path: Vec<&str>, val
         if i == last {
             cur.insert(key.to_string(), value.clone());
         } else {
-            let needs_object = cur.get(&key.to_string()).map_or(true, |v| !v.is_object());
+            let needs_object = cur.get(&key.to_string()).is_none_or(|v| !v.is_object());
             if needs_object {
                 // Conflicting or missing intermediate — overwrite with object.
                 if cur.get(&key.to_string()).is_some() {

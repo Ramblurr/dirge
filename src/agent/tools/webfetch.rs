@@ -98,7 +98,7 @@ fn validate_url_host_safety(url: &str) -> Result<(), String> {
     // bracket-aware path, `rsplit_once(':')` would chop `[::1]`
     // mid-address.
     let host_end = after_scheme
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let host_and_port = &after_scheme[..host_end];
     let host: &str = if let Some(rest) = host_and_port.strip_prefix('[')
@@ -221,7 +221,7 @@ async fn resolve_and_validate_host(url: &str) -> Result<(), String> {
     };
     let after_scheme = &url[scheme_len..];
     let host_end = after_scheme
-        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let host_and_port = &after_scheme[..host_end];
     // Skip resolve for IP literals — `validate_url_host_safety`
@@ -355,21 +355,21 @@ fn parse_alt_ipv4(s: &str) -> Option<[u8; 4]> {
     // Only trigger when the ENTIRE string is a hex number (no dots,
     // no colons — those fall through to dotted-quad or IPv6 parsing).
     let lower = s.to_ascii_lowercase();
-    if let Some(hex) = lower.strip_prefix("0x") {
-        if !hex.contains('.') && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(n) = u32::from_str_radix(hex, 16) {
-                return Some([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8]);
-            }
-        }
-        // Don't return None here — the "0x" prefix on a dotted-quad
-        // (e.g. "0x7f.0.0.1") falls through to per-octet parsing below.
+    if let Some(hex) = lower.strip_prefix("0x")
+        && !hex.contains('.')
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+        && let Ok(n) = u32::from_str_radix(hex, 16)
+    {
+        return Some([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8]);
     }
+    // Don't return None here — the "0x" prefix on a dotted-quad
+    // (e.g. "0x7f.0.0.1") falls through to per-octet parsing below.
     // Try pure-decimal (no dots): e.g. "2852039166" → 127.0.0.1
     if !s.contains('.') && s.chars().all(|c| c.is_ascii_digit()) {
-        if let Ok(n) = s.parse::<u64>() {
-            if n <= u32::MAX as u64 {
-                return Some([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8]);
-            }
+        if let Ok(n) = s.parse::<u64>()
+            && n <= u32::MAX as u64
+        {
+            return Some([(n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8]);
         }
         return None;
     }

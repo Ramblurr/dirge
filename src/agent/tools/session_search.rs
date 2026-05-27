@@ -111,22 +111,20 @@ FTS5 syntax: AND (default), OR, NOT, "quoted phrases", * prefix wildcards."#
     async fn call(&self, args: SearchArgs) -> Result<String, ToolError> {
         check_perm(&self.permission, &self.ask_tx, "session_search", "search").await?;
 
-        let search = self.open_search().map_err(|e| ToolError::Msg(e))?;
+        let search = self.open_search().map_err(ToolError::Msg)?;
 
         // Mode inference: query → DISCOVERY, session_id + message_id → SCROLL, else → BROWSE
         if let Some(ref query) = args.query.filter(|q| !q.trim().is_empty()) {
-            let hits = search.discover(query).map_err(|e| ToolError::Msg(e))?;
+            let hits = search.discover(query).map_err(ToolError::Msg)?;
             Ok(serde_json::to_string_pretty(&hits)
                 .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
         } else if let (Some(sid), Some(msg_id)) = (&args.session_id, args.around_message_id) {
-            let window = args.window.min(20).max(1);
-            let result = search
-                .scroll(sid, msg_id, window)
-                .map_err(|e| ToolError::Msg(e))?;
+            let window = args.window.clamp(1, 20);
+            let result = search.scroll(sid, msg_id, window).map_err(ToolError::Msg)?;
             Ok(serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
         } else {
-            let sessions = search.browse().map_err(|e| ToolError::Msg(e))?;
+            let sessions = search.browse().map_err(ToolError::Msg)?;
             Ok(serde_json::to_string_pretty(&sessions)
                 .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
         }

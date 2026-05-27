@@ -186,7 +186,7 @@ fn render_table(
     let inner = max_width.saturating_sub(2 * 2);
     let sep_overhead = if ncols > 1 { 3 * (ncols - 1) } else { 0 };
     let cell_budget = inner.saturating_sub(sep_overhead);
-    let per_col = if ncols > 0 { cell_budget / ncols } else { 0 };
+    let per_col = cell_budget.checked_div(ncols).unwrap_or(0);
     for w in widths.iter_mut() {
         if per_col > 0 && *w > per_col {
             *w = per_col;
@@ -206,7 +206,7 @@ fn render_table(
             // Truncate with ellipsis if the next char would overflow.
             // The ellipsis itself is 1 cell wide.
             if used + cw > w {
-                if w >= 1 && used + 1 <= w {
+                if w >= 1 && used < w {
                     out.push('…');
                     used += 1;
                 }
@@ -224,12 +224,12 @@ fn render_table(
     let render_row = |row: &[String], widths: &[usize]| -> String {
         let mut s = String::with_capacity(max_width);
         s.push_str("│ ");
-        for i in 0..widths.len() {
+        for (i, width) in widths.iter().enumerate() {
             if i > 0 {
                 s.push_str(" │ ");
             }
             let cell = row.get(i).map(String::as_str).unwrap_or("");
-            s.push_str(&fit(cell, widths[i]));
+            s.push_str(&fit(cell, *width));
         }
         s.push_str(" │");
         s
@@ -252,7 +252,7 @@ fn render_table(
 
     if !header.is_empty() {
         out.push(LineEntry {
-            text: CompactString::new(&render_row(header, &widths)),
+            text: CompactString::new(render_row(header, &widths)),
             color: crate::ui::theme::header(),
         });
         out.push(LineEntry {
@@ -262,7 +262,7 @@ fn render_table(
     }
     for row in rows {
         out.push(LineEntry {
-            text: CompactString::new(&render_row(row, &widths)),
+            text: CompactString::new(render_row(row, &widths)),
             color: base_color,
         });
     }
@@ -418,11 +418,9 @@ pub fn markdown_to_styled(text: &str, max_width: usize, base_color: Color) -> Ve
                 // Links: paint the link text with the accent color +
                 // underline. Pulldown will emit the text in between
                 // and a TagEnd::Link to close.
-                Tag::Link { .. } => {
-                    if !in_table && !in_code_block {
-                        acc.push_str("\x1b[4m");
-                        acc.push_str(&ansi_fg(crate::ui::theme::accent()));
-                    }
+                Tag::Link { .. } if !in_table && !in_code_block => {
+                    acc.push_str("\x1b[4m");
+                    acc.push_str(&ansi_fg(crate::ui::theme::accent()));
                 }
                 _ => {}
             },
@@ -547,9 +545,8 @@ pub fn markdown_to_styled(text: &str, max_width: usize, base_color: Color) -> Ve
                     // starts (under the bullet's right edge), not the
                     // bullet glyph itself, so multi-line items read as
                     // a coherent block.
-                    let cont_indent: String = std::iter::repeat(' ')
-                        .take(bullet.chars().count())
-                        .collect();
+                    let cont_indent: String =
+                        std::iter::repeat_n(' ', bullet.chars().count()).collect();
                     let inner_w = max_width.saturating_sub(bullet.chars().count());
                     let mut item_lines = Vec::new();
                     let mut first_chunk_in_item = true;
@@ -601,53 +598,44 @@ pub fn markdown_to_styled(text: &str, max_width: usize, base_color: Color) -> Ve
                     table_header = std::mem::take(&mut current_row);
                     in_table_head = false;
                 }
-                TagEnd::TableRow => {
-                    if !in_table_head {
-                        table_rows.push(std::mem::take(&mut current_row));
-                    }
+                TagEnd::TableRow if !in_table_head => {
+                    table_rows.push(std::mem::take(&mut current_row));
                 }
                 TagEnd::TableCell => {
                     current_row.push(std::mem::take(&mut current_cell));
                 }
                 TagEnd::Emphasis => {
-                    if emphasis_depth > 0 {
-                        emphasis_depth -= 1;
-                    }
+                    emphasis_depth = emphasis_depth.saturating_sub(1);
                     if !in_table && !in_code_block {
                         acc.push_str("\x1b[23m"); // italic off
                     }
                 }
                 TagEnd::Strong => {
-                    if strong_depth > 0 {
-                        strong_depth -= 1;
-                    }
+                    strong_depth = strong_depth.saturating_sub(1);
                     if !in_table && !in_code_block {
                         acc.push_str("\x1b[22m"); // bold/dim off (normal intensity)
                     }
                 }
                 TagEnd::Strikethrough => {
-                    if strikethrough_depth > 0 {
-                        strikethrough_depth -= 1;
-                    }
+                    strikethrough_depth = strikethrough_depth.saturating_sub(1);
                     if !in_table && !in_code_block {
                         acc.push_str("\x1b[29m"); // strike off
                     }
                 }
-                TagEnd::Link => {
-                    if !in_table && !in_code_block {
-                        // reset both underline + color back to current
-                        // paragraph color (set by flush_acc).
-                        acc.push_str("\x1b[24m\x1b[39m");
-                    }
+                TagEnd::Link if !in_table && !in_code_block => {
+                    // reset both underline + color back to current
+                    // paragraph color (set by flush_acc).
+                    acc.push_str("\x1b[24m\x1b[39m");
                 }
                 _ => {}
             },
             Event::Text(t) => {
                 if in_table {
                     current_cell.push_str(&t);
-                } else if in_code_block {
-                    acc.push_str(&t);
                 } else {
+                    // In or out of a code block, plain text accumulates
+                    // verbatim — the surrounding rendering state (set by
+                    // Start/End code-block events) handles styling.
                     acc.push_str(&t);
                 }
             }
@@ -685,7 +673,7 @@ pub fn markdown_to_styled(text: &str, max_width: usize, base_color: Color) -> Ve
             Event::Rule => {
                 flush_acc(&acc, base_color, max_width, &mut result);
                 acc.clear();
-                let rule: String = std::iter::repeat('─').take(max_width.min(40)).collect();
+                let rule: String = std::iter::repeat_n('─', max_width.min(40)).collect();
                 result.push(LineEntry {
                     text: CompactString::from(rule),
                     color: crate::ui::theme::dim(),

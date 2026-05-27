@@ -568,10 +568,10 @@ pub fn build_provider_additional_params(
     }
 
     // ----- headers (provider-agnostic) -----
-    if !opts.headers.is_empty() {
-        if let Ok(v) = serde_json::to_value(&opts.headers) {
-            additional.insert("headers".to_string(), v);
-        }
+    if !opts.headers.is_empty()
+        && let Ok(v) = serde_json::to_value(&opts.headers)
+    {
+        additional.insert("headers".to_string(), v);
     }
 
     // ----- metadata (provider-agnostic) -----

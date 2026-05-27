@@ -13,7 +13,7 @@ use crate::semantic::types::{ByteRange, ExtractedFile, Import, ImportKind, Symbo
 /// Clojure has no per-method receiver concept the way Python/TS classes
 /// do — what we surface as `SymbolKind::Class` are protocols, records,
 /// and types declared at the top level. Methods come from `defmethod`
-/// + `extend-protocol`. The grammar is minimalist (everything is a
+/// and `extend-protocol`. The grammar is minimalist (everything is a
 /// list/symbol/etc.) so symbol extraction is mostly "look at the head
 /// of each top-level list and dispatch by name".
 pub struct ClojureAdapter;

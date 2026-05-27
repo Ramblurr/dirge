@@ -102,8 +102,7 @@ impl Tool for RepoOverviewTool {
         let depth = args
             .max_depth
             .unwrap_or(DEFAULT_OVERVIEW_DEPTH)
-            .min(MAX_OVERVIEW_DEPTH)
-            .max(1);
+            .clamp(1, MAX_OVERVIEW_DEPTH);
         let want_lines = args.include_line_counts.unwrap_or(false);
 
         // LOOP-3: include root-dir stamp so external edits invalidate.

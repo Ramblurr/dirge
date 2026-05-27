@@ -431,10 +431,8 @@ impl SessionSearch {
         // Find all sessions in this lineage.
         for s in &all {
             let s_root = self.db.resolve_parent(&s.id)?;
-            if s_root == root_id {
-                if self.db.get_anchored_view(&s.id, message_id, 0).is_ok() {
-                    return Ok(s.id.clone());
-                }
+            if s_root == root_id && self.db.get_anchored_view(&s.id, message_id, 0).is_ok() {
+                return Ok(s.id.clone());
             }
         }
 

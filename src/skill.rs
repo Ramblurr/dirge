@@ -89,16 +89,16 @@ pub fn discover_skills(cwd: &Path) -> Vec<Skill> {
                     );
                     continue;
                 }
-                if let Ok(content) = std::fs::read_to_string(&skill_md) {
-                    if let Some(skill) = parse_skill(&content, &path) {
-                        // README contract: "Project skills override
-                        // global skills by name." Globals are iterated
-                        // first (line 34), so use `insert` (last-write-
-                        // wins) — `or_insert` kept the global value
-                        // and silently dropped the project override.
-                        if !skill.name.is_empty() {
-                            map.insert(skill.name.clone(), skill);
-                        }
+                if let Ok(content) = std::fs::read_to_string(&skill_md)
+                    && let Some(skill) = parse_skill(&content, &path)
+                {
+                    // README contract: "Project skills override
+                    // global skills by name." Globals are iterated
+                    // first (line 34), so use `insert` (last-write-
+                    // wins) — `or_insert` kept the global value
+                    // and silently dropped the project override.
+                    if !skill.name.is_empty() {
+                        map.insert(skill.name.clone(), skill);
                     }
                 }
             }
@@ -115,10 +115,8 @@ pub fn find_project_ancestor_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut current = cwd.to_path_buf();
     dirs.push(current.clone());
     loop {
-        if current.join(".git").is_dir() {
-            if !dirs.contains(&current) {
-                dirs.push(current.clone());
-            }
+        if current.join(".git").is_dir() && !dirs.contains(&current) {
+            dirs.push(current.clone());
         }
         if !current.pop() {
             break;

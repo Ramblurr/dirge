@@ -70,7 +70,7 @@ impl SharedConnection {
         // signal fires on the old transport.
         let _old = {
             let mut rs_guard = self.running_service.lock().await;
-            std::mem::replace(&mut *rs_guard, Some(new_rs))
+            (*rs_guard).replace(new_rs)
         };
         *self.peer.write().await = new_peer;
         // `_old` drops here. If it was `Some`, that `RunningService`'s

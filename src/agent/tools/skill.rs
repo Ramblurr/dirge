@@ -154,7 +154,7 @@ impl Tool for SkillTool {
             }
 
             "list" => {
-                let names = self.manager.list().map_err(|e| ToolError::Msg(e))?;
+                let names = self.manager.list().map_err(ToolError::Msg)?;
                 if names.is_empty() {
                     Ok("No skills found in .dirge/skills/.".to_string())
                 } else {
@@ -184,7 +184,7 @@ impl Tool for SkillTool {
                     })?;
                 self.manager
                     .create_from_content(name, content)
-                    .map_err(|e| ToolError::Msg(e))?;
+                    .map_err(ToolError::Msg)?;
                 // Bump create counter (best-effort).
                 if let Some(mut u) = self.usage.clone() {
                     u.record_create(name, "agent");
@@ -204,7 +204,7 @@ impl Tool for SkillTool {
                     .ok_or_else(|| ToolError::Msg("content is required for 'edit'".to_string()))?;
                 self.manager
                     .edit_from_content(name, content)
-                    .map_err(|e| ToolError::Msg(e))?;
+                    .map_err(ToolError::Msg)?;
                 // Bump patch counter (best-effort).
                 if let Some(mut u) = self.usage.clone() {
                     u.record_patch(name);
@@ -227,7 +227,7 @@ impl Tool for SkillTool {
                 let new_string = args.new_string.as_deref().unwrap_or("");
                 self.manager
                     .patch(name, old_string, new_string)
-                    .map_err(|e| ToolError::Msg(e))?;
+                    .map_err(ToolError::Msg)?;
                 // Bump patch counter (best-effort).
                 if let Some(mut u) = self.usage.clone() {
                     u.record_patch(name);
@@ -240,7 +240,7 @@ impl Tool for SkillTool {
                     .name
                     .as_deref()
                     .ok_or_else(|| ToolError::Msg("name is required for 'delete'".to_string()))?;
-                self.manager.delete(name).map_err(|e| ToolError::Msg(e))?;
+                self.manager.delete(name).map_err(ToolError::Msg)?;
                 Ok(format!("Skill '{}' deleted.", name))
             }
 

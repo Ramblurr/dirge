@@ -290,7 +290,7 @@ fn score(query: &str, meta: &ToolMeta) -> f32 {
     if name == q {
         s += 10.0;
     }
-    if name.contains(&q) || q.contains(&name) {
+    if name.contains(q) || q.contains(&name) {
         // partial name hit — large but not exact-match large
         s += 4.0;
     }
@@ -300,9 +300,9 @@ fn score(query: &str, meta: &ToolMeta) -> f32 {
             s += 2.0;
         }
     }
-    s += 3.0 * bigram_overlap(&q, &name);
+    s += 3.0 * bigram_overlap(q, &name);
 
-    if desc.contains(&q) {
+    if desc.contains(q) {
         s += 1.5;
     }
     for tok in q.split_whitespace() {
@@ -310,7 +310,7 @@ fn score(query: &str, meta: &ToolMeta) -> f32 {
             s += 0.5;
         }
     }
-    s += 1.0 * bigram_overlap(&q, &desc);
+    s += 1.0 * bigram_overlap(q, &desc);
 
     s
 }

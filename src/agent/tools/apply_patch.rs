@@ -320,15 +320,15 @@ impl Tool for ApplyPatchTool {
                 None
             };
             // Validate create content size
-            if let PatchOp::Create { content, .. } = op {
-                if content.len() > MAX_CREATE_SIZE {
-                    results.push(format!(
-                        "FAILED: create content exceeds {} bytes ({} bytes provided)",
-                        MAX_CREATE_SIZE,
-                        content.len()
-                    ));
-                    break;
-                }
+            if let PatchOp::Create { content, .. } = op
+                && content.len() > MAX_CREATE_SIZE
+            {
+                results.push(format!(
+                    "FAILED: create content exceeds {} bytes ({} bytes provided)",
+                    MAX_CREATE_SIZE,
+                    content.len()
+                ));
+                break;
             }
 
             let result = match op {

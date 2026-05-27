@@ -659,7 +659,7 @@ pub fn slash_command_names() -> Vec<&'static str> {
 /// error) from "command name we don't know about" (plugin fallback /
 /// unknown).
 pub fn is_known_slash_command(name: &str) -> bool {
-    slash_command_names().iter().any(|c| *c == name)
+    slash_command_names().contains(&name)
 }
 
 /// Returns all built-in slash commands (with leading `/`), sorted alphabetically.

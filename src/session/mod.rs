@@ -133,7 +133,7 @@ pub struct TreeNode {
 ///
 /// Defaults to empty (`leaf_id = None`, no entries) so pre-P4b
 /// session JSON loads cleanly via the serde defaults; `Session::new`
-/// + `add_message` initialize it correctly on subsequent appends.
+/// plus `add_message` initialize it correctly on subsequent appends.
 /// Legacy linear sessions are auto-converted on first access via
 /// `Session::ensure_tree_initialized`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -346,7 +346,7 @@ impl Session {
         // Mirror into the message_store too — the tree-backed copy
         // would otherwise carry the old values.
         for (id, m) in self.message_store.iter_mut() {
-            if let Some(canonical) = self.messages.iter().find(|x| &x.id == id) {
+            if let Some(canonical) = self.messages.iter().find(|x| x.id == id) {
                 m.estimated_tokens = canonical.estimated_tokens;
             } else {
                 m.estimated_tokens = Self::estimate_message_tokens(m);

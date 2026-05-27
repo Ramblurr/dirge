@@ -112,10 +112,7 @@ ACTIONS:
                     .as_deref()
                     .filter(|c| !c.trim().is_empty())
                     .ok_or_else(|| ToolError::Msg("content is required for 'add'".to_string()))?;
-                let resp = self
-                    .store
-                    .add(target, content)
-                    .map_err(|e| ToolError::Msg(e))?;
+                let resp = self.store.add(target, content).map_err(ToolError::Msg)?;
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }
@@ -137,7 +134,7 @@ ACTIONS:
                 let resp = self
                     .store
                     .replace(target, old_text, content)
-                    .map_err(|e| ToolError::Msg(e))?;
+                    .map_err(ToolError::Msg)?;
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }
@@ -152,7 +149,7 @@ ACTIONS:
                 let resp = self
                     .store
                     .remove(target, old_text)
-                    .map_err(|e| ToolError::Msg(e))?;
+                    .map_err(ToolError::Msg)?;
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }

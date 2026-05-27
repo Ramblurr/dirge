@@ -446,6 +446,7 @@ fn percent_encode(s: &str) -> String {
 /// regexes:
 ///   - `result__a` anchor → title + URL
 ///   - `result__snippet` anchor → snippet text
+///
 /// HTML entities (`&amp;`, `&#x27;` etc.) are decoded inline. URLs
 /// are unwrapped from DDG's `/l/?uddg=…` redirector when present.
 ///
@@ -603,12 +604,13 @@ fn urlencoding_decode(s: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

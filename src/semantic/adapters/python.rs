@@ -31,13 +31,11 @@ impl PythonAdapter {
                         self.push_method(child, source, symbols, class_name);
                     }
                     "decorated_definition" => {
-                        if let Some(inner) = child.child_by_field_name("definition") {
-                            if inner.kind() == "function_definition" {
-                                let range = ByteRange::from(child);
-                                self.push_method_with_range(
-                                    inner, range, source, symbols, class_name,
-                                );
-                            }
+                        if let Some(inner) = child.child_by_field_name("definition")
+                            && inner.kind() == "function_definition"
+                        {
+                            let range = ByteRange::from(child);
+                            self.push_method_with_range(inner, range, source, symbols, class_name);
                         }
                     }
                     _ => {}
@@ -106,15 +104,15 @@ impl PythonAdapter {
                             }
                         }
                     }
-                    if names.is_empty() {
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            names.push(node_text(name_node, source).to_string());
-                        }
+                    if names.is_empty()
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        names.push(node_text(name_node, source).to_string());
                     }
-                    if module.is_empty() {
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            module = node_text(name_node, source).to_string();
-                        }
+                    if module.is_empty()
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        module = node_text(name_node, source).to_string();
                     }
                     imports.push(Import {
                         names,
@@ -153,28 +151,28 @@ impl PythonAdapter {
                     } else {
                         Some(child)
                     };
-                    if let Some(node) = func_node {
-                        if let Some(name_node) = node.child_by_field_name("name") {
-                            let name = node_text(name_node, source).to_string();
-                            // Dunder methods (`__init__`, `__call__`, `__repr__`, …)
-                            // are part of Python's public protocol; they look
-                            // "private" by the leading-underscore heuristic but
-                            // are externally callable. Treat them as exported.
-                            // Single-underscore names (`_helper`, `_internal`)
-                            // stay non-exported.
-                            let is_dunder = name.starts_with("__") && name.ends_with("__");
-                            let is_exported = is_dunder || !name.starts_with('_');
-                            let range = ByteRange::from(child);
-                            let signature = self.signature_from_node(node, source);
-                            symbols.push(Symbol {
-                                kind: SymbolKind::Function,
-                                name,
-                                range,
-                                signature,
-                                is_exported,
-                                parent_class: None,
-                            });
-                        }
+                    if let Some(node) = func_node
+                        && let Some(name_node) = node.child_by_field_name("name")
+                    {
+                        let name = node_text(name_node, source).to_string();
+                        // Dunder methods (`__init__`, `__call__`, `__repr__`, …)
+                        // are part of Python's public protocol; they look
+                        // "private" by the leading-underscore heuristic but
+                        // are externally callable. Treat them as exported.
+                        // Single-underscore names (`_helper`, `_internal`)
+                        // stay non-exported.
+                        let is_dunder = name.starts_with("__") && name.ends_with("__");
+                        let is_exported = is_dunder || !name.starts_with('_');
+                        let range = ByteRange::from(child);
+                        let signature = self.signature_from_node(node, source);
+                        symbols.push(Symbol {
+                            kind: SymbolKind::Function,
+                            name,
+                            range,
+                            signature,
+                            is_exported,
+                            parent_class: None,
+                        });
                     }
                 }
                 "class_definition" => {

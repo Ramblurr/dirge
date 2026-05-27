@@ -13,7 +13,7 @@
 //! - Interval gates to avoid running too frequently
 //! - Idle check to avoid running during active sessions
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::extras::dirge_paths::ProjectPaths;
@@ -64,7 +64,7 @@ impl CuratorState {
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse curator state: {e}"))
     }
 
-    fn save(&self, path: &PathBuf) -> Result<(), String> {
+    fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create curator state directory: {e}"))?;
@@ -141,10 +141,7 @@ impl Curator {
         }
 
         // Load usage tracking for pin/activity checks.
-        let mut usage = match crate::extras::skills::usage::UsageStore::load(&self.paths) {
-            Ok(u) => Some(u),
-            Err(_) => None,
-        };
+        let mut usage = crate::extras::skills::usage::UsageStore::load(&self.paths).ok();
 
         let mut stale_names: Vec<String> = Vec::new();
         let mut reactivated: Vec<String> = Vec::new();
@@ -217,12 +214,9 @@ impl Curator {
                         .unwrap_or(false),
                     None => false,
                 };
-                if needs_reactivate {
-                    if let Some(ref mut u) = usage {
-                        let _ =
-                            u.set_state(&name, crate::extras::skills::usage::SkillState::Active);
-                        reactivated.push(name);
-                    }
+                if needs_reactivate && let Some(ref mut u) = usage {
+                    let _ = u.set_state(&name, crate::extras::skills::usage::SkillState::Active);
+                    reactivated.push(name);
                 }
             }
         }

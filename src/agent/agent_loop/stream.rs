@@ -13,9 +13,9 @@
 //!      options)`.
 //!   5. Iterate stream events:
 //!        - `Start`         → push partial to context.messages;
-//!                             emit `MessageStart`
+//!          emit `MessageStart`
 //!        - `Delta(*)`      → replace last context message;
-//!                             emit `MessageUpdate`
+//!          emit `MessageUpdate`
 //!        - `Done`/`Error`  → finalize; emit `MessageEnd`; return
 //!   6. If the stream closes without `Done`/`Error`, finalize
 //!      defensively (pi has the same fallback at
@@ -309,11 +309,11 @@ pub async fn stream_assistant_response(
     // events and broke downstream consumers that expect every
     // assistant turn to be bracketed.
     match final_message {
-        Some((m, usage)) => return (m, usage),
+        Some((m, usage)) => (m, usage),
         None => {
             let empty = AssistantMessage::new(Vec::new(), StopReason::Stop);
             finalize(context, &empty, added_partial, emit).await;
-            return (empty, None);
+            (empty, None)
         }
     }
 }

@@ -140,10 +140,10 @@ impl Tool for GrepTool {
             stamp,
         );
 
-        if let Some(ref cache) = self.cache {
-            if let Some(cached) = cache.get(&cache_key) {
-                return Ok(cached);
-            }
+        if let Some(ref cache) = self.cache
+            && let Some(cached) = cache.get(&cache_key)
+        {
+            return Ok(cached);
         }
 
         let re = Regex::new(&args.pattern)
@@ -275,7 +275,7 @@ impl Tool for GrepTool {
                                 "{}:{}:{}",
                                 path_str,
                                 ml + 1,
-                                trim_line(&lines[ml])
+                                trim_line(lines[ml])
                             ));
                             if all_results.len() >= MAX_GREP_RESULTS {
                                 break;
@@ -310,7 +310,7 @@ impl Tool for GrepTool {
                                     path_str,
                                     i + 1,
                                     sep,
-                                    trim_line(&lines[i]),
+                                    trim_line(lines[i]),
                                 ));
                                 i += 1;
                             }

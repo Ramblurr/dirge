@@ -99,10 +99,10 @@ impl Tool for ListDirTool {
         let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(path);
         let cache_key = format!("list_dir:{}:hidden={}:{}", path, args.include_hidden, stamp,);
 
-        if let Some(ref cache) = self.cache {
-            if let Some(cached) = cache.get(&cache_key) {
-                return Ok(cached);
-            }
+        if let Some(ref cache) = self.cache
+            && let Some(cached) = cache.get(&cache_key)
+        {
+            return Ok(cached);
         }
 
         let walker = WalkBuilder::new(path)
