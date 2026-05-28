@@ -2,7 +2,9 @@ use rig::agent::{Agent, AgentBuilder};
 use rig::completion::CompletionModel;
 use std::sync::Arc;
 
-use crate::agent::prompt::{PROJECT_SKILLS_PREAMBLE, SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
+use crate::agent::prompt::{
+    PROJECT_SKILLS_PREAMBLE, SKILLS_GUIDANCE, SYSTEM_PROMPT, TODO_TOOLS_PROMPT,
+};
 use crate::agent::tools;
 use crate::agent::tools::ToolCache;
 use crate::agent::tools::background::BackgroundStore;
@@ -20,6 +22,20 @@ use crate::sandbox::Sandbox;
 #[cfg(feature = "semantic")]
 use crate::semantic::SemanticManager;
 use crate::skill::{self, Skill};
+
+/// Assemble the always-on base preamble — `SYSTEM_PROMPT`,
+/// `TODO_TOOLS_PROMPT`, and the in-session `SKILLS_GUIDANCE`
+/// (dirge-xxun, mirroring hermes `SKILLS_GUIDANCE`). Other contextual
+/// blocks (AGENTS.md, prompts, project skills, memory) are layered on
+/// top by `build_agent_inner`. Extracted so the assembly is testable
+/// without exercising the full DI signature.
+pub(crate) fn assemble_base_preamble() -> String {
+    let mut p = SYSTEM_PROMPT.to_string();
+    p.push('\n');
+    p.push_str(TODO_TOOLS_PROMPT);
+    p.push_str(SKILLS_GUIDANCE);
+    p
+}
 
 /// Factory for the `SessionSearchTool` instance plumbed into both the
 /// rig-side tool registry and the new agent_loop registry. Lives here
@@ -93,9 +109,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     // at the permission-checker layer. Plan / review modes deny
     // edit/write/apply_patch/bash entirely, so the file-name gate
     // is unnecessary.
-    let mut preamble = SYSTEM_PROMPT.to_string();
-    preamble.push('\n');
-    preamble.push_str(TODO_TOOLS_PROMPT);
+    let mut preamble = assemble_base_preamble();
     if let Some(agents) = &context.agents {
         preamble.push_str("\n\n");
         preamble.push_str(agents);
@@ -1164,6 +1178,31 @@ mod reminder_tests {
                 "missing built-in {expected} in {names:?}"
             );
         }
+    }
+
+    /// dirge-xxun — the always-on base preamble includes the in-session
+    /// skill creation/patch guidance, so the model sees the trigger
+    /// every turn (not just at post-session review).
+    #[test]
+    fn base_preamble_includes_skills_guidance() {
+        let p = assemble_base_preamble();
+        // Trigger fragments must be present.
+        assert!(p.contains("complex task"), "missing create trigger");
+        assert!(p.contains("5+ tool calls"), "missing 5+ trigger");
+        assert!(
+            p.contains("patch it immediately"),
+            "missing patch-now trigger"
+        );
+        // Must name the real `skill` actions.
+        assert!(p.contains("action='create'"), "missing create action");
+        assert!(p.contains("action='patch'"), "missing patch action");
+        // Must NOT name hermes's tool aliases.
+        assert!(!p.contains("skill_manage"), "leaked hermes tool name");
+        // Section heading present.
+        assert!(
+            p.contains("## Skill creation and maintenance"),
+            "missing heading"
+        );
     }
 
     /// dirge-502b — the shared factory used by both `build_agent_inner`

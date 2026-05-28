@@ -99,6 +99,21 @@ pub const TODO_TOOLS_PROMPT: &str = "\
 pub const PROJECT_SKILLS_PREAMBLE: &str = "\n\n## Project Skills\n\nThe following skills are available for this project. \
      Use the `skill` tool with action='load' to load full content.\n\n";
 
+/// In-session guidance for `skill` self-improvement. Ported from
+/// hermes-agent (`agent/prompt_builder.py:179-186`, `SKILLS_GUIDANCE`)
+/// and lightly adapted: hermes ships separate `skill_view`/`skill_manage`
+/// tools, dirge combines them into a single `skill` tool. The
+/// post-session `agent::review` prompt already echoes this guidance,
+/// but without an in-session reminder the model only creates/patches
+/// skills at session-end (background-review LLM). See dirge-xxun.
+pub const SKILLS_GUIDANCE: &str = "\n\n## Skill creation and maintenance\n\n\
+     After completing a complex task (5+ tool calls), fixing a tricky error, \
+     or discovering a non-trivial workflow, save the approach as a skill \
+     with `skill(action='create', ...)` so you can reuse it next time.\n\
+     When using a skill and finding it outdated, incomplete, or wrong, \
+     patch it immediately with `skill(action='patch', ...)` — don't wait to \
+     be asked. Skills that aren't maintained become liabilities.";
+
 /// Phase-3 — appended to the system prompt when
 /// `dynamic_tool_search` is on. Tells the model only a small
 /// always-on set of tools ships every turn and the rest must be
@@ -302,6 +317,34 @@ mod tests {
                 memory_line
             );
         }
+    }
+
+    /// dirge-xxun — `SKILLS_GUIDANCE` must name both creation and
+    /// patching triggers, and reference the real `skill` tool's
+    /// `create` and `patch` actions. Hermes parity:
+    /// `hermes-agent/agent/prompt_builder.py:179-186`.
+    #[test]
+    fn skills_guidance_names_real_actions_and_triggers() {
+        let g = SKILLS_GUIDANCE;
+        // Triggers — the prose hermes uses for the create/patch nudge.
+        assert!(g.contains("complex task"), "missing create trigger: {g}");
+        assert!(g.contains("5+ tool calls"), "missing 5+ trigger: {g}");
+        assert!(g.contains("outdated"), "missing patch trigger: {g}");
+        // Real actions, not hermes's `skill_manage` shim.
+        assert!(
+            g.contains("action='create'"),
+            "must reference create action: {g}"
+        );
+        assert!(
+            g.contains("action='patch'"),
+            "must reference patch action: {g}"
+        );
+        // Real tool name — dirge has one combined `skill` tool, not the
+        // hermes `skill_view`/`skill_manage` pair.
+        assert!(
+            !g.contains("skill_manage"),
+            "should not reference hermes tool name skill_manage: {g}"
+        );
     }
 
     /// The project-skills preamble must direct the model to a real
