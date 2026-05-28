@@ -335,6 +335,28 @@ pub fn spawn_curator_review(
     });
 }
 
+/// dirge-5cm9 / dirge-5gn6 / dirge-bx4g — fire the provider's
+/// `on_session_end` hook iff (a) a memory provider is attached
+/// and (b) the session has messages to report. The hook receives
+/// the full transcript built from `session.messages`.
+///
+/// Skip on empty sessions so /clear-then-/clear and other
+/// no-message sequences don't fire a useless empty-transcript
+/// hook every time.
+pub fn maybe_fire_session_end(
+    agent: &crate::provider::AnyAgent,
+    session: &crate::session::Session,
+) {
+    if session.messages.is_empty() {
+        return;
+    }
+    let Some(provider) = agent.memory_provider() else {
+        return;
+    };
+    let transcript = build_transcript(session);
+    provider.on_session_end(&transcript);
+}
+
 /// Build a human-readable transcript from session messages for
 /// background review. Includes user text, assistant text, tool
 /// call names+args, and tool results. Compaction summaries are
@@ -403,6 +425,111 @@ mod tests {
 
     fn make_session() -> Session {
         Session::new("test-provider", "test-model", 128_000)
+    }
+
+    // ── dirge-5cm9 / dirge-5gn6 / dirge-bx4g — session-end helper ──
+
+    use crate::agent::tools::ToolCache;
+    use crate::extras::memory_provider::MemoryProvider;
+    use crate::provider::{AnyAgent, AnyAgentInner};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RecordingEndProvider {
+        ends: Mutex<Vec<String>>,
+    }
+    impl MemoryProvider for RecordingEndProvider {
+        fn name(&self) -> &str {
+            "recording-end"
+        }
+        fn view(&self, _: &str) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+        fn add(&self, _: &str, _: &str) -> Result<serde_json::Value, String> {
+            Ok(serde_json::Value::Null)
+        }
+        fn replace(&self, _: &str, _: &str, _: &str) -> Result<serde_json::Value, String> {
+            Ok(serde_json::Value::Null)
+        }
+        fn remove(&self, _: &str, _: &str) -> Result<serde_json::Value, String> {
+            Ok(serde_json::Value::Null)
+        }
+        fn on_session_end(&self, transcript: &str) {
+            self.ends.lock().unwrap().push(transcript.to_string());
+        }
+    }
+
+    fn agent_with_recording_provider() -> (AnyAgent, Arc<RecordingEndProvider>) {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+        let client = openai::Client::new("test-key")
+            .expect("openai client")
+            .completions_api();
+        let model = client.completion_model("gpt-4o");
+        let inner_agent = rig::agent::AgentBuilder::new(model).build();
+        let provider = Arc::new(RecordingEndProvider::default());
+        let provider_dyn: Arc<dyn MemoryProvider> = provider.clone();
+        let agent = AnyAgent::new(
+            AnyAgentInner::OpenAI(inner_agent),
+            ToolCache::new(),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            String::new(),
+            "gpt-4o".to_string(),
+        )
+        .with_memory_provider(provider_dyn);
+        (agent, provider)
+    }
+
+    #[test]
+    fn maybe_fire_session_end_fires_with_transcript_when_messages_present() {
+        let (agent, provider) = agent_with_recording_provider();
+        let mut session = make_session();
+        session.add_message(MessageRole::User, "hello");
+        session.add_message(MessageRole::Assistant, "hi back");
+
+        maybe_fire_session_end(&agent, &session);
+
+        let ends = provider.ends.lock().unwrap();
+        assert_eq!(ends.len(), 1, "exactly one end fire");
+        assert!(ends[0].contains("User: hello"));
+        assert!(ends[0].contains("Assistant: hi back"));
+    }
+
+    #[test]
+    fn maybe_fire_session_end_skips_empty_sessions() {
+        let (agent, provider) = agent_with_recording_provider();
+        let session = make_session(); // no messages
+
+        maybe_fire_session_end(&agent, &session);
+
+        assert!(
+            provider.ends.lock().unwrap().is_empty(),
+            "empty session must not fire the hook"
+        );
+    }
+
+    #[test]
+    fn maybe_fire_session_end_noop_when_no_provider_attached() {
+        // Build an agent WITHOUT calling with_memory_provider.
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+        let client = openai::Client::new("test-key").unwrap().completions_api();
+        let model = client.completion_model("gpt-4o");
+        let inner_agent = rig::agent::AgentBuilder::new(model).build();
+        let agent = AnyAgent::new(
+            AnyAgentInner::OpenAI(inner_agent),
+            ToolCache::new(),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            String::new(),
+            "gpt-4o".to_string(),
+        );
+        let mut session = make_session();
+        session.add_message(MessageRole::User, "hi");
+
+        // Must not panic, must be a silent no-op.
+        maybe_fire_session_end(&agent, &session);
     }
 
     #[test]
@@ -509,7 +636,6 @@ mod tests {
     // so they take a serial mutex to avoid clobbering each other in
     // parallel test runs.
 
-    use std::sync::Mutex;
     static LAST_REVIEW_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_last_review() {

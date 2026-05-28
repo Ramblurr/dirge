@@ -815,6 +815,14 @@ async fn main() -> anyhow::Result<()> {
             session.add_message(MessageRole::Assistant, &response);
             session::storage::save_session(&session)?;
         }
+        // dirge-bx4g: --print is a one-shot. After the response is
+        // saved (or skipped under --no-session), the session is
+        // ending. Fire on_session_end so plugin providers see the
+        // boundary. Skipped when --no-session is set since the
+        // session_id_for_print was already None.
+        if !cli.no_session {
+            crate::agent::review::maybe_fire_session_end(&agent, &session);
+        }
     } else {
         #[cfg(feature = "loop")]
         if cli.loop_mode {

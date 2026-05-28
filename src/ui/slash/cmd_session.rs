@@ -100,12 +100,8 @@ pub(super) async fn cmd_sessions(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyh
                 // on_session_end provider hook BEFORE we replace
                 // `*ctx.session` — at this point the old agent
                 // still holds the provider keyed to the leaving
-                // session. Build a transcript from the live
-                // session and dispatch.
-                if let Some(provider) = ctx.agent.memory_provider() {
-                    let transcript = crate::agent::review::build_transcript(ctx.session);
-                    provider.on_session_end(&transcript);
-                }
+                // session.
+                crate::agent::review::maybe_fire_session_end(ctx.agent, ctx.session);
                 *ctx.session = s;
                 let restored = ctx.session.current_prompt_name.clone();
                 if let Some(name) = restored.as_deref()
@@ -206,6 +202,12 @@ pub(super) async fn cmd_tasks(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
 }
 
 pub(super) async fn cmd_clear(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
+    // dirge-5cm9: /clear truncates session state to zero —
+    // a genuine session-reset boundary. Fire the provider hook
+    // BEFORE the truncation while the transcript is still
+    // intact so the provider sees the messages it's about to
+    // lose.
+    crate::agent::review::maybe_fire_session_end(ctx.agent, ctx.session);
     ctx.session.messages.clear();
     ctx.session.total_estimated_tokens = 0;
     ctx.session.compactions.clear();

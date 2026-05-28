@@ -887,6 +887,12 @@ pub async fn run_interactive(
                                     is_running,
                                 )?;
                             } else {
+                                // dirge-bx4g: clean exit via Ctrl+C / Ctrl+D
+                                // while idle — fire on_session_end so plugin
+                                // providers see the session boundary.
+                                crate::agent::review::maybe_fire_session_end(
+                                    &agent, session,
+                                );
                                 break;
                             }
                             continue;
