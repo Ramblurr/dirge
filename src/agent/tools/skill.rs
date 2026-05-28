@@ -565,4 +565,47 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Security scan"));
     }
+
+    /// End-to-end: the action name the project-skills preamble tells
+    /// the model to use must actually load a real skill. Parses the
+    /// action out of `PROJECT_SKILLS_PREAMBLE` and drives `SkillTool`
+    /// with it. See dirge-rq65.
+    #[test]
+    fn integration_preamble_action_loads_skill() {
+        use crate::agent::prompt::PROJECT_SKILLS_PREAMBLE;
+
+        // Extract the action name from the literal `action='X'` token.
+        let marker = "action='";
+        let start = PROJECT_SKILLS_PREAMBLE
+            .find(marker)
+            .expect("PROJECT_SKILLS_PREAMBLE must mention action='...'")
+            + marker.len();
+        let rest = &PROJECT_SKILLS_PREAMBLE[start..];
+        let end = rest
+            .find('\'')
+            .expect("PROJECT_SKILLS_PREAMBLE action token must close with '");
+        let action_from_preamble = &rest[..end];
+
+        let skills = make_skills();
+        let (mgr, _dir) = temp_skills_dir();
+        let tool = SkillTool::new(skills, mgr, None, None, None);
+        let rt = make_runtime();
+
+        let result = rt.block_on(tool.call(SkillArgs {
+            action: action_from_preamble.into(),
+            name: Some("test-skill".into()),
+            content: None,
+            old_string: None,
+            new_string: None,
+        }));
+        assert!(
+            result.is_ok(),
+            "preamble-advertised action '{}' failed end-to-end: {:?}",
+            action_from_preamble,
+            result
+        );
+        let output = result.unwrap();
+        assert!(output.contains("test-skill"));
+        assert!(output.contains("Do the thing."));
+    }
 }

@@ -2,7 +2,7 @@ use rig::agent::{Agent, AgentBuilder};
 use rig::completion::CompletionModel;
 use std::sync::Arc;
 
-use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
+use crate::agent::prompt::{PROJECT_SKILLS_PREAMBLE, SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
 use crate::agent::tools;
 use crate::agent::tools::ToolCache;
 use crate::agent::tools::background::BackgroundStore;
@@ -201,10 +201,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 }
             }
             if !skill_lines.is_empty() {
-                preamble.push_str("\n\n## Project Skills\n\n");
-                preamble.push_str("The following skills are available for this project. ");
-                preamble
-                    .push_str("Use the `skill` tool with action='view' to load full content.\n\n");
+                preamble.push_str(PROJECT_SKILLS_PREAMBLE);
                 for line in &skill_lines {
                     preamble.push_str(line);
                     preamble.push('\n');

@@ -90,6 +90,15 @@ Available tools:
 pub const TODO_TOOLS_PROMPT: &str = "\
 - write_todo_list: Create or update a structured task list to track progress in the current coding session. Use this for complex multi-step tasks. Replaces any existing todo list.";
 
+/// Heading + lead-in injected into the agent preamble when the project
+/// has discoverable skills. The bullet list of skills is appended after
+/// this template by `agent::builder::assemble_preamble`. Keep the
+/// `action='load'` wording in sync with `SkillTool`'s enum
+/// (`src/agent/tools/skill.rs:91`). See dirge-rq65 for the typo this
+/// constant supplants.
+pub const PROJECT_SKILLS_PREAMBLE: &str = "\n\n## Project Skills\n\nThe following skills are available for this project. \
+     Use the `skill` tool with action='load' to load full content.\n\n";
+
 /// Phase-3 — appended to the system prompt when
 /// `dynamic_tool_search` is on. Tells the model only a small
 /// always-on set of tools ships every turn and the rest must be
@@ -293,5 +302,31 @@ mod tests {
                 memory_line
             );
         }
+    }
+
+    /// The project-skills preamble must direct the model to a real
+    /// `SkillTool` action. The schema enum lives at
+    /// `src/agent/tools/skill.rs:91`. See dirge-rq65.
+    #[test]
+    fn project_skills_preamble_uses_real_action() {
+        let real_actions = ["load", "create", "edit", "patch", "delete", "list"];
+        let forbidden_actions = ["view", "read", "show", "get"];
+        let text = PROJECT_SKILLS_PREAMBLE;
+
+        for forbidden in forbidden_actions {
+            assert!(
+                !text.contains(&format!("action='{}'", forbidden)),
+                "project-skills preamble names unsupported action '{}': {}",
+                forbidden,
+                text
+            );
+        }
+        assert!(
+            real_actions
+                .iter()
+                .any(|a| text.contains(&format!("action='{}'", a))),
+            "project-skills preamble must name a real skill action: {}",
+            text
+        );
     }
 }
