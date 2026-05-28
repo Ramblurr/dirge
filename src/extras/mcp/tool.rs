@@ -531,20 +531,48 @@ pub(crate) fn first_external_path(
 /// (dirge-mgub) to decide whether the call wants to touch the
 /// filesystem outside the working directory.
 ///
-/// Scans the TOP LEVEL of the args object for:
-///   - scalar fields named `path`, `file_path`, `file`, `directory`,
-///     `dir`, `cwd` → one path each
-///   - the array field `paths` → one path per string element
+/// Two-pass extraction:
+///   1. Whitelisted keys (`path`, `paths`, `file_path`, `file`,
+///      `directory`, `dir`, `cwd`, `src`, `src_path`, `source`,
+///      `target`, `target_path`, `dest`, `destination`,
+///      `input_file`, `output_file`, `working_dir`, `target_dir`)
+///      at the top level — covers the canonical schema names
+///      used by ~95% of MCP servers.
+///   2. Fallback: any TOP-LEVEL scalar field whose value looks
+///      path-shaped (starts with `/`, `./`, `../`, or `~/`).
+///      Catches MCPs with unconventional key names without
+///      flagging non-path strings that happen to contain `/`
+///      (e.g. URLs, regex patterns).
 ///
-/// Returns paths in declaration order; duplicates are preserved
-/// (the caller short-circuits on the first external hit anyway).
-/// Empty strings are filtered out — they're never a legitimate
-/// filesystem reference and would canonicalize to `working_dir`
-/// itself, falsely classifying as internal.
+/// Returns paths in declaration order; duplicates are
+/// preserved (the caller short-circuits on the first external
+/// hit anyway). Empty strings are filtered out — they're never
+/// a legitimate filesystem reference and would canonicalize to
+/// `working_dir` itself, falsely classifying as internal.
 fn extract_arg_paths(args: &JsonObject) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for key in ["path", "file_path", "file", "directory", "dir", "cwd"] {
-        if let Some(s) = args.get(key).and_then(|v| v.as_str())
+    // Pass 1: whitelisted keys.
+    const PATH_KEYS: &[&str] = &[
+        "path",
+        "file_path",
+        "file",
+        "directory",
+        "dir",
+        "cwd",
+        "src",
+        "src_path",
+        "source",
+        "target",
+        "target_path",
+        "dest",
+        "destination",
+        "input_file",
+        "output_file",
+        "working_dir",
+        "target_dir",
+    ];
+    for key in PATH_KEYS {
+        if let Some(s) = args.get(*key).and_then(|v| v.as_str())
             && !s.is_empty()
         {
             out.push(s.to_string());
@@ -557,6 +585,31 @@ fn extract_arg_paths(args: &JsonObject) -> Vec<String> {
             {
                 out.push(s.to_string());
             }
+        }
+    }
+    // Pass 2: fallback — any other top-level scalar that looks
+    // path-shaped. Skips keys already covered in pass 1 to avoid
+    // duplicates.
+    let seen_keys: std::collections::HashSet<&str> = PATH_KEYS
+        .iter()
+        .copied()
+        .chain(std::iter::once("paths"))
+        .collect();
+    for (key, val) in args.iter() {
+        if seen_keys.contains(key.as_str()) {
+            continue;
+        }
+        let Some(s) = val.as_str() else { continue };
+        if s.is_empty() {
+            continue;
+        }
+        // Path-shaped heuristic. Conservative: only catches
+        // absolute / explicitly-relative / home-anchored
+        // prefixes so URLs (`https://…`), regex (`.*/foo`),
+        // and arbitrary strings don't trip the guard.
+        if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") || s.starts_with("~/")
+        {
+            out.push(s.to_string());
         }
     }
     out
@@ -743,6 +796,60 @@ mod tests {
         let args = serde_json::json!({
             "path": abs_in,
             "paths": ["./relative-inside.rs"],
+        });
+        let obj = args.as_object().unwrap().clone();
+        assert!(first_external_path(&perm, &obj, false).is_none());
+    }
+
+    /// Nit fix: extended path-key whitelist catches MCPs using
+    /// `src_path`, `target_dir`, `output_file`, etc. — the original
+    /// 6-key list missed common alternates.
+    #[test]
+    fn mcp_external_path_guard_catches_extended_key_names() {
+        let (perm, _cwd) = mk_perm(PermissionConfig::default());
+        for key in [
+            "src",
+            "src_path",
+            "source",
+            "target",
+            "target_path",
+            "dest",
+            "destination",
+            "input_file",
+            "output_file",
+            "working_dir",
+            "target_dir",
+        ] {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                key.to_string(),
+                serde_json::Value::String("/etc/passwd".to_string()),
+            );
+            assert!(
+                first_external_path(&perm, &obj, false).is_some(),
+                "extended key {key:?} should be picked up by the guard",
+            );
+        }
+    }
+
+    /// Nit fix: when an MCP uses a non-whitelisted key but the value
+    /// is path-shaped (starts with `/`, `./`, `../`, `~/`), the
+    /// fallback pass catches it. URLs and non-path strings must NOT
+    /// trip the guard.
+    #[test]
+    fn mcp_external_path_guard_path_shaped_fallback() {
+        let (perm, _cwd) = mk_perm(PermissionConfig::default());
+        // Path-shaped value under an unconventional key → caught.
+        let args = serde_json::json!({"weird_key_name_my_mcp_uses": "/etc/passwd"});
+        let obj = args.as_object().unwrap().clone();
+        assert!(first_external_path(&perm, &obj, false).is_some());
+
+        // URLs and arbitrary strings under unconventional keys → NOT
+        // caught (no false positives).
+        let args = serde_json::json!({
+            "url": "https://example.com/path",
+            "regex": ".*/foo",
+            "name": "foo/bar",
         });
         let obj = args.as_object().unwrap().clone();
         assert!(first_external_path(&perm, &obj, false).is_none());

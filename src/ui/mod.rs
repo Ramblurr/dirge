@@ -1086,8 +1086,16 @@ pub async fn run_interactive(
                                         );
                                     }
                                     KillOutcome::NotFound => {
-                                        // Already finished — leave the
-                                        // tab alone; nothing to abort.
+                                        // Already finished — surface a
+                                        // brief note so the user knows
+                                        // Ctrl+K worked but had nothing
+                                        // to abort, rather than silently
+                                        // ignoring the keypress.
+                                        let _ = renderer.write_line_to_chat(
+                                            active,
+                                            "(subagent already finished — nothing to kill)",
+                                            theme::dim(),
+                                        );
                                     }
                                     KillOutcome::Ambiguous(_) => {
                                         // Exact full-id passed in

@@ -455,16 +455,22 @@ impl PermissionChecker {
         let last_pat = matched.last().map(|(_, p)| p.clone());
         let action = match self.mode {
             SecurityMode::Restrictive => {
-                // Restrictive contract: "every action confirms".
-                // Demote any builtin-allow outcome back to Ask —
-                // both the dirge-sm9w memory case (`memory` has a
-                // builtin Allow rule for Standard/Accept) and the
-                // generic "no rule matched but default is Allow"
-                // case fall under this. Explicit user `deny` still
-                // denies.
-                let demote_to_ask = (tool == "memory" && base != Action::Deny)
-                    || (matched.is_empty() && self.default_action == Action::Allow);
-                if demote_to_ask { Action::Ask } else { base }
+                // Restrictive contract: every WRITE action confirms.
+                // Read-only builtins (read, grep, list_symbols, …)
+                // pass through as Allow — the user opted into
+                // restrictive to gate side effects, not to gate
+                // observation. For `memory`, only the read action
+                // (`view`) follows the same rule; the write actions
+                // (`add`/`replace`/`remove`) demote to Ask. Generic
+                // "no rule matched but default is Allow" also
+                // demotes. Explicit user `deny` still denies.
+                let memory_write = tool == "memory" && input != "view" && base != Action::Deny;
+                let bare_default = matched.is_empty() && self.default_action == Action::Allow;
+                if memory_write || bare_default {
+                    Action::Ask
+                } else {
+                    base
+                }
             }
             SecurityMode::Accept => match base {
                 Action::Ask => {
@@ -1014,15 +1020,23 @@ fn canonicalize_path_pattern(pattern_str: &str, working_dir: &str) -> Option<Str
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
         .or_else(|| {
-            // Fallback: try resolving as a possibly-relative path
+            // Fallback 1: try resolving as a possibly-relative path
             // anchored at working_dir. Only useful when the head
             // exists on disk; resolve_absolute is best-effort.
             let resolved = resolve_absolute(head_trimmed, working_dir);
             if resolved != head_trimmed {
-                Some(resolved)
-            } else {
-                None
+                return Some(resolved);
             }
+            // Fallback 2: the literal head doesn't exist (yet) —
+            // walk up to the closest existing ancestor, canonicalize
+            // THAT, and project the missing suffix back on. Handles
+            // "Allow always" on a not-yet-existent path that gets
+            // created later (e.g. user opts into a directory that
+            // doesn't exist; the next operation creates it; the
+            // canonicalised probe would otherwise diverge from the
+            // stored symlink-form pattern). See the symlink discussion
+            // in `register_with_canonical_variant`.
+            project_canonical_from_existing_ancestor(head_trimmed)
         })?;
     let mut out = canonical_head;
     if had_trailing_slash {
@@ -1030,6 +1044,38 @@ fn canonicalize_path_pattern(pattern_str: &str, working_dir: &str) -> Option<Str
     }
     out.push_str(tail);
     Some(out)
+}
+
+/// Walk up the ancestors of `path` until we find one that exists on
+/// disk, canonicalize that, and re-attach the missing-from-disk
+/// suffix. Returns `None` when no ancestor canonicalizes (e.g.
+/// pathological inputs or filesystem permission errors). Used by
+/// `canonicalize_path_pattern` to handle "Allow always" on a
+/// not-yet-existent path that's later created.
+fn project_canonical_from_existing_ancestor(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let mut tail_components: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut anchor = p;
+    loop {
+        match anchor.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                // Cache the component we're stripping so we can
+                // re-attach it after canonicalizing the parent.
+                if let Some(name) = anchor.file_name() {
+                    tail_components.push(name);
+                }
+                anchor = parent;
+                if let Ok(canonical) = std::fs::canonicalize(anchor) {
+                    let mut out = canonical;
+                    for name in tail_components.iter().rev() {
+                        out.push(name);
+                    }
+                    return Some(out.to_string_lossy().into_owned());
+                }
+            }
+            _ => return None,
+        }
+    }
 }
 
 #[cfg(test)]

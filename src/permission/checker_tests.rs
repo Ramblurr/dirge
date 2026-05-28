@@ -872,21 +872,32 @@ fn memory_tool_standard_mode_auto_approved() {
 }
 
 /// dirge-sm9w: Restrictive mode (`-R`) still prompts for memory.
-/// Restrictive's contract is "every action confirms" — the
-/// builtin Allow rule installed for Standard/Accept must be
-/// demoted back to Ask here.
+/// Restrictive's contract is "every WRITE action confirms" —
+/// the builtin Allow rule installed for Standard/Accept must
+/// be demoted back to Ask for `add`/`replace`/`remove`, but
+/// the read action (`view`) follows the read-only convention
+/// (read, grep, list_symbols, … all pass through as Allow in
+/// restrictive — restrictive gates side effects, not
+/// observation).
 #[test]
-fn memory_tool_restrictive_mode_still_prompts() {
+fn memory_tool_restrictive_mode_writes_prompt_reads_allow() {
     let mut checker = PermissionChecker::new(
         &PermissionConfig::default(),
         SecurityMode::Restrictive,
         Some(std::path::PathBuf::from("/tmp")),
     );
-    for action in ["view", "add", "replace", "remove"] {
+    // view is a read — passes through.
+    let result = checker.check("memory", "view");
+    assert!(
+        matches!(result, CheckResult::Allowed),
+        "memory.view must Allow in Restrictive (it's a read); got {result:?}",
+    );
+    // add/replace/remove are writes — demoted to Ask.
+    for action in ["add", "replace", "remove"] {
         let result = checker.check("memory", action);
         assert!(
             matches!(result, CheckResult::Ask),
-            "memory.{action} must Ask in Restrictive; got {result:?}",
+            "memory.{action} must Ask in Restrictive (it's a write); got {result:?}",
         );
     }
 }
