@@ -542,9 +542,18 @@ pub async fn run_loop(
             // Pi lines 202-216: tool calls + results.
             let mut tool_calls = extract_tool_calls_from(&assistant_msg);
 
-            // Scavenge: scan reasoning content for tool calls the
-            // model forgot to emit in `tool_calls`. Port of Reasonix
-            // repair/index.ts:65-85.
+            // Scavenge: scan reasoning AND regular text content for
+            // tool calls the model forgot to emit in `tool_calls`.
+            // Port of Reasonix repair/index.ts:71 (`[reasoningContent
+            // ?? "", content ?? ""].filter(Boolean).join("\n")`).
+            //
+            // dirge-ngic: previously only Thinking blocks were
+            // scanned. A model emitting <|DSML|invoke …/> in regular
+            // content (the common R1-in-content case) was silently
+            // missed. Joining Text + Thinking matches Reasonix's
+            // dual-channel scan exactly; the scavenger's internal
+            // `strip_dsml_blocks` keeps inner-JSON in DSML params
+            // from being double-counted.
             //
             // Only tools in the current context's tool set are
             // accepted. Deduplication by (name, args) signature
@@ -555,18 +564,10 @@ pub async fn run_loop(
                 .iter()
                 .map(|t| t.name().to_string())
                 .collect();
-            let reasoning_text: String = assistant_msg
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Thinking { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !reasoning_text.is_empty() {
+            let scavenge_source = build_scavenge_source(&assistant_msg.content);
+            if !scavenge_source.is_empty() {
                 let scavenge_result =
-                    super::scavenge::scavenge_tool_calls(Some(&reasoning_text), &allowed_names, 4);
+                    super::scavenge::scavenge_tool_calls(Some(&scavenge_source), &allowed_names, 4);
                 if !scavenge_result.calls.is_empty() {
                     // LOOP-12: canonicalize the JSON so different
                     // key orders or numeric reprs (1 vs 1.0) for the
@@ -634,6 +635,26 @@ pub async fn run_loop(
                     }
                 }
             }
+
+            // dirge-7bwx: truncation repair runs BEFORE storm
+            // filter. Port of Reasonix's pipeline order at
+            // `repair/index.ts:88-109` (truncation) then
+            // `:113-121` (storm). Previously dirge ran the
+            // closer inside `validate_and_repair` at dispatch
+            // time — after storm. That meant two calls whose
+            // args strings both truncate to the same repaired
+            // form survived storm (different pre-repair
+            // signatures), then dispatched identically. Doing
+            // the repair here lets storm see the canonical
+            // post-repair signature and dedupe correctly.
+            //
+            // Hard-fallback (closer can't rebalance the stack)
+            // leaves `arguments` as the original Value::String;
+            // validate_and_repair downstream will surface that
+            // as a real validation error rather than silently
+            // dispatching a fabricated `{}` — same invariant
+            // Reasonix maintains at `repair/index.ts:93-102`.
+            apply_truncation_repair(&mut tool_calls, &config.repair_stats);
 
             let mut tool_results: Vec<ToolResultMessage> = Vec::new();
             has_more_tool_calls = false;
@@ -965,6 +986,62 @@ fn tool_result_to_value(t: &ToolResultMessage) -> Value {
         "details": t.details,
         "isError": t.is_error,
     })
+}
+
+/// dirge-ngic: build the merged source the scavenger inspects from
+/// the assistant message's content blocks. Reasonix combines both
+/// reasoning and visible content (`loop.ts:910-913` →
+/// `repair/index.ts:71`); dirge previously merged only Thinking,
+/// losing any DSML invoke that arrived as plain Text (Anthropic
+/// often streams DSML in Text rather than Thinking on cache hit).
+/// Returns the concatenated text with `\n` between blocks.
+pub(crate) fn build_scavenge_source(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Thinking { text } => Some(text.as_str()),
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// dirge-7bwx: walk the tool-call list and apply the truncation
+/// closer to any call whose arguments arrived as a `Value::String`
+/// that fails to parse as JSON. Successful repairs replace the
+/// arguments in-place and record `RepairKind::TruncationFixed` in
+/// stats; hard fallback leaves the original string untouched so
+/// validation downstream surfaces the failure (Reasonix
+/// invariant at `repair/index.ts:93-102`).
+///
+/// Called BEFORE `storm.filter_calls` so two streams whose raw
+/// args differ but repair identically dedupe under storm.
+pub(crate) fn apply_truncation_repair(
+    tool_calls: &mut [crate::agent::agent_loop::ToolCall],
+    repair_stats: &crate::agent::agent_loop::tool_input_repair::RepairStats,
+) {
+    use crate::agent::agent_loop::tool_input_repair::{RepairKind, repair_truncated_json};
+    for tc in tool_calls.iter_mut() {
+        if let serde_json::Value::String(raw) = &tc.arguments {
+            // Already-valid JSON-as-string: promote to its parsed
+            // form so the storm filter's canonical signature matches
+            // any peer that arrived as a real Object/Array. No
+            // repair stat — nothing was healed.
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+                tc.arguments = parsed;
+                continue;
+            }
+            // Truncated / malformed: run the brace-closer.
+            let r = repair_truncated_json(raw);
+            if !r.fallback {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&r.repaired) {
+                    tc.arguments = parsed;
+                    repair_stats.record(RepairKind::TruncationFixed);
+                }
+            }
+        }
+    }
 }
 
 // =====================================================================

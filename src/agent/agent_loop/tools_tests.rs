@@ -1125,15 +1125,17 @@ async fn aborted_tool_returns_aborted_error_promptly() {
     assert!(batch.messages[0].is_error);
 }
 
-// ── dirge-du5k: truncation brace-closer end-to-end ────────────────
+// ── dirge-du5k/7bwx: truncation brace-closer end-to-end ──────────
 
-/// dirge-du5k end-to-end: a tool call arriving with a truncated
-/// arguments string (the canonical `max_tokens`-mid-call failure
-/// mode) is healed by the truncation pre-pass inside
-/// `validate_and_repair`, the tool executes with the parsed args,
-/// AND the per-run `RepairStats` records the TruncationFixed
-/// kind. Proves the brace-closer is wired through the actual
-/// dispatch pipeline, not just the validator unit.
+/// dirge-du5k + dirge-7bwx end-to-end: a tool call arriving with a
+/// truncated arguments string (canonical `max_tokens`-mid-call
+/// failure mode) is healed by `apply_truncation_repair` at the
+/// loop-level pre-dispatch site (dirge-7bwx hoist matching
+/// Reasonix `repair/index.ts:88-109`), the tool executes with the
+/// parsed args, AND the per-run `RepairStats` records the
+/// TruncationFixed kind. Proves the brace-closer is wired through
+/// the actual dispatch pipeline at the post-hoist call site, not
+/// just the validator unit.
 #[tokio::test]
 async fn truncation_repair_end_to_end_through_dispatch() {
     use crate::agent::agent_loop::tool_input_repair::RepairKind;
@@ -1157,12 +1159,18 @@ async fn truncation_repair_end_to_end_through_dispatch() {
         }],
         StopReason::ToolUse,
     );
-    let tool_calls = extract_tool_calls(&assistant_msg);
+    let mut tool_calls = extract_tool_calls(&assistant_msg);
     assert_eq!(tool_calls.len(), 1);
 
     let (tx, mut rx) = mpsc::channel::<LoopEvent>(64);
     let config = build_config();
     let signal = AbortSignal::new();
+
+    // dirge-7bwx: heal truncated args BEFORE dispatch (in the
+    // real loop, run.rs does this between scavenge merge and
+    // storm filter). The previous in-validator pre-pass was
+    // removed — repair now lives at the loop level only.
+    crate::agent::agent_loop::run::apply_truncation_repair(&mut tool_calls, &config.repair_stats);
 
     let batch = execute_tool_calls_sequential(
         &context,

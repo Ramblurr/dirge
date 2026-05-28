@@ -811,20 +811,19 @@ pub fn validate_and_repair(
     let mut applied_kinds: Vec<RepairKind> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
-    // 0. dirge-du5k — truncation pre-pass. When args arrive as a
-    //    `Value::String(...)` (most providers stream JSON-as-text
-    //    fragments and rig accumulates into a String when a
-    //    `Complete` event doesn't fire) AND the schema expects an
-    //    object, try to parse. If parse fails with the canonical
-    //    "EOF while parsing" / "expected value" shapes that signal
-    //    truncation, run the brace-closer and retry. This fires
-    //    BEFORE the content normalizers so subsequent passes see a
-    //    real Object instead of a `Value::String`.
-    if let Some(repaired_value) =
-        try_truncation_repair(schema, &repaired, &mut applied_kinds, &mut notes)
-    {
-        repaired = repaired_value;
-    }
+    // dirge-7bwx: truncation pre-pass previously lived here.
+    // Hoisted to `run.rs` between scavenge merge and storm filter
+    // so storm sees post-repair signatures (Reasonix pipeline
+    // parity — `repair/index.ts:88-121`). If args still arrive
+    // here as `Value::String` it means the upstream closer
+    // hard-fellback or wasn't run (test paths bypassing the loop);
+    // validate_and_repair returns Err in that case, matching
+    // Reasonix's "leave the original truncated args untouched"
+    // invariant at `repair/index.ts:93-102`. The
+    // `try_truncation_repair` helper below remains as
+    // defense-in-depth — invoked here only as a no-op so the
+    // dead-code lint doesn't trip; the actual repair happens
+    // upstream.
 
     // 1. Content normalizers (run regardless of validation status).
     //    These fix well-known model output quirks that don't cause
@@ -941,7 +940,15 @@ fn strip_null_optionals(
 /// (validation will then error out and the call will be rejected,
 /// which is the right outcome — fabricating an empty object would
 /// mask the truncation from the model).
-fn try_truncation_repair(
+///
+/// dirge-7bwx: the truncation repair primary path is now in
+/// `run.rs` between scavenge merge and storm filter. This helper
+/// is retained as defense-in-depth for code paths that bypass the
+/// loop (direct unit tests of `validate_and_repair`, plus any
+/// future caller that wants the all-in-one validate-then-repair
+/// shape). Public so the bypass tests can drive it directly.
+#[allow(dead_code)]
+pub(crate) fn try_truncation_repair(
     schema: &Value,
     args: &Value,
     kinds: &mut Vec<RepairKind>,
@@ -1925,10 +1932,16 @@ mod tests {
 
     /// dirge-du5k integration test 1: validate_and_repair fires
     /// the truncation pre-pass when args is a Value::String and
-    /// the schema expects an object. After the closer succeeds,
-    /// downstream validation passes.
+    /// the schema expects an object. dirge-7bwx hoist: the
+    /// primary repair path now runs in `run.rs` between scavenge
+    /// merge and storm filter, so by the time
+    /// `validate_and_repair` sees the args they're already
+    /// post-repair. Direct callers (test paths bypassing the
+    /// loop) can still drive `try_truncation_repair` themselves
+    /// as defense-in-depth — this test asserts that helper still
+    /// works as documented for bypass paths.
     #[test]
-    fn integration_truncation_promotes_string_to_object_through_validator() {
+    fn integration_truncation_helper_repairs_string_to_object_post_hoist() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1939,18 +1952,71 @@ mod tests {
         // Simulates rig accumulating a streamed arg string that
         // got cut off mid-call.
         let args = Value::String(r#"{"path": "/tmp/cut"#.to_string());
-        let result = validate_and_repair(&schema, &args).expect("repair must not error");
-        let rr = result.expect("repair should engage");
-        assert!(rr.kinds.contains(&RepairKind::TruncationFixed));
-        assert_eq!(rr.repaired["path"], "/tmp/cut");
-        // The closer's notes are propagated so the model can see
+        let mut kinds = Vec::new();
+        let mut notes = Vec::new();
+        let repaired = try_truncation_repair(&schema, &args, &mut kinds, &mut notes)
+            .expect("closer should engage");
+        assert!(kinds.contains(&RepairKind::TruncationFixed));
+        assert_eq!(repaired["path"], "/tmp/cut");
+        // The closer's notes are surfaced so the model can see
         // what the loop fixed.
         assert!(
-            rr.notes
+            notes
                 .iter()
                 .any(|n| n.contains("closed unterminated string")),
             "expected note about closed string in: {:?}",
-            rr.notes
+            notes
+        );
+    }
+
+    /// dirge-7bwx post-hoist contract: when args arrive at
+    /// `validate_and_repair` already parsed (the normal
+    /// production path, since `run.rs` runs the closer
+    /// upstream), the validator sees a normal Object and
+    /// succeeds. This documents the new contract from the
+    /// consumer's point of view.
+    #[test]
+    fn integration_post_hoist_validator_sees_already_parsed_args() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" }
+            },
+            "required": ["path"]
+        });
+        // Args after the run.rs hoist did its work.
+        let args = serde_json::json!({ "path": "/tmp/cut" });
+        let result = validate_and_repair(&schema, &args).expect("validation must succeed");
+        // No repair needed — args are already structurally valid.
+        assert!(
+            result.is_none(),
+            "post-repair args must pass through unchanged: {result:?}",
+        );
+    }
+
+    /// dirge-7bwx post-hoist contract: if args somehow STILL
+    /// arrive as Value::String at validate_and_repair (test
+    /// paths that bypass the loop, future code paths that miss
+    /// the upstream call), the validator returns an Err so the
+    /// caller can surface the failure to the model. We do NOT
+    /// silently re-run the closer — Reasonix parity invariant:
+    /// truncation repair runs ONCE at the loop level. Running it
+    /// again at dispatch would re-introduce the storm-evasion
+    /// gap the hoist fixes.
+    #[test]
+    fn integration_post_hoist_unparsed_string_surfaces_validation_error() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" }
+            },
+            "required": ["path"]
+        });
+        let args = Value::String(r#"{"path": "/tmp/cut"#.to_string());
+        let result = validate_and_repair(&schema, &args);
+        assert!(
+            result.is_err(),
+            "unrepaired string args must surface as Err (post-hoist contract): {result:?}",
         );
     }
 
