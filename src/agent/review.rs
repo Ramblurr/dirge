@@ -102,20 +102,56 @@ Target shape of the library: CLASS-LEVEL skills with a rich SKILL.md. Not a long
 
 "Nothing to save." is valid but should NOT be the default. Most coding sessions produce at least one learning."#;
 
-/// Spawn a background review task that evaluates the just-completed
-/// session and writes learnings to project memory and skills.
+/// dirge-ba0m: RAII guard that hard-aborts a forked runner's task
+/// on drop. The forked review/curator runners are SEPARATE tokio
+/// tasks; a core that only holds the runner's `event_rx` channel
+/// does NOT stop the runner when its own future is cancelled —
+/// dropping the channel just makes the runner's event sends no-op
+/// (`let _ = .send`), and its `loop_future` (the live LLM call +
+/// tool execution writing MEMORY.md / .usage.json / skills) keeps
+/// running to completion in the background.
 ///
-/// This is fire-and-forget — it runs in a `tokio::spawn` task and
-/// returns immediately. Failures are logged to stderr and never
-/// block the user.
+/// Without this guard, the post-session orchestrator's per-stage
+/// `tokio::time::timeout` firing on a hung provider would abandon
+/// the stage future but leave its runner orphaned and writing
+/// files CONCURRENTLY with the next stage — re-introducing the
+/// exact cross-pass races the orchestrator exists to eliminate
+/// (dirge-ba0m review HIGH). Holding `task` + `cancel_tx` in this
+/// guard means any cancellation path (timeout, future drop, panic)
+/// stops the runner. On normal completion the task is already
+/// finished, so `abort()` is a harmless no-op.
+struct AbortRunnerOnDrop {
+    task: tokio::task::JoinHandle<()>,
+    cancel_tx: tokio::sync::mpsc::Sender<()>,
+}
+
+impl Drop for AbortRunnerOnDrop {
+    fn drop(&mut self) {
+        // Cooperative cancel first (lets an in-flight consumer
+        // surface a clean cancelled-event), then hard abort at the
+        // next .await. Mirrors the UI's Ctrl+C handling.
+        let _ = self.cancel_tx.try_send(());
+        self.task.abort();
+    }
+}
+
+/// dirge-ba0m: awaitable core of the background review pass.
+/// Runs to completion — claims the rate-limit slot, drains the
+/// forked review runner's event stream inline, logs the action
+/// summary, and rolls the slot back on no-work. Returns when the
+/// pass is done so the post-session orchestrator can run the
+/// curators strictly afterward (a skill this review creates is
+/// flushed before the skills curator reads `.usage.json`).
 ///
-/// Set `review_prompt_override` to use a custom prompt instead of
-/// the default COMBINED_REVIEW_PROMPT. Pass `None` for the default.
-pub fn spawn_background_review(
+/// `claim_review_slot` stays scoped to THIS pass (the 15-min
+/// throttle is about the expensive review, not the 7-day-gated
+/// curators), so a rate-limited review returns early WITHOUT
+/// blocking the curators that run after it in the chain.
+pub(crate) async fn run_background_review(
     agent: AnyAgent,
     _paths: ProjectPaths,
     transcript: String,
-    review_prompt_override: Option<&str>,
+    review_prompt_override: Option<String>,
 ) {
     // dirge-bo88: atomic CAS claim of the next review slot. Returns
     // `None` if we lost the race or the rate-limit window is still
@@ -134,96 +170,98 @@ pub fn spawn_background_review(
         return;
     };
 
-    let prompt = review_prompt_override
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| COMBINED_REVIEW_PROMPT.to_string());
+    let prompt = review_prompt_override.unwrap_or_else(|| COMBINED_REVIEW_PROMPT.to_string());
 
-    tokio::spawn(async move {
-        // Build a review runner with only memory + skill tools.
-        let review_runner = agent.spawn_review_runner(prompt, transcript);
+    // Build a review runner with only memory + skill tools.
+    let review_runner = agent.spawn_review_runner(prompt, transcript);
 
-        // Drain events. Track tool calls so we can summarize what
-        // the review actually did (Hermes's action summary pattern).
-        let mut rx = review_runner.event_rx;
-        let mut had_error = false;
-        let mut tool_actions: Vec<String> = Vec::new();
+    // Drain events. Track tool calls so we can summarize what
+    // the review actually did (Hermes's action summary pattern).
+    // dirge-ba0m: keep the runner's task + cancel handle in an
+    // abort-on-drop guard so a cancelled future (orchestrator
+    // timeout) actually stops the runner instead of orphaning it.
+    let crate::agent::runner::AgentRunner {
+        event_rx,
+        task,
+        cancel_tx,
+        ..
+    } = review_runner;
+    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
+    let mut rx = event_rx;
+    let mut had_error = false;
+    let mut tool_actions: Vec<String> = Vec::new();
 
-        while let Some(event) = rx.recv().await {
-            use crate::event::AgentEvent;
-            match event {
-                AgentEvent::Error(msg) => {
-                    tracing::warn!(
-                        target: "dirge::review",
-                        error = %msg,
-                        "Background review encountered an error"
-                    );
-                    had_error = true;
-                }
-                AgentEvent::ToolCall { name, .. } => {
-                    tool_actions.push(name.to_string());
-                }
-                AgentEvent::Done { .. } => {
-                    break;
-                }
-                _ => {
-                    // Tokens, tool calls, etc. — consumed silently.
-                }
+    while let Some(event) = rx.recv().await {
+        use crate::event::AgentEvent;
+        match event {
+            AgentEvent::Error(msg) => {
+                tracing::warn!(
+                    target: "dirge::review",
+                    error = %msg,
+                    "Background review encountered an error"
+                );
+                had_error = true;
+            }
+            AgentEvent::ToolCall { name, .. } => {
+                tool_actions.push(name.to_string());
+            }
+            AgentEvent::Done { .. } => {
+                break;
+            }
+            _ => {
+                // Tokens, tool calls, etc. — consumed silently.
             }
         }
+    }
 
-        if !had_error && !tool_actions.is_empty() {
-            // Surface action summary so the user knows what was learned.
-            // Port of Hermes's `_safe_print` (background_review.py:514-516).
-            let summary = tool_actions
-                .iter()
-                .fold(Vec::<&str>::new(), |mut acc, a| {
-                    if !acc.contains(&a.as_str()) {
-                        acc.push(a.as_str());
-                    }
-                    acc
-                })
-                .join(" · ");
-            tracing::info!(
-                target: "dirge::review",
-                actions = %summary,
-                "💾 Self-improvement review: {}",
-                summary
-            );
-        } else if !had_error {
-            tracing::info!(
-                target: "dirge::review",
-                "Background review completed — project knowledge updated"
-            );
-        }
+    if !had_error && !tool_actions.is_empty() {
+        // Surface action summary so the user knows what was learned.
+        // Port of Hermes's `_safe_print` (background_review.py:514-516).
+        let summary = tool_actions
+            .iter()
+            .fold(Vec::<&str>::new(), |mut acc, a| {
+                if !acc.contains(&a.as_str()) {
+                    acc.push(a.as_str());
+                }
+                acc
+            })
+            .join(" · ");
+        tracing::info!(
+            target: "dirge::review",
+            actions = %summary,
+            "💾 Self-improvement review: {}",
+            summary
+        );
+    } else if !had_error {
+        tracing::info!(
+            target: "dirge::review",
+            "Background review completed — project knowledge updated"
+        );
+    }
 
-        // dirge-bo88: if the review never managed to do any work
-        // (errored before any tool call), roll back the timestamp so
-        // the next session can retry instead of being silently locked
-        // out for 15 minutes.
-        if had_error && tool_actions.is_empty() {
-            release_review_slot(prev, now);
-            tracing::debug!(
-                target: "dirge::review",
-                "Released LAST_REVIEW slot — review produced no work"
-            );
-        }
-    });
+    // dirge-bo88: if the review never managed to do any work
+    // (errored before any tool call), roll back the timestamp so
+    // the next session can retry instead of being silently locked
+    // out for 15 minutes.
+    if had_error && tool_actions.is_empty() {
+        release_review_slot(prev, now);
+        tracing::debug!(
+            target: "dirge::review",
+            "Released LAST_REVIEW slot — review produced no work"
+        );
+    }
 }
 
-/// Spawn the curator's LLM consolidation pass — fire-and-forget.
-/// Reuses the loop-runner infrastructure but routes through
-/// `spawn_curator_runner` (skill-only — dirge-yai1) so the model
-/// literally cannot write memory entries even if the prompt-level
-/// instruction slips. See dirge-odv3 + dirge-yai1.
+/// dirge-ba0m: awaitable core of the skills curator LLM
+/// consolidation pass. Runs to completion. Skips (returns early)
+/// when the candidate list has no agent-created skills.
 ///
+/// Routes through `spawn_curator_runner` (skill-only — dirge-yai1)
+/// so the model literally cannot write memory entries even if the
+/// prompt-level instruction slips. See dirge-odv3 + dirge-yai1.
 /// `candidate_list` is the rendered output of
-/// `crate::extras::skills::curator::render_candidate_list` — the
-/// caller assembles it from the project's `UsageStore`.
-///
-/// Skips entirely (logs at debug) when the candidate list contains
-/// the "No agent-created skills" sentinel — there's nothing to
-/// consolidate.
-pub fn spawn_curator_review(
+/// `crate::extras::skills::curator::render_candidate_list`.
+pub(crate) async fn run_curator_review(
     agent: AnyAgent,
     paths: crate::extras::dirge_paths::ProjectPaths,
     candidate_list: String,
@@ -247,110 +285,110 @@ pub fn spawn_curator_review(
     let started = std::time::SystemTime::now();
     let started_rfc = chrono::Utc::now().to_rfc3339();
 
-    tokio::spawn(async move {
-        // dirge-yai1: skill-only runner — memory tool is filtered
-        // out at the registry level so the curator can't write
-        // memory entries even if it tried.
-        let runner = agent.spawn_curator_runner(prompt, String::new());
-        let mut rx = runner.event_rx;
-        let mut tool_actions: Vec<String> = Vec::new();
-        let mut error_msg: Option<String> = None;
-        while let Some(event) = rx.recv().await {
-            use crate::event::AgentEvent;
-            match event {
-                AgentEvent::Error(msg) => {
-                    tracing::warn!(
-                        target: "dirge::curator",
-                        error = %msg,
-                        "Curator LLM pass encountered an error"
-                    );
-                    error_msg.get_or_insert_with(|| msg.to_string());
-                }
-                AgentEvent::ToolCall { name, .. } => {
-                    tool_actions.push(name.to_string());
-                }
-                AgentEvent::Done { .. } => break,
-                _ => {}
-            }
-        }
-
-        if error_msg.is_none() && !tool_actions.is_empty() {
-            let summary = tool_actions
-                .iter()
-                .fold(Vec::<&str>::new(), |mut acc, a| {
-                    if !acc.contains(&a.as_str()) {
-                        acc.push(a.as_str());
-                    }
-                    acc
-                })
-                .join(" · ");
-            tracing::info!(
-                target: "dirge::curator",
-                actions = %summary,
-                "🗂  Skill curator pass: {}",
-                summary
-            );
-        }
-
-        // dirge-3m4h: write a REPORT.md so users have an audit
-        // trail of what the curator did. Re-render the candidate
-        // list AFTER the pass to capture the post-consolidation
-        // shape — the LLM may have created umbrellas, archived
-        // siblings, etc.
-        let paths_for_report = paths.clone();
-        let after_candidates = tokio::task::spawn_blocking(move || {
-            crate::extras::skills::usage::UsageStore::load(&paths_for_report)
-                .ok()
-                .map(|store| crate::extras::skills::curator::render_candidate_list(&store))
-                .unwrap_or_else(|| String::from("(failed to render after-state)"))
-        })
-        .await
-        .unwrap_or_else(|_| String::from("(blocking task failed)"));
-
-        let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
-        let report = crate::extras::skills::curator::CuratorReport {
-            started_at_rfc3339: started_rfc,
-            elapsed_secs,
-            before_candidates,
-            after_candidates,
-            tool_actions,
-            error: error_msg,
-        };
-        match crate::extras::skills::curator::write_curator_report(&paths, &report) {
-            Ok(run_dir) => {
-                tracing::info!(
-                    target: "dirge::curator",
-                    run_dir = %run_dir.display(),
-                    "Curator report written"
-                );
-            }
-            Err(e) => {
+    // dirge-yai1: skill-only runner — memory tool is filtered
+    // out at the registry level so the curator can't write
+    // memory entries even if it tried.
+    // dirge-ba0m: abort-on-drop guard (see run_background_review).
+    let runner = agent.spawn_curator_runner(prompt, String::new());
+    let crate::agent::runner::AgentRunner {
+        event_rx,
+        task,
+        cancel_tx,
+        ..
+    } = runner;
+    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
+    let mut rx = event_rx;
+    let mut tool_actions: Vec<String> = Vec::new();
+    let mut error_msg: Option<String> = None;
+    while let Some(event) = rx.recv().await {
+        use crate::event::AgentEvent;
+        match event {
+            AgentEvent::Error(msg) => {
                 tracing::warn!(
                     target: "dirge::curator",
-                    error = %e,
-                    "Failed to write curator report (continuing)"
+                    error = %msg,
+                    "Curator LLM pass encountered an error"
                 );
+                error_msg.get_or_insert_with(|| msg.to_string());
             }
+            AgentEvent::ToolCall { name, .. } => {
+                tool_actions.push(name.to_string());
+            }
+            AgentEvent::Done { .. } => break,
+            _ => {}
         }
-    });
+    }
+
+    if error_msg.is_none() && !tool_actions.is_empty() {
+        let summary = tool_actions
+            .iter()
+            .fold(Vec::<&str>::new(), |mut acc, a| {
+                if !acc.contains(&a.as_str()) {
+                    acc.push(a.as_str());
+                }
+                acc
+            })
+            .join(" · ");
+        tracing::info!(
+            target: "dirge::curator",
+            actions = %summary,
+            "🗂  Skill curator pass: {}",
+            summary
+        );
+    }
+
+    // dirge-3m4h: write a REPORT.md so users have an audit
+    // trail of what the curator did. Re-render the candidate
+    // list AFTER the pass to capture the post-consolidation
+    // shape — the LLM may have created umbrellas, archived
+    // siblings, etc.
+    let paths_for_report = paths.clone();
+    let after_candidates = tokio::task::spawn_blocking(move || {
+        crate::extras::skills::usage::UsageStore::load(&paths_for_report)
+            .ok()
+            .map(|store| crate::extras::skills::curator::render_candidate_list(&store))
+            .unwrap_or_else(|| String::from("(failed to render after-state)"))
+    })
+    .await
+    .unwrap_or_else(|_| String::from("(blocking task failed)"));
+
+    let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let report = crate::extras::skills::curator::CuratorReport {
+        started_at_rfc3339: started_rfc,
+        elapsed_secs,
+        before_candidates,
+        after_candidates,
+        tool_actions,
+        error: error_msg,
+    };
+    match crate::extras::skills::curator::write_curator_report(&paths, &report) {
+        Ok(run_dir) => {
+            tracing::info!(
+                target: "dirge::curator",
+                run_dir = %run_dir.display(),
+                "Curator report written"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "dirge::curator",
+                error = %e,
+                "Failed to write curator report (continuing)"
+            );
+        }
+    }
 }
 
-/// dirge-mo0w PR-2: spawn the memory curator's LLM
-/// consolidation pass. Fire-and-forget. Mirror of
-/// `spawn_curator_review` but routes through
-/// `spawn_memory_curator_runner` (memory-only allow-list) so
-/// the model literally cannot write skills even if the prompt
-/// guard slips.
+/// dirge-ba0m: awaitable core of the memory curator LLM
+/// consolidation pass (dirge-mo0w PR-2). Runs to completion.
+/// Skips (returns early) when there are no stale candidates.
 ///
-/// Skips entirely when `report.stale_candidates` is empty — no
-/// LLM call when there's nothing to consolidate. The mechanical
-/// pass still produced an audit report in PR-1; the LLM is only
-/// useful when there are decisions to make.
-///
-/// Writes its own `LLM_REPORT.md` under
-/// `.dirge/memory/.curator_reports/{ts}/` so the audit trail is
-/// preserved separately from the mechanical pass.
-pub fn spawn_memory_curator_review(
+/// Routes through `spawn_memory_curator_runner` (memory-only
+/// allow-list) so the model literally cannot write skills even
+/// if the prompt guard slips. Writes its own `LLM_REPORT.md`
+/// under `.dirge/memory/.curator_reports/{ts}/` so the audit
+/// trail is preserved separately from the mechanical pass.
+pub(crate) async fn run_memory_curator_review(
     agent: AnyAgent,
     paths: crate::extras::dirge_paths::ProjectPaths,
     report: crate::extras::memory_curator::MechanicalReport,
@@ -381,83 +419,89 @@ pub fn spawn_memory_curator_review(
     let started_filename = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let report_for_writer = report.clone();
 
-    tokio::spawn(async move {
-        // Memory-only runner — same forked-runner pattern as
-        // `spawn_curator_runner` but inverse allow-list.
-        let runner = agent.spawn_memory_curator_runner(prompt, String::new());
-        let mut rx = runner.event_rx;
-        let mut tool_actions: Vec<String> = Vec::new();
-        let mut error_msg: Option<String> = None;
-        while let Some(event) = rx.recv().await {
-            use crate::event::AgentEvent;
-            match event {
-                AgentEvent::Error(msg) => {
-                    tracing::warn!(
-                        target: "dirge::memory_curator",
-                        error = %msg,
-                        "Memory curator LLM pass encountered an error",
-                    );
-                    error_msg.get_or_insert_with(|| msg.to_string());
-                }
-                AgentEvent::ToolCall { name, .. } => {
-                    tool_actions.push(name.to_string());
-                }
-                AgentEvent::Done { .. } => break,
-                _ => {}
+    // Memory-only runner — same forked-runner pattern as
+    // `spawn_curator_runner` but inverse allow-list.
+    // dirge-ba0m: abort-on-drop guard (see run_background_review).
+    let runner = agent.spawn_memory_curator_runner(prompt, String::new());
+    let crate::agent::runner::AgentRunner {
+        event_rx,
+        task,
+        cancel_tx,
+        ..
+    } = runner;
+    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
+    let mut rx = event_rx;
+    let mut tool_actions: Vec<String> = Vec::new();
+    let mut error_msg: Option<String> = None;
+    while let Some(event) = rx.recv().await {
+        use crate::event::AgentEvent;
+        match event {
+            AgentEvent::Error(msg) => {
+                tracing::warn!(
+                    target: "dirge::memory_curator",
+                    error = %msg,
+                    "Memory curator LLM pass encountered an error",
+                );
+                error_msg.get_or_insert_with(|| msg.to_string());
             }
+            AgentEvent::ToolCall { name, .. } => {
+                tool_actions.push(name.to_string());
+            }
+            AgentEvent::Done { .. } => break,
+            _ => {}
         }
+    }
 
-        let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
-        if error_msg.is_none() {
-            let summary = if tool_actions.is_empty() {
-                "no-op".to_string()
-            } else {
-                tool_actions
-                    .iter()
-                    .fold(Vec::<&str>::new(), |mut acc, a| {
-                        if !acc.contains(&a.as_str()) {
-                            acc.push(a.as_str());
-                        }
-                        acc
-                    })
-                    .join(" · ")
-            };
-            tracing::info!(
-                target: "dirge::memory_curator",
-                actions = %summary,
-                elapsed = %elapsed_secs,
-                "🗂  Memory curator LLM pass: {summary}",
-            );
-        }
-
-        let llm_report = crate::extras::memory_curator::LlmCuratorReport {
-            started_at_iso: started_iso,
-            elapsed_secs,
-            stale_candidates: report_for_writer.stale_candidates,
-            tool_actions,
-            error: error_msg,
+    let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    if error_msg.is_none() {
+        let summary = if tool_actions.is_empty() {
+            "no-op".to_string()
+        } else {
+            tool_actions
+                .iter()
+                .fold(Vec::<&str>::new(), |mut acc, a| {
+                    if !acc.contains(&a.as_str()) {
+                        acc.push(a.as_str());
+                    }
+                    acc
+                })
+                .join(" · ")
         };
-        let report_dir = paths
-            .memory_dir()
-            .join(".curator_reports")
-            .join(&started_filename);
-        if let Err(e) = std::fs::create_dir_all(&report_dir) {
-            tracing::warn!(
-                target: "dirge::memory_curator",
-                error = %e,
-                "Failed to create LLM report directory",
-            );
-            return;
-        }
-        let report_path = report_dir.join("LLM_REPORT.md");
-        if let Err(e) = std::fs::write(&report_path, llm_report.to_markdown()) {
-            tracing::warn!(
-                target: "dirge::memory_curator",
-                error = %e,
-                "Failed to write LLM report",
-            );
-        }
-    });
+        tracing::info!(
+            target: "dirge::memory_curator",
+            actions = %summary,
+            elapsed = %elapsed_secs,
+            "🗂  Memory curator LLM pass: {summary}",
+        );
+    }
+
+    let llm_report = crate::extras::memory_curator::LlmCuratorReport {
+        started_at_iso: started_iso,
+        elapsed_secs,
+        stale_candidates: report_for_writer.stale_candidates,
+        tool_actions,
+        error: error_msg,
+    };
+    let report_dir = paths
+        .memory_dir()
+        .join(".curator_reports")
+        .join(&started_filename);
+    if let Err(e) = std::fs::create_dir_all(&report_dir) {
+        tracing::warn!(
+            target: "dirge::memory_curator",
+            error = %e,
+            "Failed to create LLM report directory",
+        );
+        return;
+    }
+    let report_path = report_dir.join("LLM_REPORT.md");
+    if let Err(e) = std::fs::write(&report_path, llm_report.to_markdown()) {
+        tracing::warn!(
+            target: "dirge::memory_curator",
+            error = %e,
+            "Failed to write LLM report",
+        );
+    }
 }
 
 /// dirge-5cm9 / dirge-5gn6 / dirge-bx4g — fire the provider's

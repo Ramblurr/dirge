@@ -524,112 +524,16 @@ pub(crate) async fn handle_done(
         );
 
         let transcript = crate::agent::review::build_transcript(ctx.session);
-        crate::agent::review::spawn_background_review(
-            agent.clone(),
-            paths.clone(),
-            transcript,
-            None,
-        );
 
-        // Curator check: run periodic skill maintenance if the
-        // interval has elapsed. Fire-and-forget. The mechanical
-        // age-based transitions run unconditionally; the LLM
-        // umbrella-consolidation pass (dirge-odv3) follows on a
-        // separate task so the user-facing turn never blocks.
-        let curator_agent = agent.clone();
-        let curator_paths = paths.clone();
-        tokio::spawn(async move {
-            if let Ok(mut curator) = crate::extras::skills::curator::Curator::new(&curator_paths)
-                && curator.should_run_now()
-            {
-                let curator_paths_for_usage = curator_paths.clone();
-                let candidate_list = tokio::task::spawn_blocking(move || {
-                    let _ = curator.apply_automatic_transitions();
-                    // Render the candidate list AFTER mechanical
-                    // transitions so newly-stale skills are included.
-                    crate::extras::skills::usage::UsageStore::load(&curator_paths_for_usage)
-                        .ok()
-                        .map(|store| crate::extras::skills::curator::render_candidate_list(&store))
-                })
-                .await
-                .ok()
-                .flatten();
-
-                if let Some(candidates) = candidate_list {
-                    crate::agent::review::spawn_curator_review(
-                        curator_agent,
-                        curator_paths.clone(),
-                        candidates,
-                    );
-                }
-            }
-        });
-
-        // dirge-mo0w: memory curator. PR-1 added the mechanical
-        // pass; PR-2 adds the LLM consolidation pass that fires
-        // when the mechanical pass surfaces stale candidates.
-        // Same fire-and-forget pattern as the skills curator
-        // above. The mechanical pass is fast (disk IO + hash);
-        // the LLM pass is gated on `!report.stale_candidates.is_empty()`
-        // so a session with nothing stale doesn't pay for an
-        // LLM call.
-        let memory_curator_paths = paths.clone();
-        let memory_curator_agent = agent.clone();
-        tokio::spawn(async move {
-            let mechanical_report = tokio::task::spawn_blocking({
-                let paths = memory_curator_paths.clone();
-                move || {
-                    let mut curator =
-                        match crate::extras::memory_curator::MemoryCurator::new(&paths) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                tracing::debug!(
-                                    target: "dirge::memory_curator",
-                                    error = %e,
-                                    "Failed to construct memory curator — skipping run",
-                                );
-                                return None;
-                            }
-                        };
-                    if !curator.should_run_now() {
-                        return None;
-                    }
-                    match curator.run_mechanical_pass() {
-                        Ok(report) => {
-                            tracing::info!(
-                                target: "dirge::memory_curator",
-                                total = %report.total_entries,
-                                added = %report.reconcile.added,
-                                retained = %report.reconcile.retained,
-                                dropped = %report.reconcile.dropped,
-                                stale = %report.stale_candidates.len(),
-                                "memory curator mechanical pass complete",
-                            );
-                            Some(report)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "dirge::memory_curator",
-                                error = %e,
-                                "memory curator mechanical pass failed",
-                            );
-                            None
-                        }
-                    }
-                }
-            })
-            .await
-            .ok()
-            .flatten();
-
-            if let Some(report) = mechanical_report {
-                crate::agent::review::spawn_memory_curator_review(
-                    memory_curator_agent,
-                    memory_curator_paths,
-                    report,
-                );
-            }
-        });
+        // dirge-ba0m: unified post-session learning orchestrator.
+        // Replaces the three independent fire-and-forget spawns
+        // (background review + skills curator + memory curator)
+        // that used to race here. The orchestrator runs them
+        // strictly in order inside ONE detached task so a skill
+        // the review creates is flushed before the curator reads
+        // it, and the three LLM runners never fire concurrently.
+        // Still fire-and-forget — the user's turn never waits.
+        crate::agent::post_session::spawn_post_session(agent.clone(), paths, transcript);
     }
 
     #[cfg(feature = "git-worktree")]
