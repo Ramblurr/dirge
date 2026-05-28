@@ -726,6 +726,19 @@ impl AnyModel {
     }
 }
 
+/// dirge-yai1 — pure-function tool-name filter shared between the
+/// review and curator runner code paths. Pulled out so unit tests
+/// can exercise the filter shape without constructing a full
+/// `AnyAgent` with mock `LoopTool` instances.
+pub(crate) fn filter_tool_names<'a>(
+    all: impl Iterator<Item = &'a str>,
+    allowed: &[&str],
+) -> Vec<String> {
+    all.filter(|n| allowed.contains(n))
+        .map(String::from)
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct AnyAgent {
     inner: AnyAgentInner,
@@ -1291,6 +1304,30 @@ impl AnyAgent {
         runner
     }
 
+    /// dirge-yai1 — skill-only fork used by the curator's
+    /// umbrella-consolidation pass. The curator prompt instructs
+    /// the model to only use `skill`, but a tool-level filter is
+    /// stronger than a prompt-level guard. Same isolation /
+    /// retry / stream-fn selection as `spawn_review_runner`.
+    pub fn spawn_curator_runner(
+        &self,
+        prompt: String,
+        transcript: String,
+    ) -> crate::agent::runner::AgentRunner {
+        let (runner, _isolated_cache) =
+            self.spawn_filtered_runner_with_cache(prompt, transcript, ToolCache::new(), &["skill"]);
+        runner
+    }
+
+    /// dirge-yai1 — test/diagnostic accessor for the tool allow-list
+    /// applied by `spawn_filtered_runner_with_cache`. Returns the
+    /// tool names that would survive the filter, in registration
+    /// order. Lets the curator + review tests assert the filter
+    /// shape without spawning a real runner.
+    pub fn filtered_tool_names(&self, allowed_tools: &[&str]) -> Vec<String> {
+        filter_tool_names(self.loop_tools.iter().map(|t| t.name()), allowed_tools)
+    }
+
     /// Internal review-runner constructor with an explicit
     /// caller-supplied cache. Returns the cache alongside the
     /// runner so tests can assert cache isolation via
@@ -1304,6 +1341,31 @@ impl AnyAgent {
         transcript: String,
         review_cache: ToolCache,
     ) -> (crate::agent::runner::AgentRunner, ToolCache) {
+        // dirge-yai1: delegate to the parameterized helper so the
+        // curator can reuse the same machinery with a skill-only
+        // filter without duplicating the body.
+        self.spawn_filtered_runner_with_cache(
+            prompt,
+            transcript,
+            review_cache,
+            &["memory", "skill"],
+        )
+    }
+
+    /// dirge-yai1: forked-runner factory parameterized by the tool
+    /// allow-list. `spawn_review_runner_with_cache` calls in with
+    /// `&["memory", "skill"]`; the curator pass calls in with
+    /// `&["skill"]` so the model literally cannot write memory
+    /// entries even if the prompt-level guard slips. Same cache
+    /// isolation, same retry policy, same stream-fn selection as
+    /// the original review runner.
+    pub(crate) fn spawn_filtered_runner_with_cache(
+        &self,
+        prompt: String,
+        transcript: String,
+        review_cache: ToolCache,
+        allowed_tools: &[&str],
+    ) -> (crate::agent::runner::AgentRunner, ToolCache) {
         use crate::agent::agent_loop::{
             LoopSpawnConfig, loop_tool_to_rig_definition, retrying_stream_fn, spawn_loop_runner,
         };
@@ -1315,17 +1377,14 @@ impl AnyAgent {
         // the passed cache is distinct from the parent's.
         debug_assert!(
             !review_cache.shares_storage_with(&self.cache),
-            "spawn_review_runner_with_cache: review cache must not share storage with the main agent's cache (dirge-7ls)"
+            "spawn_filtered_runner_with_cache: review cache must not share storage with the main agent's cache (dirge-7ls)"
         );
 
-        // Filter to only memory + skill tools.
+        // Filter to the caller-supplied allow-list.
         let review_tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>> = self
             .loop_tools
             .iter()
-            .filter(|t| {
-                let name = t.name();
-                name == "memory" || name == "skill"
-            })
+            .filter(|t| allowed_tools.contains(&t.name()))
             .cloned()
             .collect();
 

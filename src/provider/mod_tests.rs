@@ -257,6 +257,88 @@ fn review_runner_gets_isolated_cache_dirge_7ls() {
     assert!(parent_clone.get("key").is_none());
 }
 
+/// dirge-yai1 — the curator runner exposes ONLY the `skill` tool to
+/// the LLM. Prompt-level guards say skill-only too, but a tool-level
+/// filter is stronger: the model can't write memory entries even if
+/// it tried. Tests the pure `filter_tool_names` helper that backs
+/// both the review and curator paths so the filter shape is locked
+/// in without needing a real `LoopTool` fixture.
+#[test]
+fn curator_runner_is_skill_only_dirge_yai1() {
+    use super::filter_tool_names;
+
+    // Simulate the registered loop_tools the agent would carry —
+    // names match the real production registry.
+    let registered_tools = [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "grep",
+        "find_files",
+        "glob",
+        "list_dir",
+        "write_todo_list",
+        "apply_patch",
+        "session_search",
+        "memory",
+        "skill",
+        "task",
+        "question",
+    ];
+    let iter_names = || registered_tools.iter().copied();
+
+    // Review filter: memory + skill. Mirrors the existing
+    // post-session background review pass that writes to BOTH
+    // stores.
+    let review_filter = filter_tool_names(iter_names(), &["memory", "skill"]);
+    assert_eq!(
+        review_filter,
+        vec!["memory".to_string(), "skill".to_string()],
+        "review filter must be memory + skill in registration order"
+    );
+
+    // Curator filter: skill only. Memory FILTERED OUT.
+    let curator_filter = filter_tool_names(iter_names(), &["skill"]);
+    assert_eq!(
+        curator_filter,
+        vec!["skill".to_string()],
+        "curator filter must contain ONLY skill — dirge-yai1"
+    );
+    assert!(
+        !curator_filter.iter().any(|n| n == "memory"),
+        "curator filter MUST NOT include memory — model cannot write entries even if it tried"
+    );
+
+    // Curator filter is a strict subset of review filter.
+    for name in &curator_filter {
+        assert!(
+            review_filter.contains(name),
+            "curator-only tool '{}' not in review filter — review must be a superset",
+            name
+        );
+    }
+    assert!(
+        review_filter.len() > curator_filter.len(),
+        "review filter must be strictly larger than curator filter"
+    );
+
+    // Tools outside the allow-list are filtered out — neither
+    // pass should expose read/write/bash/etc to the LLM.
+    for forbidden in ["read", "write", "edit", "bash", "task", "session_search"] {
+        assert!(
+            !review_filter.contains(&forbidden.to_string()),
+            "review must not expose '{}'",
+            forbidden
+        );
+        assert!(
+            !curator_filter.contains(&forbidden.to_string()),
+            "curator must not expose '{}'",
+            forbidden
+        );
+    }
+}
+
 /// dirge-z73i: `with_review_route` stashes the alternate stream_fn,
 /// provider alias, and model name on AnyAgent so
 /// `spawn_review_runner_with_cache` can pick them up. This is a pure

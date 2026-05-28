@@ -211,12 +211,10 @@ pub fn spawn_background_review(
 }
 
 /// Spawn the curator's LLM consolidation pass — fire-and-forget.
-/// Reuses `spawn_review_runner` (memory + skill tools), but injects
-/// the curator-specific prompt and the agent-created candidate list
-/// so the model can build umbrellas. The curator prompt instructs
-/// the model to only use the `skill` tool; we don't filter out the
-/// `memory` tool at the runner level since the existing review-runner
-/// infrastructure ships both. See dirge-odv3.
+/// Reuses the loop-runner infrastructure but routes through
+/// `spawn_curator_runner` (skill-only — dirge-yai1) so the model
+/// literally cannot write memory entries even if the prompt-level
+/// instruction slips. See dirge-odv3 + dirge-yai1.
 ///
 /// `candidate_list` is the rendered output of
 /// `crate::extras::skills::curator::render_candidate_list` — the
@@ -241,7 +239,10 @@ pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
     );
 
     tokio::spawn(async move {
-        let runner = agent.spawn_review_runner(prompt, String::new());
+        // dirge-yai1: skill-only runner — memory tool is filtered
+        // out at the registry level so the curator can't write
+        // memory entries even if it tried.
+        let runner = agent.spawn_curator_runner(prompt, String::new());
         let mut rx = runner.event_rx;
         let mut tool_actions: Vec<String> = Vec::new();
         let mut had_error = false;
