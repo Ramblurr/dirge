@@ -26,6 +26,28 @@ pub enum ToolContent {
     File,
 }
 
+/// What a compaction pass actually did, so consumers (UI / telemetry)
+/// can distinguish a cheap pruning-only pass from a real summary — and,
+/// crucially, surface when the LLM summarizer is *failing*
+/// (IMPROVEMENTS_PLAN #5). A spike in `PruneAndFailedSummary` is an
+/// early warning that the summarizer is broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionKind {
+    /// Pruning only — no LLM summarizer ran (none wired, circuit breaker
+    /// open, or the middle was empty).
+    PruneOnly,
+    /// Pruning + a successful LLM/plugin summary.
+    PruneAndSummary,
+    /// Pruning + a failed summary (error or invalid) — fell back to the
+    /// pruned context.
+    PruneAndFailedSummary,
+    /// Pruning only because the summarizer circuit breaker is OPEN (it
+    /// failed too many times this run). Distinct from `PruneOnly` so the
+    /// ongoing-failure signal stays visible after the breaker latches
+    /// rather than masquerading as a healthy no-summarizer deployment.
+    PruneSummarizerDisabled,
+}
+
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Token(CompactString),
@@ -100,6 +122,14 @@ pub enum AgentEvent {
         tokens_after: u64,
         summary: CompactString,
         first_kept_index: usize,
+        /// Whether this pass was pruning-only, prune+summary, or
+        /// prune+failed-summary (IMPROVEMENTS_PLAN #5).
+        compaction_kind: CompactionKind,
+        /// Model that produced the summary, if known. `None` for
+        /// pruning-only passes (and currently for summary passes — the
+        /// summarizer closure is opaque; threading the model name is a
+        /// follow-up).
+        summary_model: Option<CompactString>,
     },
     Done {
         response: CompactString,

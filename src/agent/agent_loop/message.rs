@@ -374,6 +374,13 @@ pub enum LoopEvent {
         /// `Session::compress_reporting` so it knows which middle
         /// turns were folded.
         first_kept_index: usize,
+        /// Pruning-only vs prune+summary vs prune+failed-summary
+        /// (IMPROVEMENTS_PLAN #5). Bridged to the AgentEvent so the UI
+        /// / telemetry can distinguish — and flag a failing summarizer.
+        compaction_kind: crate::event::CompactionKind,
+        /// Summary model name, if known (`None` today — the summarizer
+        /// closure doesn't expose it; threading it is a follow-up).
+        summary_model: Option<String>,
     },
 
     /// PROV-2: the retry layer is about to re-attempt the stream.

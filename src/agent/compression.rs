@@ -276,8 +276,11 @@ pub fn cap_oversized_tool_results_counted(
 }
 
 /// Max working-set files re-injected after a fold, and the per-file
-/// token budget. 5 × 5000 = 25k tokens worst case — bounded so the
-/// restoration can't itself trigger ANOTHER fold (IMPROVEMENTS_PLAN #2).
+/// token budget. 5 × 5000 = 25k tokens worst case. This bounds the
+/// restoration cost but does NOT by itself guarantee the window won't
+/// re-cross the fold threshold near-full — the caller
+/// (`restore_working_files`) enforces that separately via a post-fold
+/// headroom guard before injecting (IMPROVEMENTS_PLAN #2).
 pub const POST_COMPACT_MAX_FILES: usize = 5;
 pub const POST_COMPACT_MAX_TOKENS_PER_FILE: u64 = 5_000;
 

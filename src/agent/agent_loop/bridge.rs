@@ -108,6 +108,8 @@ impl EventBridge {
                 tokens_after,
                 ref summary,
                 first_kept_index,
+                compaction_kind,
+                ref summary_model,
             } => {
                 tracing::info!(
                     target: "dirge::agent_loop",
@@ -116,6 +118,7 @@ impl EventBridge {
                     tokens_after,
                     has_summary = !summary.is_empty(),
                     first_kept_index,
+                    kind = ?compaction_kind,
                     "context compacted — session rotated"
                 );
                 vec![AgentEvent::ContextCompacted {
@@ -124,6 +127,8 @@ impl EventBridge {
                     tokens_after,
                     summary: CompactString::new(summary),
                     first_kept_index,
+                    compaction_kind,
+                    summary_model: summary_model.as_deref().map(CompactString::new),
                 }]
             }
 

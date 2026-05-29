@@ -2229,3 +2229,61 @@ async fn compaction_circuit_breaker_skips_summarizer_after_max_failures() {
         "prune-only fallback must not grow context"
     );
 }
+
+// IMPROVEMENTS_PLAN #5: the ContextCompacted event reports whether the
+// pass was prune-only, prune+summary, or prune+failed-summary.
+#[tokio::test]
+async fn context_compacted_reports_compaction_kind() {
+    use crate::event::CompactionKind;
+
+    async fn kind_for(
+        summarize_fn: Option<crate::agent::compression::SummarizeFn>,
+    ) -> CompactionKind {
+        let mut ctx = empty_context();
+        ctx.messages
+            .push(serde_json::json!({"role":"system","content":"agent"}));
+        ctx.messages
+            .push(serde_json::json!({"role":"user","content":"task"}));
+        for i in 0..20 {
+            let role = if i % 2 == 0 { "assistant" } else { "user" };
+            ctx.messages.push(serde_json::json!({
+                "role": role, "content": format!("turn {i} with filler content")
+            }));
+        }
+        ctx.messages
+            .push(serde_json::json!({"role":"user","content":"latest"}));
+        let (tx, mut rx) = mpsc::channel::<LoopEvent>(8);
+        super::run_compaction_pass(&mut ctx, &summarize_fn, 5, 0, &None, None, &tx).await;
+        drop(tx);
+        while let Some(ev) = rx.recv().await {
+            if let LoopEvent::ContextCompacted {
+                compaction_kind, ..
+            } = ev
+            {
+                return compaction_kind;
+            }
+        }
+        panic!("no ContextCompacted event emitted");
+    }
+
+    // Valid summary → PruneAndSummary.
+    let good: Option<crate::agent::compression::SummarizeFn> = Some(std::sync::Arc::new(
+        |_p: String| {
+            Box::pin(async move {
+                Ok("## Active Task\nx\n\n## Goal\ny\n\n## Completed Actions\n1. z\n\n## Remaining Work\nw"
+                    .to_string())
+            })
+        },
+    ));
+    assert_eq!(kind_for(good).await, CompactionKind::PruneAndSummary);
+
+    // Failing summary → PruneAndFailedSummary.
+    let bad: Option<crate::agent::compression::SummarizeFn> =
+        Some(std::sync::Arc::new(|_p: String| {
+            Box::pin(async move { Err(anyhow::anyhow!("boom")) })
+        }));
+    assert_eq!(kind_for(bad).await, CompactionKind::PruneAndFailedSummary);
+
+    // No summarizer wired → PruneOnly.
+    assert_eq!(kind_for(None).await, CompactionKind::PruneOnly);
+}

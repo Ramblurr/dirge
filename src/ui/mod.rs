@@ -2208,7 +2208,20 @@ pub async fn run_interactive(
                         tokens_after,
                         ref summary,
                         first_kept_index,
+                        compaction_kind,
+                        ref summary_model,
                     } => {
+                        // IMPROVEMENTS_PLAN #5: surface what the pass did
+                        // (prune-only / +summary / +failed-summary) so a
+                        // failing summarizer is visible in the logs.
+                        tracing::debug!(
+                            target: "dirge::ui::compaction",
+                            kind = ?compaction_kind,
+                            summary_model = ?summary_model,
+                            tokens_before,
+                            tokens_after,
+                            "context compacted",
+                        );
                         // Persist session rotation to DB: end the old session
                         // with reason "compression", insert the new session.
                         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());

@@ -278,10 +278,14 @@ async fn run_compaction_pass_with_focus(
     // actually runs and resolves to a valid summary (Succeeded) or an
     // error / invalid summary (Failed).
     let mut outcome = SummaryOutcome::Skipped;
+    // Tracks the breaker-open case so the emitted CompactionKind stays a
+    // distinct failure signal (not a healthy-looking PruneOnly).
+    let mut breaker_open = false;
     if compaction_failures >= MAX_CONSECUTIVE_COMPACTION_FAILURES {
         // Circuit breaker open: the summarizer has failed too many times
         // this run. Skip the LLM call entirely and keep the pruned
         // context (IMPROVEMENTS_PLAN #1).
+        breaker_open = true;
         tracing::warn!(
             target: "dirge::agent_loop",
             failures = compaction_failures,
@@ -367,6 +371,20 @@ async fn run_compaction_pass_with_focus(
         }
     }
 
+    // IMPROVEMENTS_PLAN #5: report what the pass did so consumers can
+    // tell pruning-only from a summary, and spot a failing summarizer.
+    // Breaker-open is its OWN kind so the failure signal survives after
+    // the breaker latches (it'd otherwise look like a healthy PruneOnly).
+    let compaction_kind = if breaker_open {
+        crate::event::CompactionKind::PruneSummarizerDisabled
+    } else {
+        match outcome {
+            SummaryOutcome::Succeeded(_) => crate::event::CompactionKind::PruneAndSummary,
+            SummaryOutcome::Failed => crate::event::CompactionKind::PruneAndFailedSummary,
+            SummaryOutcome::Skipped => crate::event::CompactionKind::PruneOnly,
+        }
+    };
+
     let new_id = compression::rotate_session_id();
     let _ = emit
         .send(LoopEvent::ContextCompacted {
@@ -375,11 +393,29 @@ async fn run_compaction_pass_with_focus(
             tokens_after: after_summary,
             summary: applied_summary,
             first_kept_index: applied_first_kept,
+            compaction_kind,
+            // The summarizer model name isn't threaded through the opaque
+            // SummarizeFn closure yet (follow-up).
+            summary_model: None,
         })
         .await;
 
     outcome
 }
+
+/// Per-file read ceiling for restoration. A file larger than this is
+/// skipped entirely rather than read into memory just to truncate it to
+/// the snapshot budget — avoids an OOM if the agent touched a multi-GB
+/// artifact (review fix). Generous vs the snapshot budget so normal
+/// source files always restore.
+const POST_COMPACT_MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Don't re-inject file snapshots if the just-folded context is already
+/// above this fraction of the window: adding up to ~25k tokens of files
+/// could re-cross the fold threshold and chatter fold↔restore (review
+/// fix). Restoration is a convenience, not load-bearing — skip it when
+/// there's no headroom.
+const POST_COMPACT_RESTORE_CEILING: f64 = 0.50;
 
 /// IMPROVEMENTS_PLAN #2: after a successful summary fold, re-read the
 /// working-set files the agent was editing and splice fresh
@@ -387,11 +423,17 @@ async fn run_compaction_pass_with_focus(
 /// summary (index `summary_idx`) — so the fold doesn't strand the model
 /// without the concrete file state it had been working from.
 ///
-/// No-op without a file-touch tracker or with no tracked files. The
-/// reads are bounded (`POST_COMPACT_MAX_FILES`) and each snapshot is
-/// size-capped by `build_post_compact_snapshots`, so restoration can't
-/// itself overflow the window. Unreadable files are skipped.
-async fn restore_working_files(config: &LoopConfig, ctx: &mut Context, summary_idx: usize) {
+/// No-op without a file-touch tracker or tracked files, when the
+/// post-fold context already lacks headroom, or when all candidate files
+/// are unreadable / oversized. Reads are bounded by file count
+/// (`POST_COMPACT_MAX_FILES`) AND per-file size (`POST_COMPACT_MAX_READ_BYTES`),
+/// and each snapshot is token-capped by `build_post_compact_snapshots`.
+async fn restore_working_files(
+    config: &LoopConfig,
+    ctx: &mut Context,
+    summary_idx: usize,
+    ctx_max: u64,
+) {
     let Some(tracker) = &config.file_touch_tracker else {
         return;
     };
@@ -399,11 +441,31 @@ async fn restore_working_files(config: &LoopConfig, ctx: &mut Context, summary_i
     if files.is_empty() {
         return;
     }
+    // Headroom guard: if the freshly-folded context is already high,
+    // re-injecting files risks immediately re-crossing the fold
+    // threshold. Restoration is optional — skip rather than oscillate.
+    let post_fold = crate::agent::compression::estimate_messages_tokens(&ctx.messages);
+    if post_fold as f64 > POST_COMPACT_RESTORE_CEILING * ctx_max.max(1) as f64 {
+        tracing::debug!(
+            target: "dirge::agent_loop",
+            post_fold,
+            ctx_max,
+            "skipping post-compaction file restore — insufficient headroom",
+        );
+        return;
+    }
     let mut contents: Vec<(std::path::PathBuf, String)> = Vec::new();
     for path in files
         .into_iter()
         .take(crate::agent::compression::POST_COMPACT_MAX_FILES)
     {
+        // Skip files too large to read cheaply — don't materialize a
+        // huge artifact in memory just to truncate it.
+        match tokio::fs::metadata(&path).await {
+            Ok(m) if m.len() > POST_COMPACT_MAX_READ_BYTES => continue,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
         if let Ok(body) = tokio::fs::read_to_string(&path).await {
             contents.push((path, body));
         }
@@ -564,6 +626,13 @@ pub async fn run_loop(
 
         // Pi line 174: INNER LOOP.
         while has_more_tool_calls || !pending_messages.is_empty() {
+            // Circuit-breaker bookkeeping is at-most-once per iteration:
+            // a single iteration can run BOTH the turn-start fold and the
+            // (ungated) post-usage ExitWithSummary pass, and counting two
+            // failures from one iteration would open the breaker before
+            // the intended 3-round budget (review fix). First record wins.
+            let mut compaction_recorded_this_iter = false;
+
             // Pi lines 175-179: turn_start (skipped on very first
             // iteration — the outer wrapper already emitted it).
             if !first_turn {
@@ -619,9 +688,12 @@ pub async fn run_loop(
                     )
                     .await;
                     if let SummaryOutcome::Succeeded(idx) = outcome {
-                        restore_working_files(&config, &mut current_context, idx).await;
+                        restore_working_files(&config, &mut current_context, idx, ctx_max).await;
                     }
-                    record_compaction_outcome(&mut compaction_failures, outcome);
+                    if !compaction_recorded_this_iter {
+                        record_compaction_outcome(&mut compaction_failures, outcome);
+                        compaction_recorded_this_iter = true;
+                    }
                     folded_this_turn = true;
                 }
             }
@@ -982,9 +1054,22 @@ pub async fn run_loop(
                                 )
                                 .await;
                                 if let SummaryOutcome::Succeeded(idx) = outcome {
-                                    restore_working_files(&config, &mut current_context, idx).await;
+                                    restore_working_files(
+                                        &config,
+                                        &mut current_context,
+                                        idx,
+                                        ctx_max,
+                                    )
+                                    .await;
                                 }
-                                record_compaction_outcome(&mut compaction_failures, outcome);
+                                // Guard against double-counting if a
+                                // turn-start fold already recorded this
+                                // iteration. No write-back needed — only one
+                                // post-usage arm runs and the iteration ends
+                                // right after.
+                                if !compaction_recorded_this_iter {
+                                    record_compaction_outcome(&mut compaction_failures, outcome);
+                                }
                             }
                         }
                     }
@@ -1008,9 +1093,12 @@ pub async fn run_loop(
                         )
                         .await;
                         if let SummaryOutcome::Succeeded(idx) = outcome {
-                            restore_working_files(&config, &mut current_context, idx).await;
+                            restore_working_files(&config, &mut current_context, idx, ctx_max)
+                                .await;
                         }
-                        record_compaction_outcome(&mut compaction_failures, outcome);
+                        if !compaction_recorded_this_iter {
+                            record_compaction_outcome(&mut compaction_failures, outcome);
+                        }
                     }
                     _ => {}
                 }
