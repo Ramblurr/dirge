@@ -2414,6 +2414,27 @@ pub async fn run_interactive(
                     std::future::pending().await
                 }
             } => {
+                // Coalesce parallel-tool prompts. When the agent fires
+                // several tool calls at once, each that needs permission
+                // queues its own AskRequest. If the user picked "allow
+                // always" on an earlier one in the batch, the session
+                // allowlist now covers the queued siblings — auto-allow
+                // them here instead of re-flashing the (O_O) Alert for
+                // something the user just blanket-approved. The
+                // allow-always handler below installs the pattern into
+                // the live checker synchronously, so by the time the next
+                // queued ask is pulled this probe sees it. Side-effect-
+                // free (no doom-loop tracking), and only ever resolves to
+                // Allow when the user already consented to the pattern.
+                if permission.as_ref().is_some_and(|perm| {
+                    perm.lock()
+                        .map(|g| g.session_allows_now(&ask_req.tool, &ask_req.input))
+                        .unwrap_or(false)
+                }) {
+                    let _ = ask_req.reply.send(UserDecision::AllowOnce);
+                    continue;
+                }
+
                 was_reasoning = false;
                 if agent_line_started {
                     renderer.write_line("", Color::White)?;
@@ -2772,6 +2793,19 @@ pub async fn run_interactive(
                         tool: ask_req.tool.clone(),
                         pattern: pattern.clone(),
                     });
+                    // Install into the LIVE checker now, synchronously,
+                    // so queued sibling asks from the same parallel batch
+                    // see it on the next loop iteration and get coalesced
+                    // (see the auto-allow fast-path at the top of this
+                    // arm). The tool-side handler also adds it on reply
+                    // receipt, but that runs asynchronously and would
+                    // race the next queued ask; add::dedup makes the
+                    // double-add a no-op.
+                    if let Some(perm) = &permission
+                        && let Ok(mut guard) = perm.lock()
+                    {
+                        guard.add_session_allowlist(ask_req.tool.clone(), &pattern);
+                    }
                     if !cli.no_session
                         && let Err(e) = crate::session::storage::save_session(session) {
                             renderer.write_line(
