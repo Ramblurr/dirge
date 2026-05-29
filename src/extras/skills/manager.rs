@@ -81,6 +81,12 @@ impl SkillManager {
             .ok_or_else(|| "Invalid skill format: must have YAML frontmatter (--- ... ---) followed by markdown body".to_string())?;
         // Use the parsed name from frontmatter if it differs from dir name.
         let actual_name = spec.name;
+        // SECURITY: the on-disk directory is built from the FRONTMATTER
+        // name, not the (already-validated) `name` argument. Re-validate
+        // so a crafted frontmatter `name: ../../escape` can't write a
+        // SKILL.md outside `.dirge/skills/`. Skill writes are
+        // auto-allowed (no permission prompt) so this is the boundary.
+        format::validate_name(&actual_name)?;
 
         self.ensure_dir()?;
         let skill_dir = self.skills_dir.join(&actual_name);
@@ -98,12 +104,14 @@ impl SkillManager {
 
     /// Edit an existing skill from raw SKILL.md content. The skill must exist.
     pub fn edit_from_content(&self, name: &str, content: &str) -> Result<(), String> {
+        // SECURITY: validate before building the path (uniform with the
+        // other mutators; writes are auto-allowed so this is the guard).
+        format::validate_name(name)?;
         let skill_dir = self.skills_dir.join(name);
         if !skill_dir.is_dir() {
             return Err(format!("Skill '{}' not found", name));
         }
 
-        format::validate_name(name)?;
         format::validate_content_size(content)?;
         guard::scan_skill_content(content)?;
 
@@ -119,6 +127,9 @@ impl SkillManager {
     /// replaces only the first. If matches with different text,
     /// returns an error.
     pub fn patch(&self, name: &str, old_text: &str, new_text: &str) -> Result<(), String> {
+        // SECURITY: reject traversal names before building any path
+        // (writes are auto-allowed; the manager is the only boundary).
+        format::validate_name(name)?;
         let skill_dir = self.skills_dir.join(name);
         let skill_path = skill_dir.join("SKILL.md");
 
@@ -171,6 +182,11 @@ impl SkillManager {
     /// Delete a skill directory and its contents. Destructive —
     /// consider archiving instead for production use.
     pub fn delete(&self, name: &str) -> Result<(), String> {
+        // SECURITY: reject traversal names before `remove_dir_all` —
+        // a name like `../../foo` would otherwise delete a directory
+        // outside `.dirge/skills/`. Writes are auto-allowed, so this
+        // validation (not a permission prompt) is the only guard.
+        format::validate_name(name)?;
         let skill_dir = self.skills_dir.join(name);
         if !skill_dir.is_dir() {
             return Err(format!("Skill '{}' not found", name));
@@ -218,6 +234,8 @@ impl SkillManager {
     /// Archive a skill — move to `.archive/`. Does not delete.
     #[allow(dead_code)]
     pub fn archive(&self, name: &str) -> Result<(), String> {
+        // SECURITY: reject traversal names before moving directories.
+        format::validate_name(name)?;
         let src = self.skills_dir.join(name);
         if !src.is_dir() {
             return Err(format!("Skill '{}' does not exist", name));
@@ -473,5 +491,62 @@ mod tests {
         let big = "x".repeat(100_001);
         let err = mgr.create("big", "", &big, &[]).unwrap_err();
         assert!(err.contains("too large"), "got: {err}");
+    }
+
+    // ── path-traversal hardening ───────────────────────
+    //
+    // Skill writes are auto-allowed in Standard/Accept mode (no
+    // permission prompt), so the manager — not the prompt — is the
+    // only boundary keeping skill mutations inside `.dirge/skills/`.
+    // Every mutating method must reject names that could escape it.
+
+    /// `create_from_content` builds the on-disk dir from the
+    /// frontmatter `name:`, NOT the validated `name` argument. A
+    /// crafted frontmatter name with `..`/separators must be rejected
+    /// before any directory is created outside the skills dir.
+    #[test]
+    fn create_from_content_rejects_frontmatter_name_traversal() {
+        let (mgr, dir) = temp_manager();
+        let sentinel = dir.join("escaped-skill");
+        let _ = std::fs::remove_dir_all(&sentinel);
+        // skills_dir = dir/.dirge/skills → `../../escaped-skill` = dir/escaped-skill.
+        let content =
+            "---\nname: ../../escaped-skill\ndescription: x\n---\n\nbody content\n".to_string();
+        let err = mgr.create_from_content("safe", &content).unwrap_err();
+        assert!(
+            err.contains("Skill name"),
+            "frontmatter-name traversal must be rejected by validate_name; got: {err}",
+        );
+        assert!(
+            !sentinel.exists(),
+            "no directory may be created outside the skills dir",
+        );
+    }
+
+    #[test]
+    fn patch_rejects_name_traversal() {
+        let (mgr, _dir) = temp_manager();
+        let err = mgr.patch("../../etc/passwd", "a", "b").unwrap_err();
+        assert!(
+            err.contains("Skill name"),
+            "patch must reject traversal names before touching the path; got: {err}",
+        );
+    }
+
+    #[test]
+    fn delete_rejects_name_traversal() {
+        let (mgr, dir) = temp_manager();
+        let sentinel = dir.join("sentinel-keep");
+        std::fs::create_dir_all(&sentinel).unwrap();
+        // `../../sentinel-keep` from dir/.dirge/skills resolves to dir/sentinel-keep.
+        let err = mgr.delete("../../sentinel-keep").unwrap_err();
+        assert!(
+            err.contains("Skill name"),
+            "delete must reject traversal names before remove_dir_all; got: {err}",
+        );
+        assert!(
+            sentinel.exists(),
+            "delete must not remove directories outside the skills dir via traversal",
+        );
     }
 }

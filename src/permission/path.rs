@@ -117,12 +117,53 @@ pub(crate) fn resolve_absolute(path: &str, working_dir: &str) -> String {
     match std::fs::canonicalize(&joined) {
         Ok(canonical) => canonical.to_string_lossy().to_string(),
         Err(_) => {
-            if let (Some(parent), Some(name)) = (joined.parent(), joined.file_name())
-                && let Ok(canonical_parent) = std::fs::canonicalize(parent)
-            {
-                return canonical_parent.join(name).to_string_lossy().to_string();
+            // The full path doesn't exist on disk (e.g. a write to a
+            // brand-new file, possibly in a brand-new nested dir).
+            // Canonicalize the DEEPEST existing ancestor so any
+            // symlink in the existing prefix is resolved to its
+            // realpath, then re-attach the still-nonexistent tail.
+            //
+            // Why the deepest ancestor and not just the immediate
+            // parent: when the agent writes to `new_a/new_b/file.rs`
+            // inside a symlinked cwd, neither `file.rs`'s parent
+            // (`new_b`) nor its grandparent (`new_a`) exist, so the
+            // old single-level parent canonicalize failed and we fell
+            // through to a purely lexical result that kept the SYMLINK
+            // form of the cwd. That form never matches the CWD-allow
+            // rule (built from the canonical cwd), so in-project writes
+            // re-prompted. Walking to the nearest existing ancestor
+            // fixes that while staying inside the project subtree.
+            //
+            // The tail is lexically normalized FIRST (resolving `.` /
+            // `..` without touching disk) so an attacker can't smuggle
+            // an escape through `existing_dir/../../etc/passwd`: the
+            // `..` are collapsed against the lexical components, and
+            // any that climb above the existing ancestor are preserved
+            // as `..` (see `lexical_normalize`), so the result escapes
+            // the cwd subtree and is correctly classified external.
+            let normalized = lexical_normalize(&joined);
+            let mut ancestor = normalized.as_path();
+            let mut tail: Vec<std::ffi::OsString> = Vec::new();
+            loop {
+                if let Ok(canonical_ancestor) = std::fs::canonicalize(ancestor) {
+                    let mut out = canonical_ancestor;
+                    for seg in tail.iter().rev() {
+                        out.push(seg);
+                    }
+                    return out.to_string_lossy().to_string();
+                }
+                match (ancestor.parent(), ancestor.file_name()) {
+                    (Some(parent), Some(name)) => {
+                        tail.push(name.to_os_string());
+                        ancestor = parent;
+                    }
+                    // Reached the root with nothing canonicalizable
+                    // (e.g. a fully bogus working_dir). Fall back to
+                    // the lexical form so the literal-prefix checks in
+                    // `is_external_path` still have something to match.
+                    _ => return normalized.to_string_lossy().to_string(),
+                }
             }
-            lexical_normalize(&joined).to_string_lossy().to_string()
         }
     }
 }
@@ -228,6 +269,72 @@ mod tests {
         assert_eq!(resolved, expected, "symlink should resolve to its target",);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: a write to a brand-new file in a brand-new
+    /// NESTED directory inside a symlinked cwd must resolve through
+    /// the symlink to the real path. The immediate parent doesn't
+    /// exist (so single-level parent canonicalize fails); the fix
+    /// walks up to the deepest existing ancestor, canonicalizes
+    /// that (resolving the symlinked cwd), and re-attaches the
+    /// nonexistent tail. Without this the result kept the symlink
+    /// form, the CWD-allow rule (built from the canonical cwd) never
+    /// matched, and in-project writes re-prompted.
+    #[test]
+    fn resolve_absolute_walks_to_deepest_existing_ancestor_through_symlink() {
+        let base = std::env::temp_dir().join(format!("dirge-deepancestor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real_proj");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link_proj");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // newdir/sub do NOT exist yet; only `link_proj` (→ real_proj) does.
+        let target = link.join("newdir/sub/file.rs");
+        let resolved = resolve_absolute(target.to_str().unwrap(), link.to_str().unwrap());
+
+        let expected = std::fs::canonicalize(&real)
+            .unwrap()
+            .join("newdir/sub/file.rs")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolved, expected,
+            "deep new path under symlinked cwd must resolve to realpath form",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Security: the deepest-ancestor walk must NOT let a `..`
+    /// traversal disguise an escape as internal. `..` is lexically
+    /// collapsed BEFORE the ancestor canonicalize, so a path that
+    /// climbs out of the (symlinked) cwd resolves outside the
+    /// subtree and is classified external (→ prompt), not allowed.
+    #[test]
+    fn resolve_absolute_dotdot_escape_through_symlinked_cwd_still_escapes() {
+        let base = std::env::temp_dir().join(format!("dirge-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real_proj");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link_proj");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let cwd = link.to_string_lossy().into_owned();
+        // newdir doesn't exist; the `..` chain climbs above the project.
+        let traversal = "newdir/../../../../../../etc/passwd";
+        let resolved = resolve_absolute(traversal, &cwd);
+
+        let cwd_canonical = std::fs::canonicalize(&real).unwrap();
+        let resolved_path = std::path::PathBuf::from(&resolved);
+        assert!(
+            !resolved_path.starts_with(&cwd_canonical),
+            "escape via .. must resolve outside the cwd subtree; got {resolved:?}",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// F7: nonexistent paths (writes to new files) must still

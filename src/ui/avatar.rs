@@ -165,4 +165,52 @@ mod tests {
             AvatarState::Reading
         );
     }
+
+    /// Regression guard for the "avatar stuck on (O_O) Alert after a
+    /// permission dialog resolves" bug. When the user lets a tool
+    /// proceed, the UI loop resets the avatar via
+    /// `from_tool_name(&ask_req.tool)`. That reset must always land on
+    /// a working face — never on `Alert` (the prompt-time face) and
+    /// never on `Done`/`Error`/`Idle` — for every tool that can ever
+    /// be gated behind a permission prompt.
+    #[test]
+    fn permission_allow_reset_never_lands_on_alert() {
+        let gated_tools = [
+            "read",
+            "grep",
+            "find_files",
+            "list_dir",
+            "lsp",
+            "semantic",
+            "write",
+            "edit",
+            "apply_patch",
+            "write_todo_list",
+            "bash",
+            "shell",
+            "memory",
+            "skill",
+            "webfetch",
+            "task",
+            "mcp_tool:server:name",
+        ];
+        for tool in gated_tools {
+            let state = AvatarState::from_tool_name(tool);
+            assert!(
+                matches!(
+                    state,
+                    AvatarState::Reading | AvatarState::Writing | AvatarState::Bash
+                ),
+                "tool {:?} reset to non-working avatar state {:?}",
+                tool,
+                state,
+            );
+            assert_ne!(
+                state,
+                AvatarState::Alert,
+                "tool {:?} must not reset to the Alert face",
+                tool,
+            );
+        }
+    }
 }

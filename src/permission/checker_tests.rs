@@ -94,6 +94,9 @@ fn m4_defaults_allow_safe_ask_dangerous() {
         // dirge-sm9w: memory is auto-allowed in Standard/Accept
         // (scoped to ~/.dirge/memories/, no arbitrary FS access).
         "memory",
+        // skill is auto-allowed on the same rationale (scoped to the
+        // agent's skills dir; Restrictive still demotes its writes).
+        "skill",
     ] {
         let result = checker.check_path(tool, "/tmp/anything.rs");
         assert!(
@@ -110,7 +113,6 @@ fn m4_defaults_allow_safe_ask_dangerous() {
         "webfetch",
         "websearch",
         "task",
-        "skill",
     ] {
         // Path is OUTSIDE working_dir (/tmp) so the CWD-scoped
         // allow installer does not apply.
@@ -1215,4 +1217,146 @@ fn allow_always_folder_resolves_through_symlinks() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ============================================================
+// Regression coverage for the 6 reported permission/UX issues.
+// Triage (2026-05) found 5 already fixed on main (write /dev/null,
+// memory transparency, in-cwd read/write, the escape-cwd security
+// boundary, bash sticky-allow); only `skill` transparency was a
+// genuine gap. These tests lock in all six so none regress.
+// ============================================================
+mod reported_permission_ux_regressions {
+    use super::*;
+
+    fn checker_in(dir: &str) -> PermissionChecker {
+        PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from(dir)),
+        )
+    }
+
+    // Issue #1: write to /dev/null should not prompt.
+    #[test]
+    fn probe_write_dev_null_allowed() {
+        let mut c = checker_in("/tmp");
+        assert!(
+            matches!(c.check_path("write", "/dev/null"), CheckResult::Allowed),
+            "write /dev/null should be Allowed, got {:?}",
+            c.check_path("write", "/dev/null")
+        );
+    }
+
+    // Issue #2: memory operations should not prompt.
+    #[test]
+    fn probe_memory_actions_allowed() {
+        for action in ["view", "add", "replace", "remove"] {
+            let mut c = checker_in("/tmp");
+            assert!(
+                matches!(c.check("memory", action), CheckResult::Allowed),
+                "memory {action} should be Allowed, got {:?}",
+                c.check("memory", action)
+            );
+        }
+    }
+
+    // Issue #4: skill operations should not prompt in Standard mode.
+    // Read keywords arrive bare (load/list); write actions arrive as
+    // `{action}:{name}` (create/edit/patch).
+    #[test]
+    fn probe_skill_actions_allowed() {
+        for action in ["load", "list", "create:foo", "edit:foo", "patch:foo"] {
+            let mut c = checker_in("/tmp");
+            assert!(
+                matches!(c.check("skill", action), CheckResult::Allowed),
+                "skill {action} should be Allowed, got {:?}",
+                c.check("skill", action)
+            );
+        }
+    }
+
+    // Restrictive mode keeps its "every write confirms" contract:
+    // skill read actions stay transparent, but create/edit/patch
+    // demote back to Ask (mirrors memory's view-vs-mutate split).
+    #[test]
+    fn probe_skill_restrictive_demotes_writes_not_reads() {
+        let mk = || {
+            PermissionChecker::new(
+                &PermissionConfig::default(),
+                SecurityMode::Restrictive,
+                Some(std::path::PathBuf::from("/tmp")),
+            )
+        };
+        for read in ["load", "list"] {
+            assert!(
+                matches!(mk().check("skill", read), CheckResult::Allowed),
+                "skill {read} must stay Allowed under Restrictive, got {:?}",
+                mk().check("skill", read)
+            );
+        }
+        for write in ["create:foo", "edit:foo", "patch:foo", "delete:foo"] {
+            assert!(
+                matches!(mk().check("skill", write), CheckResult::Ask),
+                "skill {write} must demote to Ask under Restrictive, got {:?}",
+                mk().check("skill", write)
+            );
+        }
+    }
+
+    // Issue #5a: reads inside the project folder should not prompt.
+    #[test]
+    fn probe_read_inside_cwd_allowed() {
+        let mut c = checker_in("/tmp/proj");
+        assert!(
+            matches!(
+                c.check_path("read", "/tmp/proj/src/main.rs"),
+                CheckResult::Allowed
+            ),
+            "read inside cwd should be Allowed"
+        );
+    }
+
+    // Issue #5b: writes inside the project folder should not prompt.
+    #[test]
+    fn probe_write_inside_cwd_allowed() {
+        let mut c = checker_in("/tmp/proj");
+        let r = c.check_path("write", "/tmp/proj/src/main.rs");
+        assert!(
+            matches!(r, CheckResult::Allowed),
+            "write inside cwd should be Allowed, got {:?}",
+            r
+        );
+    }
+
+    // SECURITY BOUNDARY: writes OUTSIDE cwd must still prompt.
+    #[test]
+    fn probe_write_outside_cwd_still_asks() {
+        let mut c = checker_in("/tmp/proj");
+        let r = c.check_path("write", "/etc/evil.conf");
+        assert!(
+            matches!(r, CheckResult::Ask),
+            "write OUTSIDE cwd must still Ask, got {:?}",
+            r
+        );
+    }
+
+    // Issue #6: sticky-allow — after always-allowing `cargo *`,
+    // a similar cargo command should not re-prompt.
+    #[test]
+    fn probe_sticky_allow_bash_similar_command() {
+        let mut c = checker_in("/tmp");
+        c.add_session_allowlist("bash".to_string(), "cargo *");
+        assert!(
+            matches!(
+                c.check("bash", "cargo test --bin dirge"),
+                CheckResult::Allowed
+            ),
+            "sticky-allow cargo * should match cargo test --bin dirge"
+        );
+        assert!(
+            matches!(c.check("bash", "cargo build"), CheckResult::Allowed),
+            "sticky-allow cargo * should match cargo build"
+        );
+    }
 }

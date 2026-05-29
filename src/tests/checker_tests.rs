@@ -353,6 +353,67 @@ fn session_allowlist_takes_effect_for_path_tool_on_next_check() {
     );
 }
 
+/// Re-prompt bug: when the user "allow always"es a path tool while the
+/// LLM sent a RELATIVE path, `suggest_pattern` stores a relative glob
+/// (e.g. `sub/**`). The next check_path always matches against the
+/// canonical ABSOLUTE form (via resolve_absolute), so the relative
+/// pattern never matched and the user got re-prompted. The fix anchors
+/// the canonical-variant twin at the checker's working_dir.
+#[test]
+fn session_allowlist_relative_pattern_matches_absolute_check_inside_cwd() {
+    // Real on-disk working dir so resolve_absolute / canonicalize work.
+    let proj = std::env::temp_dir().join(format!(
+        "dirge-relpat-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let sub = proj.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let mut checker = PermissionChecker::new(
+        &PermissionConfig::default(),
+        // Restrictive so the in-cwd write isn't auto-allowed by the
+        // CWD-scoped builtin rule — forces the test through the
+        // session-allowlist path we actually care about.
+        SecurityMode::Restrictive,
+        Some(proj.clone()),
+    );
+    checker.set_working_dir(proj.to_str().unwrap());
+
+    // Simulate "allow always" with the RELATIVE pattern that
+    // suggest_pattern("write", "sub/file.rs") would produce.
+    checker.add_session_allowlist("write".to_string(), "sub/**");
+
+    // Subsequent call arrives as an ABSOLUTE path to a DIFFERENT file
+    // in the same subtree (the realistic LLM behavior). Must be allowed
+    // without re-prompting.
+    let abs = sub.join("other.rs");
+    let result = checker.check_path("write", abs.to_str().unwrap());
+    assert!(
+        matches!(result, CheckResult::Allowed),
+        "absolute write to {abs:?} must be Allowed after relative `sub/**` allow-always; got {result:?}",
+    );
+
+    // Security boundary: a path OUTSIDE the working directory entirely
+    // must still prompt — anchoring the relative `sub/**` pattern at
+    // working_dir must not over-allow arbitrary absolute paths.
+    let outside = if cfg!(windows) {
+        "C:\\Windows\\Temp\\sub\\evil.txt".to_string()
+    } else {
+        "/tmp/sub/evil.txt".to_string()
+    };
+    let outside_result = checker.check_path("write", &outside);
+    assert!(
+        matches!(outside_result, CheckResult::Ask),
+        "write outside the working dir must still Ask; the relative `sub/**` allow must anchor at cwd, not match any `/.../sub/*`; got {outside_result:?}",
+    );
+
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 // --- Config-driven rules ---
 
 #[test]

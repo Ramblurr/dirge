@@ -167,6 +167,15 @@ impl PermissionChecker {
             // in the mode switch below — its contract is "every
             // action confirms".
             "memory",
+            // skill follows the same contract as memory: its actions
+            // (load/list/create/edit/patch) operate only on the
+            // agent's own scoped skills directory, not arbitrary
+            // filesystem paths. Prompting per action is friction with
+            // no security value in Standard/Accept. Restrictive still
+            // demotes the WRITE actions (create/edit/patch) back to
+            // Ask in the mode switch below; the read actions
+            // (load/list) pass through.
+            "skill",
         ] {
             rules
                 .entry(tool.to_string())
@@ -470,8 +479,14 @@ impl PermissionChecker {
                 // "no rule matched but default is Allow" also
                 // demotes. Explicit user `deny` still denies.
                 let memory_write = tool == "memory" && input != "view" && base != Action::Deny;
+                // skill read actions arrive as the bare keywords
+                // `load`/`list`; write actions (create/edit/patch)
+                // arrive as `{action}:{name}`. Demote only the writes
+                // — same posture as memory's view-vs-mutate split.
+                let skill_write =
+                    tool == "skill" && input != "load" && input != "list" && base != Action::Deny;
                 let bare_default = matched.is_empty() && self.default_action == Action::Allow;
-                if memory_write || bare_default {
+                if memory_write || skill_write || bare_default {
                     Action::Ask
                 } else {
                     base
@@ -1020,6 +1035,36 @@ fn canonicalize_path_pattern(pattern_str: &str, working_dir: &str) -> Option<Str
     };
     if head_trimmed.is_empty() {
         return None;
+    }
+    // RELATIVE-HEAD ANCHORING (re-prompt bug): `suggest_pattern`
+    // derives a path-tool pattern from the parent of the LLM's input.
+    // When the LLM sends a relative path (e.g. `src/main.rs`), the
+    // stored pattern is the RELATIVE glob `src/**`, which compiles to
+    // `^src(?:/.*)?$`. But `check_path` always matches against the
+    // canonical ABSOLUTE form via `resolve_absolute`, so the next call
+    // (especially when the LLM sends an absolute path, or the same
+    // file resolved through the cwd) never matches the relative
+    // pattern and the user is re-prompted despite "allow always".
+    //
+    // The canonical twin must be anchored at the CHECKER's
+    // `working_dir`, not the process cwd. A bare `std::fs::canonicalize`
+    // on a relative head resolves against `std::env::current_dir()`,
+    // which can differ from the checker's working_dir (the agent may
+    // have `cd`'d via `set_working_dir`). For relative heads, anchor at
+    // `working_dir` first; this keeps the boundary tight — the twin can
+    // only point inside `working_dir` (or wherever the symlink-followed
+    // canonical path lands), never escaping to an arbitrary absolute
+    // location chosen by the LLM.
+    if !std::path::Path::new(head_trimmed).is_absolute() {
+        let resolved = resolve_absolute(head_trimmed, working_dir);
+        if resolved != head_trimmed {
+            let mut out = resolved;
+            if had_trailing_slash {
+                out.push('/');
+            }
+            out.push_str(tail);
+            return Some(out);
+        }
     }
     let canonical_head = std::fs::canonicalize(head_trimmed)
         .ok()

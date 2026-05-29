@@ -2682,6 +2682,20 @@ pub async fn run_interactive(
                 renderer.clear_alert_overlay();
                 let _ = ask_req.reply.send(decision);
 
+                // Avatar bugfix: when the user lets the tool proceed
+                // (Allow / AllowAlways), the avatar is still stuck on
+                // the Alert face `(O_O)` that was set at prompt time
+                // (see set_avatar_state(Alert) above). Reset it to the
+                // tool's working face (Reading/Writing/Bash) so the
+                // bottom-row avatar matches the tool that's now
+                // running again. The deny path intentionally leaves
+                // this alone — the tool isn't going to run, and the
+                // turn's own Done/Error/Idle handlers own the next
+                // transition.
+                if !was_denied {
+                    renderer.set_avatar_state(avatar::AvatarState::from_tool_name(&ask_req.tool));
+                }
+
                 // Audit H10: cascading reject. When the user denies
                 // one tool, any other tool requests already queued
                 // in `ask_rx` belong to the same agent run and the
