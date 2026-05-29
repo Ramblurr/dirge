@@ -1397,4 +1397,54 @@ mod reported_permission_ux_regressions {
             "sticky-allow cargo * should match cargo build"
         );
     }
+
+    // Issue #3 (real cause): parallel-tool prompt coalescing. After
+    // the user "allow always"-es one queued tool call, the sibling
+    // calls already parked on a permission decision should be
+    // auto-resolved against the new allowlist instead of re-flashing
+    // the Alert avatar. `session_allows_now` is the side-effect-free
+    // probe the UI uses for that — it must match the same raw-vs-path
+    // and relative-vs-absolute forms the real checks accept.
+    #[test]
+    fn probe_session_allows_now_coalesces_after_allow_always() {
+        // Raw tool (bash): a `cargo *` allow-always covers a queued
+        // sibling `cargo build`, but not an unrelated `git status`.
+        let mut c = checker_in("/tmp");
+        assert!(
+            !c.session_allows_now("bash", "cargo build"),
+            "nothing allowed yet"
+        );
+        c.add_session_allowlist("bash".to_string(), "cargo *");
+        assert!(
+            c.session_allows_now("bash", "cargo build"),
+            "queued cargo sibling must be coalesced after allow-always",
+        );
+        assert!(
+            !c.session_allows_now("bash", "git status"),
+            "unrelated queued command must still prompt",
+        );
+
+        // Path tool: a relative `sub/**` allow-always must match an
+        // absolute probe to a sibling file in the same subtree, while
+        // a path outside the working dir must NOT be coalesced.
+        let proj = std::env::temp_dir().join(format!("dirge-coalesce-{}", std::process::id()));
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        let mut pc = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(proj.clone()),
+        );
+        pc.set_working_dir(proj.to_str().unwrap());
+        pc.add_session_allowlist("write".to_string(), "sub/**");
+        let abs = proj.join("sub/other.rs");
+        assert!(
+            pc.session_allows_now("write", abs.to_str().unwrap()),
+            "absolute sibling write must be coalesced by relative allow-always",
+        );
+        assert!(
+            !pc.session_allows_now("write", "/etc/evil.conf"),
+            "path outside the working dir must not be coalesced",
+        );
+        let _ = std::fs::remove_dir_all(&proj);
+    }
 }

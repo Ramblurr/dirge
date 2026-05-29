@@ -690,6 +690,30 @@ impl PermissionChecker {
         allowlist::is_allowed(&self.session_allowlist, tool, input)
     }
 
+    /// Side-effect-free re-check of ONLY the session allowlist (the
+    /// state a fresh "allow always" mutates) for a pending request.
+    /// Unlike [`Self::check`] / [`Self::check_path`] it does NOT touch
+    /// the doom-loop counters or apply mode coercion — it answers the
+    /// narrow question "would the current session allowlist allow this
+    /// right now?".
+    ///
+    /// Used by the UI to coalesce parallel-tool permission prompts:
+    /// when the agent fires several tool calls at once, each that needs
+    /// permission queues its own request. If the user picks "allow
+    /// always" on the first, the queued siblings that the new pattern
+    /// now covers should be auto-allowed instead of re-prompting (and
+    /// re-flashing the Alert avatar). Mirrors the raw-vs-path dispatch
+    /// and the resolve-both-forms logic of the real checks so a
+    /// relative allow-always pattern matches an absolute probe.
+    pub fn session_allows_now(&self, tool: &str, input: &str) -> bool {
+        if is_path_tool_name(tool) {
+            let abs = resolve_absolute(input, &self.working_dir);
+            self.is_session_allowed(tool, input) || self.is_session_allowed(tool, &abs)
+        } else {
+            self.is_session_allowed(tool, input)
+        }
+    }
+
     pub fn add_session_allowlist(&mut self, tool: String, pattern_str: &str) {
         // dirge-yevn fix #1: register the pattern AND a
         // canonicalized variant for path-tool entries so the check
