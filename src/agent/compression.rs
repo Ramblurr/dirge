@@ -75,6 +75,31 @@ const SUMMARY_TOKENS_CEILING: u64 = 12_000;
 /// the model can re-call if it needs more.
 pub const TURN_END_RESULT_CAP_TOKENS: u64 = 3000;
 
+/// When the estimated context exceeds this fraction of the model window,
+/// switch the per-result cap to the tighter `AGGRESSIVE_RESULT_CAP_TOKENS`
+/// to head off an overflow BEFORE the (reactive, post-response) fold
+/// trigger fires. Intentionally below the 75% fold threshold so the
+/// tighter cap has room to work first (IMPROVEMENTS_PLAN #3).
+pub const AGGRESSIVE_CAP_THRESHOLD: f64 = 0.60;
+
+/// Per-result token cap in the aggressive tier — still enough to see an
+/// error message + key output lines, tight enough that one `grep`/`find`
+/// result can't eat ~10% of the window before a fold runs.
+pub const AGGRESSIVE_RESULT_CAP_TOKENS: u64 = 1000;
+
+/// Pick the per-result cap for `cap_oversized_tool_results` based on how
+/// full the context already is: the tighter aggressive cap once
+/// estimated usage crosses `AGGRESSIVE_CAP_THRESHOLD`, else the normal
+/// cap (IMPROVEMENTS_PLAN #3). Pure so the tiering is unit-testable.
+pub fn tiered_result_cap(estimate_tokens: u64, ctx_max: u64) -> u64 {
+    let ratio = estimate_tokens as f64 / ctx_max.max(1) as f64;
+    if ratio > AGGRESSIVE_CAP_THRESHOLD {
+        AGGRESSIVE_RESULT_CAP_TOKENS
+    } else {
+        TURN_END_RESULT_CAP_TOKENS
+    }
+}
+
 /// Chars-per-token rough estimate. Port of Hermes's _CHARS_PER_TOKEN.
 const CHARS_PER_TOKEN: u64 = 4;
 
@@ -667,6 +692,29 @@ pub fn rotate_session_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // IMPROVEMENTS_PLAN #3: the per-result cap tightens above 60% ctx.
+    #[test]
+    fn tiered_result_cap_switches_at_threshold() {
+        let ctx = 128_000u64;
+        // Well below 60% → normal cap.
+        assert_eq!(
+            tiered_result_cap(ctx / 4, ctx), // 25%
+            TURN_END_RESULT_CAP_TOKENS
+        );
+        // Exactly at 60% is NOT over the threshold (strict `>`).
+        assert_eq!(
+            tiered_result_cap((ctx as f64 * 0.60) as u64, ctx),
+            TURN_END_RESULT_CAP_TOKENS
+        );
+        // Above 60% → aggressive cap.
+        assert_eq!(
+            tiered_result_cap((ctx as f64 * 0.70) as u64, ctx),
+            AGGRESSIVE_RESULT_CAP_TOKENS
+        );
+        // Degenerate ctx_max doesn't panic (div-by-zero guard).
+        let _ = tiered_result_cap(100, 0);
+    }
 
     // ── should_compress ─────────────────────────────────
 

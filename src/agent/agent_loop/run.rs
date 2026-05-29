@@ -616,9 +616,23 @@ pub async fn run_loop(
             // 1-line summarization — this cap is the per-result
             // safety net so a single 50KB tool output doesn't
             // dominate the prompt until fold fires.
+            //
+            // Tiered (IMPROVEMENTS_PLAN #3): above 60% estimated context
+            // the cap tightens (3000 → 1000 tokens) so a single oversized
+            // result can't push the NEXT request over the limit before
+            // the (reactive) post-response fold fires.
+            let cap_ctx_max = config
+                .model_name
+                .as_deref()
+                .and_then(crate::config::context_window_for_model)
+                .unwrap_or(128_000);
+            let cap_estimate =
+                crate::agent::compression::estimate_messages_tokens(&current_context.messages);
+            let result_cap =
+                crate::agent::compression::tiered_result_cap(cap_estimate, cap_ctx_max);
             current_context.messages = crate::agent::compression::cap_oversized_tool_results(
                 &current_context.messages,
-                crate::agent::compression::TURN_END_RESULT_CAP_TOKENS,
+                result_cap,
             );
 
             // Pi lines 192-194: LLM call.
