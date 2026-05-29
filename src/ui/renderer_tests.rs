@@ -42,6 +42,33 @@ fn wrap_editor_soft_wrap() {
     assert_eq!((r, c), (2, 2));
 }
 
+/// dirge-0dqe / dirge-5w9v: a long single (un-newlined) buffer with
+/// the cursor at the end soft-wraps to many rows, each ≤ wrap_w cells,
+/// and the cursor lands on the LAST row — the property both the
+/// questionnaire wrap and the compose-box scroll rely on to keep the
+/// typed tail visible.
+#[test]
+fn wrap_editor_long_buffer_tail_on_last_row() {
+    use unicode_width::UnicodeWidthStr;
+    let s = "word ".repeat(60); // ~300 cells, no hard newlines
+    let wrap_w = 20;
+    let (rows, cursor_row, _) = wrap_editor(&s, s.len(), wrap_w);
+    assert!(rows.len() > 1, "long buffer must wrap to multiple rows");
+    for row in &rows {
+        assert!(
+            UnicodeWidthStr::width(row.as_str()) <= wrap_w,
+            "each row must fit wrap_w; got {:?} ({} cells)",
+            row,
+            UnicodeWidthStr::width(row.as_str())
+        );
+    }
+    assert_eq!(
+        cursor_row as usize,
+        rows.len() - 1,
+        "cursor at end of buffer must land on the last (visible) row"
+    );
+}
+
 /// dirge-ov2 Phase A: chat switching saves the prior chat's
 /// buffer and selection, then loads the target chat's snapshot.
 /// Round-trip preserves content.

@@ -3442,15 +3442,41 @@ pub async fn run_interactive(
                                     renderer.write_line("  enter your answer:", c_perm())?;
                                     let input_anchor = renderer.buffer_len();
                                     loop {
-                                        renderer.replace_from(
-                                            input_anchor,
-                                            vec![LineEntry {
-                                                text: compact_str::CompactString::new(
-                                                    format!("  > {}", buf),
-                                                ),
-                                                color: c_perm(),
-                                            }],
+                                        // Soft-wrap the typed answer to the
+                                        // available width (reusing the compose
+                                        // box's wrap helper) so a long custom
+                                        // answer flows onto new lines and the
+                                        // tail stays visible instead of running
+                                        // off the right edge (dirge-0dqe). The
+                                        // "  > " / "    " prefixes are 4 cols.
+                                        let wrap_w =
+                                            renderer.content_width().saturating_sub(4).max(1);
+                                        let (rows, _, _) = crate::ui::renderer::wrap_editor(
+                                            &buf,
+                                            buf.len(),
+                                            wrap_w,
                                         );
+                                        let lines: Vec<LineEntry> = if rows.is_empty() {
+                                            vec![LineEntry {
+                                                text: compact_str::CompactString::new("  > "),
+                                                color: c_perm(),
+                                            }]
+                                        } else {
+                                            rows.iter()
+                                                .enumerate()
+                                                .map(|(i, row)| LineEntry {
+                                                    text: compact_str::CompactString::new(
+                                                        if i == 0 {
+                                                            format!("  > {row}")
+                                                        } else {
+                                                            format!("    {row}")
+                                                        },
+                                                    ),
+                                                    color: c_perm(),
+                                                })
+                                                .collect()
+                                        };
+                                        renderer.replace_from(input_anchor, lines);
                                         renderer.render_viewport()?;
                                         renderer.draw_bottom(
                                             &input,
