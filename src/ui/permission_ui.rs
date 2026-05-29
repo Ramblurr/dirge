@@ -26,7 +26,12 @@ pub(crate) fn suggest_pattern(tool: &str, input: &str) -> String {
             let first = trimmed.split_whitespace().next().unwrap_or(PLACEHOLDER);
             format!("{} *", first)
         }
-        "read" | "write" | "edit" | "list_dir" => {
+        // Path-arg tools: suggest a `<parent>/**` glob from the input
+        // path. One arm for all of them — previously read/write/edit/
+        // list_dir, apply_patch, and the semantic tools each had an
+        // identical copy of this body (dirge-t1wh).
+        "read" | "write" | "edit" | "list_dir" | "apply_patch" | "list_symbols"
+        | "get_symbol_body" | "find_definition" | "find_callers" | "find_callees" => {
             let path = std::path::Path::new(trimmed);
             let parent = path
                 .parent()
@@ -51,27 +56,6 @@ pub(crate) fn suggest_pattern(tool: &str, input: &str) -> String {
             } else {
                 PLACEHOLDER.to_string()
             }
-        }
-        "apply_patch" => {
-            let path = std::path::Path::new(trimmed);
-            let parent = path
-                .parent()
-                .map(|p| p.to_string_lossy())
-                .unwrap_or(std::borrow::Cow::Borrowed(""));
-            if parent.is_empty() {
-                "**".to_string()
-            } else {
-                format!("{}/**", parent)
-            }
-        }
-        "list_symbols" | "get_symbol_body" | "find_definition" | "find_callers"
-        | "find_callees" => {
-            let path = std::path::Path::new(trimmed);
-            let parent = path
-                .parent()
-                .map(|p| p.to_string_lossy())
-                .unwrap_or(std::borrow::Cow::Borrowed("."));
-            format!("{}/**", parent)
         }
         "webfetch" => "webfetch:*".to_string(),
         "websearch" => "websearch:*".to_string(),

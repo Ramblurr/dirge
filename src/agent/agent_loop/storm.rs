@@ -211,33 +211,29 @@ impl StormBreaker {
     }
 }
 
-/// Built-in mutating tools: calls that change filesystem state.
-/// Kept in sync with `crate::agent::tools::BUILTIN_TOOL_NAMES`.
+/// Built-in mutating tools: calls that change filesystem state or run
+/// external code. Derived from the canonical tool→[`Operation`] mapping
+/// (`Edit` = file mutation, `Execute` = shell) rather than a hand-kept
+/// name list — so a new mutating tool is classified the moment it has a
+/// permission operation, with no second list to forget (dirge-uxuv).
 pub fn default_mutating(call: &ToolCall) -> bool {
+    use crate::permission::engine::tool_operation;
+    use crate::permission::engine::types::Operation;
     matches!(
-        call.name.as_str(),
-        "write" | "edit" | "bash" | "apply_patch"
+        tool_operation(&call.name),
+        Operation::Edit | Operation::Execute
     )
 }
 
-/// Built-in storm-exempt tools: cheap inspectors that should never
-/// trip the repeat-loop guard regardless of repetition count.
-/// Kept in sync with `crate::agent::tools::BUILTIN_TOOL_NAMES`.
-/// `find_callers` / `find_callees` are behind `#[cfg(feature = "semantic")]`
-/// but listing them here is harmless — the match simply won't fire
-/// when the feature is off.
+/// Built-in storm-exempt tools: read-only inspectors that should never
+/// trip the repeat-loop guard regardless of repetition count. Derived
+/// from the canonical mapping (`Operation::Read`) — covers read/grep/
+/// find/glob/list_dir/repo_overview AND the lsp + semantic read tools,
+/// which are equally side-effect-free (dirge-uxuv).
 pub fn default_exempt(call: &ToolCall) -> bool {
-    matches!(
-        call.name.as_str(),
-        "read"
-            | "list_dir"
-            | "grep"
-            | "find_files"
-            | "glob"
-            | "repo_overview"
-            | "find_callers"
-            | "find_callees"
-    )
+    use crate::permission::engine::tool_operation;
+    use crate::permission::engine::types::Operation;
+    matches!(tool_operation(&call.name), Operation::Read)
 }
 
 impl Default for StormBreaker {
@@ -350,6 +346,43 @@ mod tests {
         // Buffer cleared by write_file — a fresh pair of reads is now safe.
         assert!(!sb.inspect(&call_json("read_file", "{}")).suppress);
         assert!(!sb.inspect(&call_json("read_file", "{}")).suppress);
+    }
+
+    // dirge-uxuv: the storm classifiers derive from the canonical
+    // tool_operation mapping, not a hand-kept name list — so they can't
+    // drift from the permission engine's notion of what a tool does.
+    #[test]
+    fn default_classifiers_track_tool_operation() {
+        for t in ["write", "edit", "apply_patch", "bash"] {
+            assert!(
+                default_mutating(&call_json(t, "{}")),
+                "{t} must be mutating"
+            );
+            assert!(
+                !default_exempt(&call_json(t, "{}")),
+                "{t} must not be exempt"
+            );
+        }
+        // Read-only tools — incl. lsp + semantic-read, which the old
+        // hardcoded exempt list omitted.
+        for t in [
+            "read",
+            "grep",
+            "find_files",
+            "glob",
+            "list_dir",
+            "repo_overview",
+            "lsp",
+            "list_symbols",
+        ] {
+            assert!(default_exempt(&call_json(t, "{}")), "{t} must be exempt");
+            assert!(!default_mutating(&call_json(t, "{}")), "{t} not mutating");
+        }
+        // Neither mutating nor exempt → counted normally.
+        for t in ["webfetch", "task", "memory", "mcp_tool"] {
+            assert!(!default_mutating(&call_json(t, "{}")), "{t}");
+            assert!(!default_exempt(&call_json(t, "{}")), "{t}");
+        }
     }
 
     #[test]
