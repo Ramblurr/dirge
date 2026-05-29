@@ -633,6 +633,17 @@ pub async fn run_loop(
             // the intended 3-round budget (review fix). First record wins.
             let mut compaction_recorded_this_iter = false;
 
+            // The model's context window is constant within one inner-loop
+            // iteration — the model can only change at a turn boundary
+            // (prepareNextTurn), after the post-usage decision. Look it up
+            // once and reuse at all three sites that need it: the turn-start
+            // fold, the per-result snip cap, and the post-usage decision.
+            let ctx_max = config
+                .model_name
+                .as_deref()
+                .and_then(crate::config::context_window_for_model)
+                .unwrap_or(128_000);
+
             // Pi lines 175-179: turn_start (skipped on very first
             // iteration — the outer wrapper already emitted it).
             if !first_turn {
@@ -660,11 +671,6 @@ pub async fn run_loop(
             // count (otherwise array content was 0 and the
             // estimate stayed at 0% forever).
             if !folded_this_turn {
-                let ctx_max = config
-                    .model_name
-                    .as_deref()
-                    .and_then(crate::config::context_window_for_model)
-                    .unwrap_or(128_000);
                 let rough_estimate =
                     crate::agent::compression::estimate_messages_tokens(&current_context.messages);
                 let estimate = context_manager::estimate_turn_start(rough_estimate, ctx_max);
@@ -743,15 +749,9 @@ pub async fn run_loop(
             // the cap tightens (3000 → 1000 tokens) so a single oversized
             // result can't push the NEXT request over the limit before
             // the (reactive) post-response fold fires.
-            let cap_ctx_max = config
-                .model_name
-                .as_deref()
-                .and_then(crate::config::context_window_for_model)
-                .unwrap_or(128_000);
             let cap_estimate =
                 crate::agent::compression::estimate_messages_tokens(&current_context.messages);
-            let result_cap =
-                crate::agent::compression::tiered_result_cap(cap_estimate, cap_ctx_max);
+            let result_cap = crate::agent::compression::tiered_result_cap(cap_estimate, ctx_max);
             // Counted variant (IMPROVEMENTS_PLAN #4): track how much the
             // snip freed so the post-response fold can be skipped if it
             // bought enough headroom.
@@ -997,11 +997,6 @@ pub async fn run_loop(
             // into the stream pipeline (future phase). With None,
             // decision defaults to None (carry on).
             {
-                let ctx_max = config
-                    .model_name
-                    .as_deref()
-                    .and_then(crate::config::context_window_for_model)
-                    .unwrap_or(128_000);
                 let decision = context_manager::decide_after_usage(
                     token_usage.map(|u| u.input_tokens),
                     ctx_max,

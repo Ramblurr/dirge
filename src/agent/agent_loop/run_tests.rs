@@ -2238,6 +2238,7 @@ async fn context_compacted_reports_compaction_kind() {
 
     async fn kind_for(
         summarize_fn: Option<crate::agent::compression::SummarizeFn>,
+        failures: u32,
     ) -> CompactionKind {
         let mut ctx = empty_context();
         ctx.messages
@@ -2253,7 +2254,7 @@ async fn context_compacted_reports_compaction_kind() {
         ctx.messages
             .push(serde_json::json!({"role":"user","content":"latest"}));
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(8);
-        super::run_compaction_pass(&mut ctx, &summarize_fn, 5, 0, &None, None, &tx).await;
+        super::run_compaction_pass(&mut ctx, &summarize_fn, 5, failures, &None, None, &tx).await;
         drop(tx);
         while let Some(ev) = rx.recv().await {
             if let LoopEvent::ContextCompacted {
@@ -2275,15 +2276,37 @@ async fn context_compacted_reports_compaction_kind() {
             })
         },
     ));
-    assert_eq!(kind_for(good).await, CompactionKind::PruneAndSummary);
+    assert_eq!(kind_for(good, 0).await, CompactionKind::PruneAndSummary);
 
     // Failing summary → PruneAndFailedSummary.
     let bad: Option<crate::agent::compression::SummarizeFn> =
         Some(std::sync::Arc::new(|_p: String| {
             Box::pin(async move { Err(anyhow::anyhow!("boom")) })
         }));
-    assert_eq!(kind_for(bad).await, CompactionKind::PruneAndFailedSummary);
+    assert_eq!(
+        kind_for(bad, 0).await,
+        CompactionKind::PruneAndFailedSummary
+    );
 
     // No summarizer wired → PruneOnly.
-    assert_eq!(kind_for(None).await, CompactionKind::PruneOnly);
+    assert_eq!(kind_for(None, 0).await, CompactionKind::PruneOnly);
+
+    // Summarizer wired but the circuit breaker is OPEN (failures at the
+    // cap) → PruneSummarizerDisabled, NOT PruneOnly. The distinct kind
+    // keeps the ongoing-failure signal visible after the breaker latches
+    // instead of masquerading as a healthy no-summarizer pass. Use a
+    // summarizer that would SUCCEED if called, to prove the kind comes
+    // from the breaker being open and not from the summarizer's outcome.
+    let would_succeed: Option<crate::agent::compression::SummarizeFn> = Some(std::sync::Arc::new(
+        |_p: String| {
+            Box::pin(async move {
+                Ok("## Active Task\nx\n\n## Goal\ny\n\n## Completed Actions\n1. z\n\n## Remaining Work\nw"
+                    .to_string())
+            })
+        },
+    ));
+    assert_eq!(
+        kind_for(would_succeed, super::MAX_CONSECUTIVE_COMPACTION_FAILURES).await,
+        CompactionKind::PruneSummarizerDisabled
+    );
 }
