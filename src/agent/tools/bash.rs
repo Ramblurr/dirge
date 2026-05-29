@@ -332,20 +332,7 @@ impl Tool for BashTool {
         // ever races. 256 KiB ≈ 65k tokens worst-case, already well
         // above any sensible single-command output.
         const BASH_OUTPUT_CAP_BYTES: usize = 256 * 1024;
-        if result.len() > BASH_OUTPUT_CAP_BYTES {
-            // Slice at UTF-8 char boundary.
-            let mut cut = BASH_OUTPUT_CAP_BYTES;
-            while cut > 0 && !result.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            let dropped = result.len() - cut;
-            result.truncate(cut);
-            result.push_str(&format!(
-                "\n…[bash output truncated: dropped {} bytes ({} KiB total); pipe through head/grep to keep the LLM context lean]",
-                dropped,
-                (cut + dropped) / 1024,
-            ));
-        }
+        result = crate::agent::tools::head_cap(result, BASH_OUTPUT_CAP_BYTES, "bash output");
         // Bash may have mutated the filesystem; conservatively invalidate the
         // per-turn read/grep/list cache.
         if let Some(ref cache) = self.cache {

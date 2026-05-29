@@ -135,6 +135,35 @@ pub fn is_skip_dir(name: &str) -> bool {
     matches!(name, "node_modules" | "target")
 }
 
+/// Head-truncate `text` to at most `max_bytes` (landing on a UTF-8 char
+/// boundary), appending a uniform marker noting how much was dropped.
+/// Single source for the per-tool byte caps (dirge-06cp) so the marker
+/// is consistent and truncation is never *silent*. Takes ownership and
+/// returns the input untouched when it's within the cap (no copy).
+/// `what` names the source for the marker (e.g. "bash output").
+///
+/// NOTE: this is for the in-tool byte ceilings only. The LLM-context cap
+/// (head+tail, `compression`), the UI display cap (line-aware), grep's
+/// per-line cap, and list_dir's per-item cap are deliberately separate
+/// concerns/layers, not folded in here.
+pub fn head_cap(text: String, max_bytes: usize, what: &str) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let total = text.len();
+    let dropped = total - cut;
+    let mut out = text;
+    out.truncate(cut);
+    out.push_str(&format!(
+        "\n…[{what} truncated: dropped {dropped} of {total} bytes; narrow the command (head/grep) to keep context lean]"
+    ));
+    out
+}
+
 /// Enforce that a tool argument is an absolute filesystem path.
 ///
 /// Single source for the check + error message shared by read, write,
@@ -464,6 +493,27 @@ mod tests {
             effect,
             tool: None,
         }
+    }
+
+    // dirge-06cp: head_cap returns short input untouched and marks any
+    // truncation (never silent), landing on a UTF-8 boundary.
+    #[test]
+    fn head_cap_passes_short_and_marks_truncation() {
+        assert_eq!(head_cap("short".to_string(), 100, "x"), "short");
+
+        let capped = head_cap("a".repeat(50), 10, "bash output");
+        assert!(capped.starts_with(&"a".repeat(10)), "kept head: {capped}");
+        assert!(capped.contains("truncated"), "marked: {capped}");
+        assert!(
+            capped.contains("dropped 40 of 50 bytes"),
+            "counts: {capped}"
+        );
+
+        // Multibyte: 'é' is 2 bytes; a cap of 5 must land on a boundary
+        // (4 bytes = 2 chars) without panicking or splitting a char.
+        let capped = head_cap("é".repeat(10), 5, "x");
+        assert!(capped.starts_with("éé"), "boundary-safe head: {capped}");
+        assert!(capped.contains("truncated"));
     }
 
     // dirge-e1r9: the shared absolute-path guard accepts absolute paths

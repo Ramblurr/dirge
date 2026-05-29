@@ -7,11 +7,12 @@ use tokio::task::JoinHandle;
 /// dirge-nmv5: legacy hard cap retained for the `Failed` error
 /// path only. Error strings are typically a single-line provider
 /// error or "subagent timed out" message — relaying them to disk
-/// would be wasteful. Truncation here is char-counted, UTF-8-safe.
-/// Completed payloads no longer hit this cap: they go through the
-/// disk-backed `output_relay` instead, so the full subagent answer
-/// is recoverable via the `read` tool even when the inline summary
-/// elides the middle.
+/// would be wasteful. Capping goes through `tools::head_cap`
+/// (byte-bounded, UTF-8-safe, marker appended — no longer a silent
+/// chop; dirge-06cp). Completed payloads no longer hit this cap: they
+/// go through the disk-backed `output_relay` instead, so the full
+/// subagent answer is recoverable via the `read` tool even when the
+/// inline summary elides the middle.
 const MAX_TASK_OUTPUT_CHARS: usize = 3000;
 
 /// Maximum number of tasks retained in the store. When a new task is
@@ -409,8 +410,13 @@ fn truncate_state(state: TaskState) -> TaskState {
             TaskState::Completed(outcome.text)
         }
         TaskState::Failed(err) => {
-            let e: String = err.chars().take(MAX_TASK_OUTPUT_CHARS).collect();
-            TaskState::Failed(e)
+            // Was a silent `chars().take` chop; now caps with a marker
+            // so the agent knows the error was truncated (dirge-06cp).
+            TaskState::Failed(crate::agent::tools::head_cap(
+                err,
+                MAX_TASK_OUTPUT_CHARS,
+                "task error",
+            ))
         }
         s => s,
     }
@@ -541,12 +547,23 @@ mod tests {
         let store = BackgroundStore::new();
         store.insert("t1".into());
         let huge = "e".repeat(MAX_TASK_OUTPUT_CHARS * 2);
+        let huge_len = huge.len();
         store.notify("t1", TaskState::Failed(huge));
 
         let TaskState::Failed(text) = store.get("t1").unwrap().state else {
             panic!("expected Failed");
         };
-        assert_eq!(text.chars().count(), MAX_TASK_OUTPUT_CHARS);
+        // dirge-06cp: capped to the byte ceiling AND marked (no longer a
+        // silent chop) — head preserved, a truncation marker appended.
+        assert!(
+            text.starts_with(&"e".repeat(MAX_TASK_OUTPUT_CHARS)),
+            "head must be preserved up to the cap"
+        );
+        assert!(
+            text.contains("truncated"),
+            "must carry a truncation marker: {text}"
+        );
+        assert!(text.len() < huge_len, "must be shorter than the original");
     }
 
     // dirge-nmv5: short Completed payloads must pass through the
