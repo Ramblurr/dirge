@@ -777,18 +777,22 @@ fn create_tool_result_message(finalized: &FinalizedOutcome) -> ToolResultMessage
 }
 
 fn content_value_to_block(value: &Value) -> ContentBlock {
+    // The single tool-result boundary: every result block is scrubbed
+    // for credential-shaped substrings (dirge-tkyn) before it reaches
+    // the LLM context, the persisted transcript, or the UI — so a
+    // command like `cat .env` / `echo $API_KEY` can't leak a secret.
     // Recognise pi's `{type: "text", text: "..."}` shape.
     if let Some(obj) = value.as_object()
         && obj.get("type").and_then(|t| t.as_str()) == Some("text")
         && let Some(text) = obj.get("text").and_then(|t| t.as_str())
     {
         return ContentBlock::Text {
-            text: text.to_string(),
+            text: crate::sandbox::redact_secrets(text).into_owned(),
         };
     }
     // Fallback: stringify the value. Better than dropping data.
     ContentBlock::Text {
-        text: value.to_string(),
+        text: crate::sandbox::redact_secrets(&value.to_string()).into_owned(),
     }
 }
 

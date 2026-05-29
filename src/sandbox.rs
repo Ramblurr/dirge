@@ -186,44 +186,63 @@ pub fn is_sensitive_env_value(value: &str) -> bool {
     // the regex when none of the gate substrings are present keeps the
     // per-spawn cost negligible for the common case.
     let has_url_userinfo_gate = value.contains("://");
-    let has_prefix_gate = value.contains("AKIA")
-        || value.contains("ghp_")
-        || value.contains("xox")
-        || value.contains("sk-")
-        || value.contains("sk_live_")
-        || value.contains("sk_test_")
-        || value.contains("AIza")
-        || value.contains("github_pat_")
-        || value.contains("hf_")
-        || value.contains("xai-")
-        || value.contains("eyJ");
+    let has_prefix_gate = has_vendor_prefix_gate(value);
     if !has_url_userinfo_gate && !has_prefix_gate {
         return false;
     }
-
-    static URL_USERINFO_RE: OnceLock<Regex> = OnceLock::new();
-    static PREFIX_RE: OnceLock<Regex> = OnceLock::new();
-
-    // protocol://user:pass@host — any scheme, requires a non-empty
-    // password component. Matches both DB connection strings
-    // (postgres://user:pass@…) and generic webhook URLs with
-    // userinfo (https://user:token@api.example.com).
-    let url_re = URL_USERINFO_RE.get_or_init(|| {
-        // user may be empty (redis://:pass@…), password must be non-empty.
-        Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@").unwrap()
-    });
-    if has_url_userinfo_gate && url_re.is_match(value) {
+    if has_url_userinfo_gate && url_userinfo_re().is_match(value) {
         return true;
     }
+    if has_prefix_gate && vendor_prefix_re().is_match(value) {
+        return true;
+    }
+    false
+}
 
-    // High-confidence vendor token prefixes. Each entry is restrictive
-    // enough that a random env var value matching by accident is
-    // essentially impossible.
-    let prefix_re = PREFIX_RE.get_or_init(|| {
+/// Marker inserted in place of a scrubbed credential.
+const REDACTED: &str = "[REDACTED]";
+
+/// Cheap substring pre-check for the vendor-prefix regex: skip the
+/// regex entirely unless one of the high-signal prefixes is present.
+/// Shared by [`is_sensitive_env_value`] and [`redact_secrets`].
+fn has_vendor_prefix_gate(s: &str) -> bool {
+    s.contains("AKIA")
+        || s.contains("ghp_")
+        || s.contains("xox")
+        || s.contains("sk-")
+        || s.contains("sk_live_")
+        || s.contains("sk_test_")
+        || s.contains("AIza")
+        || s.contains("github_pat_")
+        || s.contains("hf_")
+        || s.contains("xai-")
+        || s.contains("eyJ")
+}
+
+/// `protocol://user:pass@host` — any scheme, non-empty password
+/// component. Captures the prefix-through-`:`, the password, and the
+/// trailing `@` so redaction can scrub only the password and leave the
+/// scheme/host readable. (Capture groups don't affect `is_match`, so
+/// the detector reuses this same regex.)
+fn url_userinfo_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?P<pre>[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:)(?P<pw>[^/\s@]+)(?P<at>@)")
+            .unwrap()
+    })
+}
+
+/// High-confidence vendor token prefixes. Each entry is restrictive
+/// enough that a random string matching by accident is essentially
+/// impossible. Group `b` captures the leading boundary (start-of-text
+/// or a non-token char) so redaction can preserve it.
+fn vendor_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
         Regex::new(
             r"(?x)
-            (?:^|[^A-Za-z0-9_-])
-            (?:
+            (?P<b>^|[^A-Za-z0-9_\-])
+            (?P<tok>
                   AKIA[0-9A-Z]{16}                  # AWS Access Key ID
                 | ghp_[A-Za-z0-9]{36}               # GitHub PAT (classic)
                 | github_pat_[A-Za-z0-9_]{20,}      # GitHub PAT (fine-grained)
@@ -242,11 +261,96 @@ pub fn is_sensitive_env_value(value: &str) -> bool {
             ",
         )
         .unwrap()
-    });
-    if has_prefix_gate && prefix_re.is_match(value) {
-        return true;
+    })
+}
+
+/// Scrub credential-shaped substrings out of arbitrary text before it
+/// leaves the trust boundary (tool output → LLM context + session
+/// storage). The companion to [`scrub_env`], which guards the INPUT
+/// side: this guards the OUTPUT side, where a command like
+/// `echo $ANTHROPIC_API_KEY` or `cat .env` would otherwise leak a
+/// secret verbatim into the transcript.
+///
+/// Two layers, both deliberately low-false-positive:
+/// 1. Literal values of the process's own sensitive env vars (catches
+///    opaque secrets with no vendor shape).
+/// 2. The shared vendor-prefix + URL-userinfo patterns.
+///
+/// Returns `Cow::Borrowed` unchanged when nothing matched, so the
+/// common (secret-free) case allocates nothing.
+pub fn redact_secrets(text: &str) -> std::borrow::Cow<'_, str> {
+    redact_secrets_with(text, env_secret_values())
+}
+
+/// Cached snapshot of the process's sensitive env-var VALUES (by name
+/// match), longest-first so a longer secret is scrubbed before any
+/// shorter substring of it. Read once — secrets don't rotate mid-session.
+fn env_secret_values() -> &'static [String] {
+    static VALUES: OnceLock<Vec<String>> = OnceLock::new();
+    VALUES.get_or_init(|| {
+        let mut v: Vec<String> = std::env::vars()
+            .filter(|(k, val)| is_sensitive_env_name(k) && val.len() >= 8)
+            .map(|(_, val)| val)
+            .collect();
+        v.sort_by(|a, b| b.len().cmp(&a.len()));
+        v.dedup();
+        v
+    })
+}
+
+/// Core of [`redact_secrets`], parameterized on the literal secret list
+/// so it's testable without touching the process env.
+fn redact_secrets_with<'a>(text: &'a str, literal_secrets: &[String]) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    let mut out: Option<String> = None;
+
+    // 1. Literal known-secret values.
+    for s in literal_secrets {
+        if s.is_empty() {
+            continue;
+        }
+        let cur = out.as_deref().unwrap_or(text);
+        if cur.contains(s.as_str()) {
+            out = Some(cur.replace(s.as_str(), REDACTED));
+        }
     }
-    false
+
+    // 2. Vendor-prefix tokens (preserve the leading boundary char).
+    let replaced = {
+        let cur = out.as_deref().unwrap_or(text);
+        if has_vendor_prefix_gate(cur) {
+            match vendor_prefix_re().replace_all(cur, "${b}[REDACTED]") {
+                Cow::Owned(s) => Some(s),
+                Cow::Borrowed(_) => None,
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(s) = replaced {
+        out = Some(s);
+    }
+
+    // 3. URL userinfo passwords (scrub only the password component).
+    let replaced = {
+        let cur = out.as_deref().unwrap_or(text);
+        if cur.contains("://") {
+            match url_userinfo_re().replace_all(cur, "${pre}[REDACTED]${at}") {
+                Cow::Owned(s) => Some(s),
+                Cow::Borrowed(_) => None,
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(s) = replaced {
+        out = Some(s);
+    }
+
+    match out {
+        Some(s) => Cow::Owned(s),
+        None => Cow::Borrowed(text),
+    }
 }
 
 /// Strip sensitive env vars from a Command before spawn. Uses
@@ -432,5 +536,55 @@ mod tests {
         // strip a hypothetical KEY_BINDINGS than to leak a real
         // API_KEY.
         assert!(is_sensitive_env_name("KEY_BINDINGS"));
+    }
+
+    // dirge-tkyn: redact_secrets scrubs credential-shaped substrings out
+    // of arbitrary text (tool output) before it reaches the LLM or disk.
+    #[test]
+    fn redact_secrets_scrubs_vendor_prefixes() {
+        let v = redact_secrets("token=sk-abcdefghijklmnopqrstuvwxyz0123 done");
+        assert!(!v.contains("sk-abcdefghijklmnopqrstuvwxyz0123"), "got {v}");
+        assert!(v.contains("[REDACTED]"), "got {v}");
+
+        let gh = redact_secrets("ghp_0123456789abcdefghijklmnopqrstuvwxyz");
+        assert!(!gh.contains("ghp_0123456789"), "got {gh}");
+
+        let jwt = redact_secrets("auth eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2");
+        assert!(
+            !jwt.contains("eyJhbGciOiJIUzI1"),
+            "JWT must be redacted, got {jwt}"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_scrubs_url_userinfo_password() {
+        let v = redact_secrets("DATABASE_URL=postgres://user:s3cr3tpassword@db.host/app");
+        assert!(
+            !v.contains("s3cr3tpassword"),
+            "password must be redacted, got {v}"
+        );
+        // host + scheme preserved (only the password component is scrubbed).
+        assert!(v.contains("db.host/app"), "got {v}");
+    }
+
+    #[test]
+    fn redact_secrets_leaves_plain_text_untouched() {
+        let plain = "compiled 42 files in 1.3s, all tests passed";
+        assert!(matches!(
+            redact_secrets(plain),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(redact_secrets(plain), plain);
+    }
+
+    #[test]
+    fn redact_secrets_scrubs_known_env_values() {
+        // The literal-value path catches secrets that lack a vendor
+        // shape (e.g. `echo $MY_TOKEN` where the value is opaque). Tested
+        // via the pure core so it doesn't depend on the process env.
+        let secrets = vec!["super-secret-build-value-1234".to_string()];
+        let out = redact_secrets_with("export X=super-secret-build-value-1234", &secrets);
+        assert!(!out.contains("super-secret-build-value-1234"), "got {out}");
+        assert!(out.contains("[REDACTED]"), "got {out}");
     }
 }

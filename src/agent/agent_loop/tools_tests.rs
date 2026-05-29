@@ -1376,3 +1376,33 @@ async fn truncation_hard_fallback_does_not_fabricate_args() {
     assert_eq!(snap.truncation_fixed, 0);
     assert_eq!(snap.invalid, 1);
 }
+
+// dirge-tkyn: the tool-result boundary (`content_value_to_block`) scrubs
+// credential-shaped substrings so a tool's output can't carry a secret
+// into the transcript / LLM context / UI.
+#[test]
+fn content_value_to_block_redacts_secrets() {
+    let v = serde_json::json!({
+        "type": "text",
+        "text": "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123456789"
+    });
+    match content_value_to_block(&v) {
+        ContentBlock::Text { text } => {
+            assert!(
+                !text.contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"),
+                "secret must be redacted at the result boundary; got {text}"
+            );
+            assert!(text.contains("[REDACTED]"), "got {text}");
+        }
+        other => panic!("expected text block, got {other:?}"),
+    }
+}
+
+#[test]
+fn content_value_to_block_passes_plain_text_through() {
+    let v = serde_json::json!({"type": "text", "text": "build ok: 12 files"});
+    match content_value_to_block(&v) {
+        ContentBlock::Text { text } => assert_eq!(text, "build ok: 12 files"),
+        other => panic!("expected text block, got {other:?}"),
+    }
+}
