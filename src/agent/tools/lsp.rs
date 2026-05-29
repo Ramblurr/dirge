@@ -5,7 +5,6 @@
 //! invoke. Mirrors opencode's `tool/lsp.ts` surface so the agent's mental
 //! model carries between the two.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rig::completion::ToolDefinition;
@@ -47,10 +46,6 @@ pub struct LspTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub manager: Arc<LspManager>,
-    /// Anchor for resolving relative paths. Usually the dirge
-    /// worktree. Joined with relative file_path args before the
-    /// permission resolver canonicalizes.
-    pub cwd: PathBuf,
 }
 
 impl LspTool {
@@ -58,13 +53,11 @@ impl LspTool {
         permission: Option<PermCheck>,
         ask_tx: Option<AskSender>,
         manager: Arc<LspManager>,
-        cwd: PathBuf,
     ) -> Self {
         Self {
             permission,
             ask_tx,
             manager,
-            cwd,
         }
     }
 }
@@ -164,7 +157,8 @@ impl Tool for LspTool {
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Absolute or relative file path. Required for every operation."
+                        "description": "Absolute file path (must be absolute, not relative). Required for every operation.",
+                        "dirge-hints": {"semantic": "absolute_path"}
                     },
                     "line": {
                         "type": "integer",
@@ -214,25 +208,22 @@ impl Tool for LspTool {
             )));
         }
 
-        // TOOL-5: join relative paths against the tool's cwd
-        // anchor FIRST, then route through the canonicalizing
-        // permission resolver. This way `../../etc/passwd`
-        // becomes `{cwd}/../../etc/passwd` which the resolver
-        // canonicalizes to `/etc/passwd` BEFORE the permission
-        // check, defeating any symlink-swap between check-time
-        // and open-time (same pattern as read/write/edit).
+        // Reject relative paths up front — consistent with
+        // read/write/edit/apply_patch (the shared guard). Previously
+        // lsp alone joined relatives against a tool-local cwd anchor,
+        // which could drift from the permission engine's working_dir;
+        // requiring absolute paths removes that divergence. The
+        // resolver then canonicalizes BEFORE the permission check,
+        // pinning the path against a symlink-swap between check-time
+        // and open-time.
         let abs_path = if let Some(p) = args.file_path.as_ref() {
-            let raw = Path::new(p);
-            let joined = if raw.is_absolute() {
-                raw.to_path_buf()
-            } else {
-                self.cwd.join(raw)
-            };
+            crate::agent::tools::require_absolute_path(p, "the lsp file_path")
+                .map_err(ToolError::Msg)?;
             let resolved = crate::agent::tools::check_perm_path_resolve(
                 &self.permission,
                 &self.ask_tx,
                 "lsp",
-                &joined.to_string_lossy(),
+                p,
             )
             .await?;
             Some(std::path::PathBuf::from(resolved))
@@ -347,6 +338,7 @@ mod tests {
     use crate::lsp::spawn::{Spawned, Spawner};
     use futures::future::BoxFuture;
     use serde_json::Value as JsonValue;
+    use std::path::{Path, PathBuf};
 
     /// MockSpawner that pairs the client with a fake LSP server task. Every
     /// non-initialize request is answered with the value returned from
@@ -451,8 +443,8 @@ mod tests {
 
     fn make_tool(response: Value, cwd: PathBuf) -> LspTool {
         let spawner = std::sync::Arc::new(ScriptedSpawner::new(response));
-        let manager = std::sync::Arc::new(LspManager::new(spawner, cwd.clone()));
-        LspTool::new(None, None, manager, cwd)
+        let manager = std::sync::Arc::new(LspManager::new(spawner, cwd));
+        LspTool::new(None, None, manager)
     }
 
     #[tokio::test]
@@ -505,6 +497,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("requires file_path"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    // dirge-e7dy: lsp rejects a relative file_path (consistent with
+    // read/write/edit/apply_patch) instead of silently anchoring it to
+    // a tool-local cwd that can drift from the permission working_dir.
+    #[tokio::test]
+    async fn rejects_relative_file_path() {
+        let (tree, _) = cargo_tree("rel-path");
+        let tool = make_tool(Value::Null, tree.clone());
+        let err = tool
+            .call(LspArgs {
+                operation: "hover".into(),
+                file_path: Some("src/main.rs".into()),
+                line: Some(1),
+                character: Some(1),
+                query: None,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute path"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tree);
     }
 
@@ -715,26 +729,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tree);
     }
 
-    // Relative paths must resolve against the tool's cwd (the worktree).
-    // Without this the agent's friendly "src/main.rs" paths would fail
-    // file-existence checks.
-    #[tokio::test]
-    async fn regression_relative_file_path_resolves_against_cwd() {
-        let (tree, _) = cargo_tree("rel-path");
-        let response = json!({"contents": "hi"});
-        let tool = make_tool(response, tree.clone());
-        let result = tool
-            .call(LspArgs {
-                operation: "hover".into(),
-                file_path: Some("src/lib.rs".into()), // relative
-                line: Some(1),
-                character: Some(1),
-                query: None,
-            })
-            .await;
-        assert!(result.is_ok(), "relative path must resolve: {result:?}");
-        let _ = std::fs::remove_dir_all(&tree);
-    }
+    // (Relative file_path is now rejected — see `rejects_relative_file_path`
+    // above. lsp requires absolute paths like the other file tools.)
 
     // saturating_sub on 1-based coordinates: line=0 or character=0 from the
     // agent must not underflow. We treat them as 0-based (i.e., the same as

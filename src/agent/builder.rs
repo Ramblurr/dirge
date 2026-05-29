@@ -521,12 +521,10 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
 
         #[cfg(feature = "lsp")]
         if let Some(manager) = &lsp_manager {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let lsp_tool = Box::new(tools::LspTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 manager.clone(),
-                cwd,
             )) as Box<dyn rig::tool::ToolDyn>;
             builder = builder.tools(hookify(vec![lsp_tool]));
         }
@@ -955,10 +953,9 @@ pub async fn build_loop_tools(
     // LSP tool — read-only queries against the manager.
     #[cfg(feature = "lsp")]
     if let Some(manager) = &lsp_manager {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
         tools.push(
             wrap(
-                tools::LspTool::new(permission.clone(), ask_tx.clone(), manager.clone(), cwd),
+                tools::LspTool::new(permission.clone(), ask_tx.clone(), manager.clone()),
                 None,
             )
             .await,
