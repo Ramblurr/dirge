@@ -466,6 +466,13 @@ pub fn classify_error(msg: &str) -> ErrorKind {
         || lower.contains("timed out")
         || lower.contains("request timeout")
         || lower.contains("server error")
+        // reqwest connect/send failures: the request never got a
+        // response (connection refused/dropped, DNS, TCP connect, or
+        // a mid-send drop). rig wraps these as "Http client error:
+        // error sending request for url (…)". Transient — retry.
+        || lower.contains("error sending request")
+        || lower.contains("connect error")
+        || lower.contains("tcp connect")
         // Mid-stream decode failures from reqwest/rig — the connection
         // returned bytes but they didn't deserialize into the expected
         // JSON envelope. Almost always transient (network blip,
@@ -608,6 +615,31 @@ mod tests {
         assert!(r.is_err());
         // initial attempt + 2 retries = 3 calls.
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    // dirge-5ul5: reqwest connect/send failures (the connection couldn't
+    // be established or dropped before a response) surface as "error
+    // sending request for url …" wrapped in rig's "Http client error".
+    // These are transient and MUST be retried, not classified Other.
+    #[test]
+    fn classify_connect_send_failures_as_network() {
+        for msg in [
+            "ProviderError: Http client error: error sending request for url (https://api.deepseek.com/v1/chat/completions)",
+            "error sending request for url (https://api.openai.com/v1/chat/completions)",
+            "reqwest::Error { kind: Connect, ... }: tcp connect error",
+            "Http client error: connect error",
+        ] {
+            assert_eq!(
+                classify_error(msg),
+                ErrorKind::Network,
+                "connect/send failure must be retryable: {msg}"
+            );
+        }
+        let policy = RecoveryPolicy::default();
+        assert!(
+            policy.should_retry(0, classify_error("error sending request for url (x)")),
+            "the DeepSeek connect failure must be retried"
+        );
     }
 
     #[test]
