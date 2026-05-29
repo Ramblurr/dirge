@@ -510,23 +510,27 @@ async fn execute_prepared_tool_call(
     // Phase 6 — make the tool dispatch responsive to
     // `AbortSignal` even when the underlying tool doesn't
     // poll the signal itself. We race the tool's execute()
-    // against a signal-poll loop:
+    // against `wait_for_cancel` (instant, Notify-backed):
     //   - If the tool finishes first → use its result.
     //   - If the signal fires first → return an aborted
-    //     result. The tool's future is dropped, which
-    //     stops further poll progress. Side effects already
-    //     run (e.g. an in-flight bash process) are NOT
-    //     killed — the rig::Tool surface doesn't expose
-    //     cancellation, and forcing a kill would risk
-    //     orphaned state. The dropped future may continue
-    //     scheduling work in the background; consumers
-    //     should not rely on its absence.
+    //     result and DROP the tool's future. Dropping a
+    //     future cancels it: it won't be polled again, its
+    //     in-progress `.await`s unwind, and its RAII guards
+    //     run — so e.g. bash's `PgKillGuard` SIGKILLs the
+    //     whole process group (not just the immediate child)
+    //     on the drop path. A partial side effect already
+    //     committed before the drop (a half-written file)
+    //     can't be undone — that's inherent to cancelling
+    //     mid-operation.
     //
-    // This gives the loop UX responsive to Ctrl+C even with
-    // legacy tools that don't poll the signal. Tools that
-    // DO poll it (a future generation of LoopTool impls)
-    // get cleaner cancellation since they finish quickly
-    // when cancelled.
+    // Caveat: a tool that detaches work via `tokio::spawn`
+    // (not tied to its own future's lifetime) is responsible
+    // for aborting that itself — dropping the execute future
+    // can't reach a detached task.
+    //
+    // Tools that ALSO poll `is_cancelled()` get even cleaner
+    // cancellation since they bail at their next checkpoint
+    // rather than relying solely on the drop.
     let exec_future = tool.execute(&tool_call.id, args.clone(), signal.clone(), on_update);
     let signal_check = wait_for_cancel(signal.clone());
 
@@ -639,23 +643,13 @@ fn should_terminate_tool_batch(finalized: &[FinalizedOutcome]) -> bool {
             .all(|f| f.result.terminate.unwrap_or(false))
 }
 
-/// Wait for an `AbortSignal` to fire. Polls at 50ms intervals
-/// since `AbortSignal` doesn't expose an async-await primitive
-/// (it's an `Arc<AtomicBool>` wrapper). 50ms gives a snappy UX
-/// (user-perceptible Ctrl+C response) without busy-looping.
-///
-/// Returns when the signal is cancelled. The caller races this
-/// future against the tool's execute() in a `tokio::select!`.
-/// Cancellation of the wait future is automatic when the
-/// select arm doesn't win — `tokio::time::sleep` is
-/// abort-on-drop, and the `is_cancelled()` check is cheap.
+/// Wait for an `AbortSignal` to fire. Resolves the instant the
+/// signal is cancelled — `AbortSignal::cancelled` is `Notify`-backed,
+/// so there's no polling latency. The caller races this against the
+/// tool's execute() in a `tokio::select!`; when the tool arm wins,
+/// this future is simply dropped.
 async fn wait_for_cancel(signal: AbortSignal) {
-    loop {
-        if signal.is_cancelled() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    signal.cancelled().await;
 }
 
 /// Phase 4 part 1: scan an error tool-result for the canonical

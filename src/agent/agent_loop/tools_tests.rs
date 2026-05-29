@@ -1129,6 +1129,134 @@ async fn aborted_tool_returns_aborted_error_promptly() {
     assert!(batch.messages[0].is_error);
 }
 
+/// dirge-2mw0: on cancellation the dispatcher DROPS the tool's execute
+/// future — it does not leave it running detached. Proven concretely: a
+/// probe tool holds an RAII guard inside its future that flips a flag on
+/// Drop, and sets a separate `completed` flag only if it runs to the
+/// end. After a mid-execution cancel we observe `dropped == true` and
+/// `completed == false`.
+#[tokio::test]
+async fn cancelled_tool_future_is_dropped_not_detached() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug)]
+    struct DropProbeTool {
+        started: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+        completed: Arc<AtomicBool>,
+    }
+    impl LoopTool for DropProbeTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+        fn description(&self) -> &str {
+            "Signals start, then sleeps; flips a flag if dropped."
+        }
+        fn label(&self) -> &str {
+            "Probe"
+        }
+        fn parameters(&self) -> &Value {
+            static EMPTY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+            EMPTY.get_or_init(|| serde_json::json!({"type": "object"}))
+        }
+        fn execute<'a>(
+            &'a self,
+            _id: &'a str,
+            _args: Value,
+            _signal: AbortSignal, // intentionally NOT polled
+            _on_update: LoopToolUpdate,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<LoopToolResult, String>> + Send + 'a>>
+        {
+            let started = self.started.clone();
+            let dropped = self.dropped.clone();
+            let completed = self.completed.clone();
+            Box::pin(async move {
+                let _guard = DropFlag(dropped);
+                started.store(true, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                completed.store(true, Ordering::SeqCst);
+                Ok(LoopToolResult {
+                    content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                    details: Value::Null,
+                    terminate: None,
+                })
+            })
+        }
+    }
+
+    let started = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicBool::new(false));
+    let mut ctx = Context::default();
+    ctx.tools.push(Arc::new(DropProbeTool {
+        started: started.clone(),
+        dropped: dropped.clone(),
+        completed: completed.clone(),
+    }));
+    let signal = AbortSignal::new();
+    let calls = vec![ToolCall {
+        id: "tc-1".to_string(),
+        name: "probe".to_string(),
+        arguments: serde_json::json!({}),
+    }];
+    let assistant = AssistantMessage::new(
+        calls
+            .iter()
+            .map(|c| ContentBlock::ToolCall {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+            })
+            .collect(),
+        StopReason::ToolUse,
+    );
+    let cfg = build_config();
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(64);
+
+    // Cancel AFTER the tool has started executing, so we exercise the
+    // mid-flight drop path (not a pre-dispatch short-circuit).
+    let canceller = {
+        let signal = signal.clone();
+        let started = started.clone();
+        async move {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            signal.cancel();
+        }
+    };
+    let inflight = InflightSet::new();
+    let dispatch =
+        execute_tool_calls_sequential(&ctx, &assistant, &calls, &cfg, &signal, &tx, &inflight);
+
+    let (batch, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+        tokio::join!(dispatch, canceller)
+    })
+    .await
+    .expect("cancellation must drop the future promptly, not wait out the 10s sleep");
+
+    assert!(started.load(Ordering::SeqCst), "tool should have started");
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "tool future must be dropped on cancel"
+    );
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "tool must NOT run to completion after cancel (no detached execution)"
+    );
+    assert!(
+        batch.messages[0].is_error,
+        "result should be the abort error"
+    );
+}
+
 // ── dirge-du5k/7bwx: truncation brace-closer end-to-end ──────────
 
 /// dirge-du5k + dirge-7bwx end-to-end: a tool call arriving with a

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
+use tokio::sync::Notify;
 
 use super::result::LoopToolResult;
 use super::types::ToolExecutionMode;
@@ -30,35 +31,50 @@ use super::types::ToolExecutionMode;
 /// the loop at the next turn boundary but lets in-flight tools
 /// complete normally. Tools never check `is_interjected()`.
 ///
-/// Implemented as `Arc<AtomicBool>` rather than `tokio_util`'s
-/// `CancellationToken` so we don't pull in a new dep for the
-/// trivial case. If we ever need `.cancelled().await` (notifier
-/// semantics for futures that want to race against the signal),
-/// upgrade to `tokio_util::sync::CancellationToken` in a later
-/// phase.
+/// Backed by an `Arc<AtomicBool>` for the cheap `is_cancelled()`
+/// poll that tools use, PLUS an `Arc<Notify>` so a future can
+/// `.cancelled().await` and wake the instant cancellation fires —
+/// no busy-poll, no latency. (Avoids a `tokio_util::CancellationToken`
+/// dep; the `Notify` is already in our tokio feature set.)
 #[derive(Debug, Clone, Default)]
 pub struct AbortSignal {
     cancelled: Arc<AtomicBool>,
     interjected: Arc<AtomicBool>,
+    notify: Arc<Notify>,
 }
 
 impl AbortSignal {
     pub fn new() -> Self {
-        Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            interjected: Arc::new(AtomicBool::new(false)),
-        }
+        Self::default()
     }
     /// Trigger hard cancellation. Idempotent — subsequent calls
     /// are no-ops. Tools poll `is_cancelled()` and bail out
-    /// cleanly when true.
+    /// cleanly when true; futures awaiting [`Self::cancelled`] wake
+    /// immediately.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        // Wake everyone racing against cancellation. Set the flag
+        // FIRST so a waiter woken here always observes `true`.
+        self.notify.notify_waiters();
     }
     /// Read the cancelled state. Tools call this from inside
     /// their `execute` loops.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+    /// Resolve as soon as the signal is cancelled (immediately if it
+    /// already is). Lets the dispatcher race a tool against
+    /// cancellation without polling, so Ctrl+C is instant. Race-free:
+    /// the waiter is registered via `enable()` BEFORE the state check,
+    /// so a `cancel()` landing in between still wakes it.
+    pub async fn cancelled(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
     /// LOOP-4: Trigger graceful interjection. Idempotent. The
     /// loop checks this at turn boundaries and stops accepting
@@ -201,5 +217,32 @@ mod tests {
     fn abort_signal_default_uncancelled() {
         let sig = AbortSignal::default();
         assert!(!sig.is_cancelled());
+    }
+
+    /// `cancelled()` returns immediately when already cancelled.
+    #[tokio::test]
+    async fn cancelled_returns_immediately_when_already_cancelled() {
+        let sig = AbortSignal::new();
+        sig.cancel();
+        // Must not hang; complete well within the test timeout.
+        tokio::time::timeout(std::time::Duration::from_secs(1), sig.cancelled())
+            .await
+            .expect("cancelled() must resolve immediately when already cancelled");
+    }
+
+    /// `cancelled()` wakes promptly when `cancel()` fires concurrently
+    /// (no lost wakeup, no 50ms poll latency).
+    #[tokio::test]
+    async fn cancelled_wakes_on_concurrent_cancel() {
+        let sig = AbortSignal::new();
+        let waiter = sig.clone();
+        let handle = tokio::spawn(async move { waiter.cancelled().await });
+        // Give the waiter a moment to register, then cancel.
+        tokio::task::yield_now().await;
+        sig.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("cancelled() must wake promptly on concurrent cancel")
+            .expect("waiter task panicked");
     }
 }
