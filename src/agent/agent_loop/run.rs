@@ -182,8 +182,11 @@ const MAX_CONSECUTIVE_COMPACTION_FAILURES: u32 = 3;
 /// regardless of this outcome.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SummaryOutcome {
-    /// A valid summary was produced (LLM or plugin) and applied.
-    Succeeded,
+    /// A valid summary was produced (LLM or plugin) and applied. Carries
+    /// the index of the inserted summary message so the caller can
+    /// re-inject working-set file snapshots right after it
+    /// (IMPROVEMENTS_PLAN #2).
+    Succeeded(usize),
     /// The summarizer ran but returned an error or an invalid summary.
     Failed,
     /// The summarizer was not run: none wired, breaker open, or no
@@ -195,7 +198,7 @@ enum SummaryOutcome {
 /// reset on success, increment on failure, leave untouched on skip.
 fn record_compaction_outcome(failures: &mut u32, outcome: SummaryOutcome) {
     match outcome {
-        SummaryOutcome::Succeeded => *failures = 0,
+        SummaryOutcome::Succeeded(_) => *failures = 0,
         SummaryOutcome::Failed => *failures = failures.saturating_add(1),
         SummaryOutcome::Skipped => {}
     }
@@ -343,7 +346,7 @@ async fn run_compaction_pass_with_focus(
                     // is therefore `start` — anything below was
                     // protected, anything above was folded.
                     applied_first_kept = start;
-                    outcome = SummaryOutcome::Succeeded;
+                    outcome = SummaryOutcome::Succeeded(start);
                 }
                 Ok(_) => {
                     tracing::warn!(
@@ -376,6 +379,45 @@ async fn run_compaction_pass_with_focus(
         .await;
 
     outcome
+}
+
+/// IMPROVEMENTS_PLAN #2: after a successful summary fold, re-read the
+/// working-set files the agent was editing and splice fresh
+/// `[Post-compaction file snapshot]` system messages in right after the
+/// summary (index `summary_idx`) — so the fold doesn't strand the model
+/// without the concrete file state it had been working from.
+///
+/// No-op without a file-touch tracker or with no tracked files. The
+/// reads are bounded (`POST_COMPACT_MAX_FILES`) and each snapshot is
+/// size-capped by `build_post_compact_snapshots`, so restoration can't
+/// itself overflow the window. Unreadable files are skipped.
+async fn restore_working_files(config: &LoopConfig, ctx: &mut Context, summary_idx: usize) {
+    let Some(tracker) = &config.file_touch_tracker else {
+        return;
+    };
+    let files = tracker.working_files();
+    if files.is_empty() {
+        return;
+    }
+    let mut contents: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for path in files
+        .into_iter()
+        .take(crate::agent::compression::POST_COMPACT_MAX_FILES)
+    {
+        if let Ok(body) = tokio::fs::read_to_string(&path).await {
+            contents.push((path, body));
+        }
+    }
+    if contents.is_empty() {
+        return;
+    }
+    let snapshots = crate::agent::compression::build_post_compact_snapshots(&contents);
+    // Insert right after the summary message, before the protected tail.
+    let mut at = (summary_idx + 1).min(ctx.messages.len());
+    for snap in snapshots {
+        ctx.messages.insert(at, snap);
+        at += 1;
+    }
 }
 
 /// Public entry point: start a new run from one or more prompt
@@ -576,6 +618,9 @@ pub async fn run_loop(
                         emit,
                     )
                     .await;
+                    if let SummaryOutcome::Succeeded(idx) = outcome {
+                        restore_working_files(&config, &mut current_context, idx).await;
+                    }
                     record_compaction_outcome(&mut compaction_failures, outcome);
                     folded_this_turn = true;
                 }
@@ -936,6 +981,9 @@ pub async fn run_loop(
                                     emit,
                                 )
                                 .await;
+                                if let SummaryOutcome::Succeeded(idx) = outcome {
+                                    restore_working_files(&config, &mut current_context, idx).await;
+                                }
                                 record_compaction_outcome(&mut compaction_failures, outcome);
                             }
                         }
@@ -959,6 +1007,9 @@ pub async fn run_loop(
                             emit,
                         )
                         .await;
+                        if let SummaryOutcome::Succeeded(idx) = outcome {
+                            restore_working_files(&config, &mut current_context, idx).await;
+                        }
                         record_compaction_outcome(&mut compaction_failures, outcome);
                     }
                     _ => {}

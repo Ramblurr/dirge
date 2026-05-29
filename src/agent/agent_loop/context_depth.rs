@@ -142,6 +142,18 @@ impl FileTouchTracker {
         let wrapped = format!("{}\n{}", MID_TURN_STEER_WRAPPER, body);
         vec![LoopMessage::User(UserMessage { content: wrapped })]
     }
+
+    /// The current working-set files (the `last_files` overlap), sorted
+    /// for deterministic ordering. Consulted after compaction to re-read
+    /// and re-inject the files the agent was actively editing, so a fold
+    /// doesn't strand it without the concrete file state
+    /// (IMPROVEMENTS_PLAN #2).
+    pub fn working_files(&self) -> Vec<PathBuf> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut files: Vec<PathBuf> = inner.last_files.iter().cloned().collect();
+        files.sort();
+        files
+    }
 }
 
 /// Walk `args` looking for top-level `path` / `paths` / `file_path`
@@ -218,6 +230,22 @@ mod tests {
         t.record_tool_call("edit", &json!({"file_path": "foo.rs"}));
         let inner = t.inner.lock().unwrap();
         assert_eq!(inner.consecutive, 3);
+    }
+
+    // IMPROVEMENTS_PLAN #2: working_files() exposes the tracked overlap
+    // set (sorted) for post-compaction re-injection.
+    #[test]
+    fn working_files_returns_sorted_overlap() {
+        let t = FileTouchTracker::new(8, "edit".to_string());
+        // Touch two files together, then re-touch them → overlap kept.
+        t.record_tool_call("edit", &json!({"paths": ["b.rs", "a.rs"]}));
+        t.record_tool_call("edit", &json!({"paths": ["a.rs", "b.rs"]}));
+        let files = t.working_files();
+        assert_eq!(
+            files,
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")],
+            "working_files must be the tracked set, sorted"
+        );
     }
 
     #[test]

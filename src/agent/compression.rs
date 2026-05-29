@@ -275,6 +275,40 @@ pub fn cap_oversized_tool_results_counted(
     (capped, freed)
 }
 
+/// Max working-set files re-injected after a fold, and the per-file
+/// token budget. 5 × 5000 = 25k tokens worst case — bounded so the
+/// restoration can't itself trigger ANOTHER fold (IMPROVEMENTS_PLAN #2).
+pub const POST_COMPACT_MAX_FILES: usize = 5;
+pub const POST_COMPACT_MAX_TOKENS_PER_FILE: u64 = 5_000;
+
+/// Build `[Post-compaction file snapshot]` system messages for the
+/// working-set files, capping the count (`POST_COMPACT_MAX_FILES`) and
+/// per-file size (`POST_COMPACT_MAX_TOKENS_PER_FILE`, head+tail
+/// truncated). Pure — the file reads happen in the caller — so the cap
+/// + truncation are unit-testable (IMPROVEMENTS_PLAN #2).
+pub fn build_post_compact_snapshots(files: &[(std::path::PathBuf, String)]) -> Vec<Value> {
+    let per_file_chars = (POST_COMPACT_MAX_TOKENS_PER_FILE * CHARS_PER_TOKEN) as usize;
+    files
+        .iter()
+        .take(POST_COMPACT_MAX_FILES)
+        .map(|(path, content)| {
+            let body = if content.len() > per_file_chars {
+                truncate_with_head_tail(content, per_file_chars)
+            } else {
+                content.clone()
+            };
+            serde_json::json!({
+                "role": "system",
+                "content": format!(
+                    "[Post-compaction file snapshot: {}]\n{}",
+                    path.display(),
+                    body
+                ),
+            })
+        })
+        .collect()
+}
+
 /// Minimum per-block content budget when splitting `max_chars`
 /// across multiple text blocks. Ensures each block can hold at
 /// least the marker payload — without this floor a
@@ -778,6 +812,37 @@ mod tests {
         let small = vec![serde_json::json!({"role": "tool", "content": "ok"})];
         let (_, freed0) = cap_oversized_tool_results_counted(&small, 1000);
         assert_eq!(freed0, 0);
+    }
+
+    // IMPROVEMENTS_PLAN #2: post-compaction working-set snapshots.
+    #[test]
+    fn build_post_compact_snapshots_caps_count_and_truncates() {
+        use std::path::PathBuf;
+        // More files than the cap → capped, in order.
+        let files: Vec<(PathBuf, String)> = (0..8)
+            .map(|i| (PathBuf::from(format!("f{i}.rs")), "x".repeat(100)))
+            .collect();
+        let snaps = build_post_compact_snapshots(&files);
+        assert_eq!(snaps.len(), POST_COMPACT_MAX_FILES, "capped at MAX_FILES");
+        for (i, s) in snaps.iter().enumerate() {
+            assert_eq!(s["role"], "system");
+            let c = s["content"].as_str().unwrap();
+            assert!(
+                c.contains(&format!("[Post-compaction file snapshot: f{i}.rs]")),
+                "snapshot marker + path missing: {c}"
+            );
+        }
+
+        // An oversized file is truncated to roughly the per-file budget.
+        let per_file_chars = (POST_COMPACT_MAX_TOKENS_PER_FILE * CHARS_PER_TOKEN) as usize;
+        let big = (PathBuf::from("big.rs"), "y".repeat(per_file_chars * 4));
+        let snaps = build_post_compact_snapshots(std::slice::from_ref(&big));
+        let c = snaps[0]["content"].as_str().unwrap();
+        assert!(
+            c.len() < per_file_chars + 1_000,
+            "oversized file must be truncated to ~budget; got {} chars",
+            c.len()
+        );
     }
 
     // ── should_compress ─────────────────────────────────

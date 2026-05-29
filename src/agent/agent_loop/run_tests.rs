@@ -2142,7 +2142,7 @@ fn record_compaction_outcome_drives_counter() {
     assert_eq!(f, 2);
     super::record_compaction_outcome(&mut f, super::SummaryOutcome::Skipped);
     assert_eq!(f, 2, "skip must not change the counter");
-    super::record_compaction_outcome(&mut f, super::SummaryOutcome::Succeeded);
+    super::record_compaction_outcome(&mut f, super::SummaryOutcome::Succeeded(0));
     assert_eq!(f, 0, "success resets the counter");
 }
 
