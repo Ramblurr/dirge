@@ -820,6 +820,118 @@ async fn verifier_gate_silent_when_a_command_ran() {
     );
 }
 
+/// A tool that returns a failing bash-style result: `Ok` content with an
+/// `Exit code: N` line, exactly as the bash tool emits on a non-zero exit.
+/// Used to drive the verifier gate's "red build" path end-to-end.
+#[derive(Debug)]
+struct FailingBashTool {
+    parameters: Value,
+}
+
+impl FailingBashTool {
+    fn new() -> Self {
+        Self {
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+}
+
+impl LoopTool for FailingBashTool {
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn description(&self) -> &str {
+        "Failing bash mock"
+    }
+    fn label(&self) -> &str {
+        "bash"
+    }
+    fn parameters(&self) -> &Value {
+        &self.parameters
+    }
+    fn execution_mode(&self) -> Option<ToolExecutionMode> {
+        None
+    }
+    fn execute<'a>(
+        &'a self,
+        _id: &'a str,
+        args: Value,
+        _signal: AbortSignal,
+        _on_update: LoopToolUpdate,
+    ) -> Pin<Box<dyn Future<Output = Result<LoopToolResult, String>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(LoopToolResult {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": "running tests...\ntest result: FAILED\nExit code: 101",
+                })],
+                details: args,
+                terminate: None,
+            })
+        })
+    }
+}
+
+/// F6 tier 2 — a build/test command that FAILS after a code edit must
+/// produce the fix-it nudge (not silence), proving the outcome-aware
+/// path is wired through run_agent_loop.
+#[tokio::test]
+async fn verifier_gate_nudges_on_failing_build_after_edit() {
+    let edit_tool = std::sync::Arc::new(RecordingTool::new("edit"));
+    let bash_tool = std::sync::Arc::new(FailingBashTool::new());
+    let mut ctx = empty_context();
+    ctx.tools.push(edit_tool);
+    ctx.tools.push(bash_tool);
+
+    let mut cfg = build_config();
+    cfg.verifier = Some(crate::agent::agent_loop::verifier::VerifierGate::new());
+    cfg.tool_execution = ToolExecutionMode::Sequential;
+
+    let stream = scripted_stream(vec![
+        vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: tool_use_response("c1", "edit", serde_json::json!({"path": "src/x.rs"})),
+            usage: None,
+        }],
+        vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: tool_use_response("c2", "bash", serde_json::json!({"command": "cargo test"})),
+            usage: None,
+        }],
+        vec![StreamEvent::Done {
+            reason: StopReason::Stop,
+            message: text_response("done"),
+            usage: None,
+        }],
+    ]);
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(256);
+    let messages = run_agent_loop(
+        vec![user("change x")],
+        ctx,
+        cfg,
+        AbortSignal::new(),
+        &tx,
+        &stream,
+        None,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    let nudge = messages.iter().find_map(|m| match m {
+        LoopMessage::User(u) if u.content.contains("[verify-before-done]") => {
+            Some(u.content.clone())
+        }
+        _ => None,
+    });
+    let nudge = nudge.expect("a verify nudge should fire after a failing build");
+    assert!(
+        nudge.contains("failed") && nudge.contains("red build"),
+        "the nudge should be the red-build fix-it variant, got: {nudge}",
+    );
+}
+
 /// Phase D — F1 (few-shot exemplars) and F6 (verifier gate) compose in a
 /// single realistic run without interfering. A code-edit task should:
 ///   1. inject exemplars into the FIRST LLM call (F1), and

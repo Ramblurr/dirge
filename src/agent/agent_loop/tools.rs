@@ -444,12 +444,6 @@ async fn prepare_tool_call(
         tracker.record_tool_call(&tool_call.name, &validated_args);
     }
 
-    // F6: feed the verifier gate the same prepared call so it can tell,
-    // at finalization, whether code was edited without anything being run.
-    if let Some(verifier) = &config.verifier {
-        verifier.record_tool_call(&tool_call.name, &validated_args);
-    }
-
     PrepareOutcome::Prepared {
         tool,
         args: validated_args,
@@ -631,6 +625,14 @@ async fn finalize_executed_tool_call(
     // beforeToolCall). Marker-binding to silence the warning until
     // a future hook impl uses it.
     let _ = context;
+
+    // F6 (tier 2): feed the verifier gate the finished call + its result
+    // so it knows, at finalization, whether code was edited and whether a
+    // build/test command passed or failed. Post-execution (here, not at
+    // prepare) is the only place the outcome is known.
+    if let Some(verifier) = &config.verifier {
+        verifier.record_outcome(&tool_call.name, args, &result, is_error);
+    }
 
     FinalizedOutcome {
         tool_call: tool_call.clone(),
