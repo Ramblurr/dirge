@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod builder;
 pub mod compression;
+pub mod exemplars;
 pub mod model_family;
 pub mod post_session;
 pub mod prompt;

@@ -206,15 +206,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # of the abandoned `yaml-rust` crate, fully YAML 1.2 compliant.
 yaml-rust2 = "0.11"
 
+# Fuzzy matcher. Used by the Ctrl-F search (test-gated until the
+# interactive feature is wired in) and by the few-shot tool-exemplar
+# retriever (`agent::exemplars`), which scores curated tool-use
+# examples against the user's task to inject the most relevant ones.
+nucleo-matcher = "0.3"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-# Fuzzy matcher for Ctrl-F search (dirge-bfd). Currently only used
-# via `#[cfg(test)]` (search_rewind::update_search) — the Ctrl-F
-# interactive feature isn't wired into the UI yet, so update_search
-# is test-gated. Once Ctrl-F is wired into the event loop, the
-# #[cfg(test)] gate on update_search should be removed and this
-# dep moved back to [dependencies].
-nucleo-matcher = "0.3"
 
 # Profiles tuned with cargo-wizard, then adjusted for dirge's constraints.
 #

@@ -177,6 +177,11 @@ fn transcript_from_value_slice(messages: &[serde_json::Value]) -> String {
 /// every fold just wastes API calls (IMPROVEMENTS_PLAN #1).
 const MAX_CONSECUTIVE_COMPACTION_FAILURES: u32 = 3;
 
+/// How many few-shot tool-use exemplars to inject per task. Research
+/// puts the sweet spot at 2–5; the retriever returns fewer (or none)
+/// when the task matches fewer exemplars.
+const EXEMPLAR_TOP_K: usize = 3;
+
 /// What the LLM-summary stage of a compaction pass did, so `run_loop`
 /// can drive the circuit-breaker counter. (The cheap prune always runs
 /// regardless of this outcome.)
@@ -509,6 +514,28 @@ pub async fn run_agent_loop(
 ) -> Vec<LoopMessage> {
     // Pi line 103: `newMessages = [...prompts]`.
     let new_messages = prompts.clone();
+
+    // Few-shot tool-use exemplars: retrieve up to K demonstrations
+    // relevant to this task and inject them just before the prompt, so
+    // the model has on-topic examples at the action boundary (in-context
+    // tool demonstrations are a large reliability lever for open models).
+    // Injected into the model-facing context ONLY — not `new_messages` —
+    // so it steers this run without being persisted into session history.
+    {
+        let task_query: String = prompts
+            .iter()
+            .filter_map(|m| match m {
+                LoopMessage::User(u) => Some(u.content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(block) = crate::agent::exemplars::block_for_task(&task_query, EXEMPLAR_TOP_K) {
+            let ex_msg = LoopMessage::User(super::message::UserMessage { content: block });
+            context.messages.push(loop_message_to_value(&ex_msg));
+        }
+    }
+
     // Pi line 105: `currentContext.messages = [...context.messages, ...prompts]`.
     for prompt in &prompts {
         context.messages.push(loop_message_to_value(prompt));

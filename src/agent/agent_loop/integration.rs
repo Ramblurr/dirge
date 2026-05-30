@@ -965,6 +965,77 @@ mod tests {
         );
     }
 
+    /// End-to-end: a tool-shaped task injects few-shot exemplars into
+    /// the model-facing context. The mock factory inspects what the LLM
+    /// actually received — proving the feature is wired, not just unit-
+    /// tested in isolation.
+    #[tokio::test]
+    async fn spawn_injects_fewshot_exemplars_for_tool_task() {
+        let saw = Arc::new(Mutex::new(false));
+        let saw_clone = saw.clone();
+        let factory: StreamFn = Arc::new(move |llm_ctx, _opts| {
+            let found = llm_ctx.messages.iter().any(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.contains("[Tool-use examples]"))
+                    == Some(true)
+            });
+            *saw_clone.lock().unwrap() = found;
+            let msg = text_response("done");
+            let reason = msg.stop_reason;
+            Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+                reason,
+                message: msg,
+                usage: None,
+            }]))
+        });
+
+        let cfg =
+            LoopSpawnConfig::minimal(factory, "change the handle_login function in the auth file");
+        let runner = spawn_loop_runner(cfg);
+        let _events = drain(runner.event_rx).await;
+        let _ = runner.task.await;
+
+        assert!(
+            *saw.lock().unwrap(),
+            "few-shot exemplars should be injected into the context for a tool task"
+        );
+    }
+
+    /// The complement: an off-topic task injects NO exemplars, so the
+    /// feature stays silent when it has nothing relevant to offer.
+    #[tokio::test]
+    async fn spawn_omits_fewshot_exemplars_for_offtopic_task() {
+        let saw = Arc::new(Mutex::new(false));
+        let saw_clone = saw.clone();
+        let factory: StreamFn = Arc::new(move |llm_ctx, _opts| {
+            let found = llm_ctx.messages.iter().any(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.contains("[Tool-use examples]"))
+                    == Some(true)
+            });
+            *saw_clone.lock().unwrap() = found;
+            let msg = text_response("hi");
+            let reason = msg.stop_reason;
+            Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+                reason,
+                message: msg,
+                usage: None,
+            }]))
+        });
+
+        let cfg = LoopSpawnConfig::minimal(factory, "what is your favorite color");
+        let runner = spawn_loop_runner(cfg);
+        let _events = drain(runner.event_rx).await;
+        let _ = runner.task.await;
+
+        assert!(
+            !*saw.lock().unwrap(),
+            "no exemplars should be injected for an off-topic task"
+        );
+    }
+
     /// Aborting via the runner's signal cancels the loop. The
     /// task still completes (because the loop reaches a natural
     /// stopping point) but tools observing the signal can short-
