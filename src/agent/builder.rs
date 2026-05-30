@@ -1329,6 +1329,32 @@ mod reminder_tests {
         );
     }
 
+    /// F3 — the base preamble tells the agent to plan up front and post
+    /// terse progress notes during multi-step tool runs, while keeping
+    /// the final reply terse (no contradiction with the Output section).
+    #[test]
+    fn base_preamble_includes_progress_updates() {
+        let p = assemble_base_preamble();
+        assert!(
+            p.contains("# Progress updates"),
+            "missing the Progress updates section heading"
+        );
+        assert!(
+            p.to_lowercase().contains("plan up front"),
+            "missing the up-front plan guidance"
+        );
+        assert!(
+            p.to_lowercase().contains("multi-step"),
+            "progress guidance must be scoped to multi-step tasks"
+        );
+        // Must explicitly exclude the final reply so it does not fight
+        // the terse-output rule.
+        assert!(
+            p.to_lowercase().contains("final reply"),
+            "must distinguish progress notes from the final reply"
+        );
+    }
+
     /// dirge-fmau — the memory-preamble injection path goes through
     /// the `MemoryProvider` trait, so a non-default backend's prompt
     /// block lands in the preamble too. Recording provider verifies
