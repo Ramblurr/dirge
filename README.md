@@ -6,7 +6,7 @@ A minimal, fast coding agent written in Rust — inspired by [pi](https://pi.dev
 
 What sets dirge apart from other agentic editors:
 
-- **Tiny and fast.** ~8 MB RAM idle, ~15 MB working, 25 MB binary — versus ~300 MB for JS-based agents. Native Rust, no runtime.
+- **Tiny and fast.** ~8 MB RAM idle, ~15 MB working, ~36 MB binary (speed-optimized: `opt-level=3` + LTO) — versus ~300 MB for JS-based agents. Native Rust, no runtime.
 - **Built to keep weaker/cheaper models on the rails.** A [robust agent loop](docs/features.md#robust-agent-loop) repairs malformed tool calls, validates every write through tree-sitter *before* it touches disk, escalates to a stronger model on repeated failure, and trips circuit breakers on non-progressing loops.
 - **One explainable permission engine.** All authorization flows through a single Policy Decision Point with four modes, op-based rules, session allowlists, and a `/why` command that traces exactly which policy decided and why. See [docs/permissions.md](docs/permissions.md).
 - **Role-based multi-provider routing.** Point the main loop, review, escalation, summarization, and subagent roles at different models — mix DeepSeek, GLM, Anthropic, OpenAI, Ollama, and any OpenAI-compatible endpoint in one session.

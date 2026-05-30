@@ -49,7 +49,7 @@ Hardening against the failure modes that plague long sessions and weaker models.
 dirge is one of the smallest and most performant coding agents on the market.
 
 - Lines of code: ~100k LoC
-- Binary size: 25 MB
+- Binary size: ~36 MB (the `release` profile is speed-optimized — `opt-level=3` + fat LTO + `strip`; an `opt-level="z"` build is ~28 MB if you prefer size)
 - RAM footprint: ~8 MB on an empty session, ~15 MB when working (vs ~300 MB for opencode or other JS-based coding agents)
 
 ### Tool result caching
