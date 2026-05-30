@@ -12,7 +12,7 @@ slash-command list, see the top-level [README](../README.md#slash-commands).
 | Ctrl+A / Home | Start of line |
 | Ctrl+E / End | End of line |
 | Ctrl+B / Left | Char left |
-| Ctrl+F / Right | Char right |
+| Ctrl+F | Reverse-i-search through history (bash-style): type to narrow, Ctrl+F to cycle, Enter to accept, Esc to cancel |
 | Option+Left / Meta+B | Skip to previous word |
 | Option+Right / Meta+F | Skip to next word |
 | Ctrl+K | Kill to end of line |

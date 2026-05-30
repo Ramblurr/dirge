@@ -1386,7 +1386,13 @@ impl Renderer {
         // placeholders rather than bare digits between invisible
         // SOH bytes. `display()` also maps the cursor byte into
         // the projected string.
-        let (display_buf, cursor_byte) = editor.display();
+        // When Ctrl+R reverse-i-search is active, show the search
+        // mini-buffer instead of the normal editor buffer.
+        let (display_buf, cursor_byte) = if editor.is_in_search() {
+            editor.search_display()
+        } else {
+            editor.display()
+        };
         let full = display_buf.as_str();
         let cursor_byte = cursor_byte.min(full.len());
         // Wrap to chat-content width minus 3 cols of prompt prefix.

@@ -171,6 +171,13 @@ pub async fn run_interactive(
     renderer.set_monochrome(cli.no_color);
     let mut input = InputEditor::new();
     input.set_monochrome(cli.no_color);
+    // Seed the editor's history from the session so Up/Down arrow
+    // navigation and Ctrl+R search work across restarts.
+    for msg in &session.messages {
+        if msg.role == MessageRole::User {
+            input.load_history_entry(&msg.content);
+        }
+    }
     let mut is_running = false;
     // Plain-text messages typed while the agent is running are pushed here
     // instead of being rejected. The loop polls this queue at turn boundaries
@@ -349,7 +356,6 @@ pub async fn run_interactive(
     let mut rewind_picker = ListPicker::new();
     rewind_picker.set_monochrome(cli.no_color);
     let mut last_esc: Option<std::time::Instant> = None;
-    let mut search_active = false;
 
     // Snapshot plugin-registered shortcuts (P9c). Seeded at UI
     // startup; refreshed at the top of each event loop iteration
@@ -805,8 +811,8 @@ pub async fn run_interactive(
                                 )?;
                                 continue;
                             }
-                            if search_active {
-                                search_active = false;
+                            if input.is_in_search() {
+                                input.cancel_search();
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
@@ -985,9 +991,9 @@ pub async fn run_interactive(
                             last_esc = None;
                         }
 
-                        let ctrl_r = key.code == KeyCode::Char('r')
+                        let ctrl_t = key.code == KeyCode::Char('t')
                             && key.modifiers.contains(KeyModifiers::CONTROL);
-                        if ctrl_r {
+                        if ctrl_t {
                             show_reasoning = !show_reasoning;
                             renderer.write_line(
                                 &format!("reasoning visibility: {}", if show_reasoning { "on" } else { "off" }),

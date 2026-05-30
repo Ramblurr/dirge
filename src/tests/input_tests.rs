@@ -1102,3 +1102,219 @@ fn multibyte_chars_adjacent_to_marker() {
     assert_eq!(editor.cursor, 0);
     assert_eq!(editor.expanded().as_str(), "héllo p1\np2\np3\np4 wörld");
 }
+
+// ── Ctrl+R history search ───────────────────────────────────
+
+#[test]
+fn ctrl_r_enters_search_mode() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "first");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "second");
+    editor.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut editor, "draft");
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+
+    assert!(editor.is_in_search());
+    assert_eq!(editor.search_query(), "");
+    assert_eq!(editor.search_match_text(), "second");
+}
+
+#[test]
+fn ctrl_r_with_empty_history_is_noop() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "hello");
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+
+    assert!(!editor.is_in_search());
+    assert_eq!(editor.buffer.as_str(), "hello");
+}
+
+#[test]
+fn search_typing_narrows_query_and_updates_match() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "first");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "second");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "different");
+    editor.handle_key(press(KeyCode::Enter));
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert_eq!(editor.search_match_text(), "different");
+
+    editor.handle_key(press(KeyCode::Char('s')));
+    assert!(editor.is_in_search());
+    assert_eq!(editor.search_query(), "s");
+    assert_eq!(editor.search_match_text(), "second");
+}
+
+#[test]
+fn search_backspace_narrows_query() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "abc");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "abd");
+    editor.handle_key(press(KeyCode::Enter));
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Char('a')));
+    editor.handle_key(press(KeyCode::Char('b')));
+    editor.handle_key(press(KeyCode::Char('c')));
+    assert_eq!(editor.search_match_text(), "abc");
+
+    editor.handle_key(press(KeyCode::Backspace));
+    assert_eq!(editor.search_query(), "ab");
+    assert_eq!(editor.search_match_text(), "abd");
+}
+
+#[test]
+fn search_backspace_on_empty_query_does_nothing() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "test");
+    editor.handle_key(press(KeyCode::Enter));
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Backspace));
+    assert!(editor.is_in_search());
+    assert_eq!(editor.search_query(), "");
+    assert_eq!(editor.search_match_text(), "test");
+}
+
+#[test]
+fn ctrl_r_again_cycles_to_older_match() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "first foo");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "second bar");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "third foo");
+    editor.handle_key(press(KeyCode::Enter));
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Char('f')));
+    assert_eq!(editor.search_match_text(), "third foo");
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert_eq!(editor.search_match_text(), "first foo");
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert_eq!(editor.search_match_text(), "third foo");
+}
+
+#[test]
+fn search_enter_accepts_match() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "original");
+    editor.handle_key(press(KeyCode::Enter));
+    type_str(&mut editor, "target match");
+    editor.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut editor, "draft text");
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Char('t')));
+    assert_eq!(editor.search_match_text(), "target match");
+
+    editor.handle_key(press(KeyCode::Enter));
+    assert!(!editor.is_in_search());
+    assert_eq!(editor.buffer.as_str(), "target match");
+}
+
+#[test]
+fn search_esc_cancels_and_restores_draft() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "old entry");
+    editor.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut editor, "draft text");
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Char('o')));
+    assert_eq!(editor.search_match_text(), "old entry");
+
+    editor.handle_key(press(KeyCode::Esc));
+    assert!(!editor.is_in_search());
+    assert_eq!(editor.buffer.as_str(), "draft text");
+}
+
+#[test]
+fn search_cancels_on_ctrl_c() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "history");
+    editor.handle_key(press(KeyCode::Enter));
+
+    type_str(&mut editor, "draft");
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(ctrl(KeyCode::Char('c')));
+
+    assert!(!editor.is_in_search());
+    assert_eq!(editor.buffer.as_str(), "draft");
+}
+
+#[test]
+fn search_case_insensitive() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "Hello World");
+    editor.handle_key(press(KeyCode::Enter));
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Char('h')));
+    assert_eq!(editor.search_match_text(), "Hello World");
+
+    editor.handle_key(press(KeyCode::Char('e')));
+    editor.handle_key(press(KeyCode::Char('l')));
+    assert_eq!(editor.search_query(), "hel");
+    assert_eq!(editor.search_match_text(), "Hello World");
+}
+
+#[test]
+fn search_no_match_shows_nothing() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, "hello world");
+    editor.handle_key(press(KeyCode::Enter));
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    editor.handle_key(press(KeyCode::Char('x')));
+    assert_eq!(editor.search_query(), "x");
+    assert!(editor.is_in_search());
+    assert_eq!(editor.search_match_text(), "");
+}
+
+#[test]
+fn load_history_populates_for_ctrl_r() {
+    let mut editor = InputEditor::new();
+    editor.load_history_entry("first message");
+    editor.load_history_entry("second message");
+    editor.load_history_entry("third message");
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert!(editor.is_in_search());
+    assert_eq!(editor.search_match_text(), "third message");
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert_eq!(editor.search_match_text(), "second message");
+
+    editor.handle_key(press(KeyCode::Char('f')));
+    assert_eq!(editor.search_match_text(), "first message");
+}
+
+#[test]
+fn load_history_skips_dupes_and_empty() {
+    let mut editor = InputEditor::new();
+    editor.load_history_entry(""); // skipped: empty
+    editor.load_history_entry("msg1");
+    editor.load_history_entry("msg1"); // skipped: dupe
+    editor.load_history_entry("msg2");
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert_eq!(editor.search_match_text(), "msg2");
+
+    editor.handle_key(ctrl(KeyCode::Char('r')));
+    assert_eq!(editor.search_match_text(), "msg1");
+
+    editor.handle_key(press(KeyCode::Char('m')));
+    editor.handle_key(press(KeyCode::Char('s')));
+    editor.handle_key(press(KeyCode::Char('g')));
+    editor.handle_key(press(KeyCode::Char('3')));
+    assert_eq!(editor.search_match_text(), "");
+}
