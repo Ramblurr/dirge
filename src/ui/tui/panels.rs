@@ -268,23 +268,28 @@ fn paint_idle_card(buf: &mut Buffer, area: Rect, info: &LeftPanelInfo, style: St
         .unwrap_or(0);
 
     // [ACTIVITY] — recent tool ticker (newest last). Capped to whatever
-    // vertical room is left after CONTEXT and the reserved GIT box.
+    // vertical room is left after CONTEXT and the reserved GIT box. Only
+    // rendered when at least one content row fits AFTER reserving GIT —
+    // otherwise a forced 1-row activity/idle box would steal GIT's
+    // reserved space and silently drop the [GIT] section on short panels.
     let avail = (area.y + area.height)
         .saturating_sub(area.y + dy)
         .saturating_sub(git_reserve);
     let max_act = avail.saturating_sub(2) as usize; // minus the box borders
-    let act_lines: Vec<(String, RColor)> = if info.activity.is_empty() {
-        vec![("· idle".to_string(), dim)]
-    } else {
-        info.activity
-            .iter()
-            .rev()
-            .take(max_act.max(1))
-            .rev()
-            .map(|a| (a.clone(), dim))
-            .collect()
-    };
-    place(buf, &mut dy, "ACTIVITY", act_lines);
+    if max_act >= 1 {
+        let act_lines: Vec<(String, RColor)> = if info.activity.is_empty() {
+            vec![("· idle".to_string(), dim)]
+        } else {
+            info.activity
+                .iter()
+                .rev()
+                .take(max_act)
+                .rev()
+                .map(|a| (a.clone(), dim))
+                .collect()
+        };
+        place(buf, &mut dy, "ACTIVITY", act_lines);
+    }
 
     if let Some(lines) = git_lines {
         place(buf, &mut dy, "GIT", lines);
@@ -723,6 +728,50 @@ mod tests {
         assert!(dump.contains("GIT"), "git section missing:\n{dump}");
         assert!(dump.contains("main"), "git branch missing:\n{dump}");
         assert!(dump.contains("+1 ~2 ?0"), "git counts missing:\n{dump}");
+    }
+
+    /// Regression: on a SHORT panel the GIT section must still render —
+    /// the ACTIVITY box must not steal GIT's reserved rows.
+    #[test]
+    fn left_panel_short_keeps_git() {
+        use crate::ui::panel_data::{ContextGauge, GitSnapshot};
+        let info = LeftPanelInfo {
+            context: ContextGauge {
+                used: 1000,
+                window: 128_000,
+                pct: 10,
+                compactions: 0,
+                fold_soon: false,
+            },
+            activity: vec!["read a.rs".into(), "edit b.rs".into()],
+            git: Some(GitSnapshot {
+                branch: "main".into(),
+                staged: 0,
+                unstaged: 1,
+                untracked: 0,
+                last_commit: "x".into(),
+            }),
+        };
+        // 15 rows is enough for CONTEXT + GIT but not a forced ACTIVITY box.
+        let backend = TestBackend::new(28, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| f.render_widget(LeftPanel::new(&info, &[]), Rect::new(0, 0, 28, 15)))
+            .unwrap();
+        let backend = terminal.backend().clone();
+        let dump: String = (0..15)
+            .map(|y| {
+                (0..28)
+                    .map(|x| backend.buffer().cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(dump.contains("CONTEXT"), "context missing:\n{dump}");
+        assert!(
+            dump.contains("GIT") && dump.contains("main"),
+            "GIT dropped on a short panel:\n{dump}"
+        );
     }
 
     /// LeftPanel with subagents lists status rows.
