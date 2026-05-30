@@ -193,6 +193,14 @@ pub enum AgentEvent {
         delay_ms: u64,
         error: CompactString,
     },
+    /// A dirge-originated log/notice line for the user — e.g. the
+    /// max-agent-turns cap message. The UI renders it as a `<system>`
+    /// log line in the warning color so it reads as a tool/runtime
+    /// notice rather than a message the user typed (which would carry
+    /// the `<you>` prefix). Not persisted to the session.
+    SystemNotice {
+        content: CompactString,
+    },
     /// Per-run input-repair telemetry, emitted just before
     /// `AgentEvent::Done`. The UI prints a one-line summary
     /// ("repaired 3 inputs: 1 md-link, 2 null-strip; 0 invalid")

@@ -82,7 +82,8 @@ use crate::ui::slash::{handle_compress, handle_slash};
 use crate::ui::status::StatusLine;
 use crate::ui::terminal::TerminalGuard;
 use crate::ui::text_output::{
-    sanitize_single_line, strip_leading_system_reminder, with_queue, write_user_lines,
+    sanitize_single_line, strip_leading_system_reminder, with_queue, write_system_lines,
+    write_user_lines,
 };
 use tool_display::*;
 
@@ -2367,6 +2368,14 @@ pub async fn run_interactive(
                             &format!("  ↑ escalating to {provider} (next turn): {summary}"),
                             theme::dim(),
                         )?;
+                    }
+                    AgentEvent::SystemNotice { content } => {
+                        // dirge-originated log line (e.g. the max-agent-turns
+                        // cap). Render as `<system>` in the warning color so
+                        // it's visibly distinct from the user's own `<you>`
+                        // messages and from agent output.
+                        write_system_lines(&mut renderer, &content)?;
+                        renderer.write_line("", Color::White)?;
                     }
                     AgentEvent::RetryNotice {
                         attempt,

@@ -393,6 +393,13 @@ pub enum LoopEvent {
         error: String,
     },
 
+    /// A dirge-originated log/notice line for the user (NOT model
+    /// output and NOT a transcript message) — e.g. "max agent turns
+    /// reached". Distinct from a `MessageStart { User }` so the UI can
+    /// render it as a `<system>` log line in the warning color rather
+    /// than echoing it as if the user had typed it.
+    SystemNotice { content: String },
+
     /// Phase-1 telemetry (docs/AGENTIC_LOOP_PLAN.md): per-run
     /// aggregate of the input-repair counters, emitted just
     /// before `AgentEnd`. The UI prints a one-line summary when
@@ -470,6 +477,7 @@ impl LoopEvent {
             LoopEvent::TurnEnd { .. } => "turn_end",
             LoopEvent::ContextCompacted { .. } => "context_compacted",
             LoopEvent::RetryNotice { .. } => "retry_notice",
+            LoopEvent::SystemNotice { .. } => "system_notice",
             LoopEvent::RepairStats { .. } => "repair_stats",
             LoopEvent::EscalationActivated { .. } => "escalation_activated",
         }

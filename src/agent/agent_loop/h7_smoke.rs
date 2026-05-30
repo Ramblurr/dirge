@@ -164,6 +164,9 @@ fn dump_events(events: &[AgentEvent]) {
             } => {
                 eprintln!("\n[retry_notice] attempt={attempt} delay_ms={delay_ms}: {error}");
             }
+            AgentEvent::SystemNotice { content } => {
+                eprintln!("\n[system_notice] {content}");
+            }
             AgentEvent::RepairStats { snapshot } => {
                 eprintln!(
                     "\n[repair_stats] total={} invalid={}",

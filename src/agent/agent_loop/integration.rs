@@ -1172,6 +1172,7 @@ mod tests {
             AgentEvent::UserMessage { .. } => "UserMessage",
             AgentEvent::ContextCompacted { .. } => "ContextCompacted",
             AgentEvent::RetryNotice { .. } => "RetryNotice",
+            AgentEvent::SystemNotice { .. } => "SystemNotice",
             AgentEvent::RepairStats { .. } => "RepairStats",
             AgentEvent::EscalationActivated { .. } => "EscalationActivated",
         }

@@ -108,6 +108,39 @@ pub(crate) fn write_user_lines(renderer: &mut Renderer, text: &str) -> std::io::
     Ok(())
 }
 
+/// Print a dirge-originated log/notice (e.g. the max-agent-turns cap
+/// message) to the chat log: the first line gets a `<system> ` prefix,
+/// continuation lines align under it, and the whole thing renders in the
+/// warning color so it reads as a runtime notice rather than something
+/// the user typed (which uses `<you>` + the user color via
+/// `write_user_lines`). `sanitize_output` strips control bytes per line.
+pub(crate) fn write_system_lines(renderer: &mut Renderer, text: &str) -> std::io::Result<()> {
+    const PREFIX: &str = "<system> ";
+    // Visible width of `PREFIX` — 9 cells — used as the continuation
+    // indent so wrapped lines line up under the message body.
+    const CONT_INDENT: &str = "         ";
+    let color = theme::warn();
+    let mut prefix_emitted = false;
+    for line in text.lines() {
+        let safe = sanitize_output(line);
+        if safe.is_empty() {
+            renderer.write_line("", color)?;
+            continue;
+        }
+        let formatted = if !prefix_emitted {
+            prefix_emitted = true;
+            format!("{}{}", PREFIX, safe)
+        } else {
+            format!("{}{}", CONT_INDENT, safe)
+        };
+        renderer.write_line(&formatted, color)?;
+    }
+    if !prefix_emitted {
+        renderer.write_line(PREFIX, color)?;
+    }
+    Ok(())
+}
+
 /// Flatten a multi-line / control-char-bearing string into one safe line
 /// suitable for a single `write_line` call. Newlines, tabs, and ANSI escape
 /// sequences would otherwise corrupt the renderer's per-line buffering — the

@@ -936,8 +936,38 @@ async fn nqr_max_turns_cap_terminates_run() {
         u.content
     );
 
+    // The cap is surfaced to the user as a SystemNotice (a `<system>`
+    // log line), NOT as a MessageStart { User } (which would render with
+    // the `<you>` prefix as if the user typed it).
+    let events = drain(&mut rx).await;
+    let notice = events.iter().find_map(|e| match e {
+        LoopEvent::SystemNotice { content } => Some(content.clone()),
+        _ => None,
+    });
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|c| c.contains("Max agent turns")),
+        "expected a SystemNotice carrying the cap message, events: {:?}",
+        events.iter().map(|e| e.kind()).collect::<Vec<_>>()
+    );
+    // The cap text must NOT be emitted as a user MessageStart/MessageEnd.
+    let leaked_as_user = events.iter().any(|e| match e {
+        LoopEvent::MessageStart {
+            message: LoopMessage::User(u),
+        }
+        | LoopEvent::MessageEnd {
+            message: LoopMessage::User(u),
+        } => u.content.contains("Max agent turns"),
+        _ => false,
+    });
+    assert!(
+        !leaked_as_user,
+        "cap notice must not be emitted as a <you> user message"
+    );
+
     // agent_end still fires after the cap.
-    let kinds: Vec<&str> = drain(&mut rx).await.iter().map(|e| e.kind()).collect();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind()).collect();
     assert_eq!(kinds.last().copied(), Some("agent_end"));
 }
 

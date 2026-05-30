@@ -74,6 +74,19 @@ In parallel mode, `tool_execution_end` events emit in completion order but the r
 
 If every result in the batch is marked terminating, the inner loop exits after the current turn.
 
+## Repeat-loop guard (reflect-then-pivot)
+
+A `StormBreaker` (`src/agent/agent_loop/storm.rs`) tracks recent `(tool_name, args)` pairs in a sliding window and suppresses a call once it has been issued identically too many times (default: the 3rd identical call). This catches non-progressing loops — an agent re-reading the same file or re-running the same failing command — without relying on the model to notice it's stuck.
+
+The intervention is deliberately *not* a bare "don't repeat yourself". Research on agent loops (and dirge's own experience) shows that simply telling a model to try again tends to **reinforce the same failing chain of reasoning** — the *degeneration-of-thought* / *mental-set* problem. So on the first all-suppressed turn the loop fabricates a tool result carrying a **reflect-then-pivot** prompt (`run.rs`, the `guard_text` in the storm-suppression branch) that forces genuine divergence:
+
+1. State what the call was trying to achieve and why it isn't working.
+2. Name the assumption that might be wrong, and what the earlier results actually show.
+3. Propose **2–3 fundamentally different approaches** — a different tool, entry point, or interpretation — and pick one.
+4. Proceed with that approach; or, if nothing can work with the available tools, say so plainly instead of retrying.
+
+This gives the model one structured shot to self-correct (`turn_self_corrected`). If it keeps producing only suppressed calls afterward, the inner loop exits rather than spinning. The outermost backstop is the `max_turns` cap (see [config.md](config.md)), which stops the run and surfaces a `<system>` notice.
+
 ## Cancellation
 
 A single `AbortSignal` is shared end-to-end:

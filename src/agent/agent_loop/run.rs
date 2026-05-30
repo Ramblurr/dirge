@@ -927,7 +927,19 @@ pub async fn run_loop(
                 // path.
                 if all_suppressed && !turn_self_corrected {
                     turn_self_corrected = true;
-                    let guard_text = "[repeat-loop guard] this call was suppressed because it was identical to a previous call in this turn. Earlier results for it are above — try a meaningfully different approach, or stop and answer if you have enough.";
+                    // Reflect-then-pivot intervention. Just telling a
+                    // model "try again" tends to reinforce the same
+                    // failing chain (degeneration-of-thought / mental-set);
+                    // an effective unstick prompt forces it to first
+                    // diagnose, then DIVERGE — a different tool, entry
+                    // point, or assumption — and gives explicit permission
+                    // to stop. See docs/agent-loop.md.
+                    let guard_text = "[repeat-loop guard] You've made this exact call more than once and gotten the same result — you're stuck in a loop. Do NOT repeat it. Before doing anything else, work through these steps:\n\
+                        1. State what you were trying to achieve with this call and why it isn't getting you there.\n\
+                        2. Look at the earlier results for it above. What assumption of yours might be wrong, and what do those results actually tell you?\n\
+                        3. Propose 2-3 FUNDAMENTALLY different approaches — a different tool, a different entry point, or a different interpretation of the problem — and pick the most promising one.\n\
+                        4. Proceed with that approach.\n\
+                        If none of them can work with the tools available, say so plainly and report what you found instead of trying again.";
                     let guard_blocks = vec![ContentBlock::Text {
                         text: guard_text.to_string(),
                     }];
@@ -1190,20 +1202,19 @@ pub async fn run_loop(
                 let notice = format!(
                     "[dirge] Max agent turns ({cap}) reached. Stopping the run. Increase --max-agent-turns or `max_agent_turns` in config.json to allow more."
                 );
+                // Surface to the user as a `<system>` log line (warning
+                // color) rather than a `MessageStart { User }` — the
+                // latter rendered with the `<you>` prefix as if the user
+                // had typed it.
                 let _ = emit
-                    .send(LoopEvent::MessageStart {
-                        message: LoopMessage::User(super::message::UserMessage {
-                            content: notice.clone(),
-                        }),
+                    .send(LoopEvent::SystemNotice {
+                        content: notice.clone(),
                     })
                     .await;
-                let _ = emit
-                    .send(LoopEvent::MessageEnd {
-                        message: LoopMessage::User(super::message::UserMessage {
-                            content: notice.clone(),
-                        }),
-                    })
-                    .await;
+                // Still record it in the returned transcript so headless /
+                // subagent collectors (and a resumed model) see that the
+                // run was truncated. This is the model-facing transcript,
+                // not the user's on-screen echo.
                 new_messages.push(LoopMessage::User(super::message::UserMessage {
                     content: notice,
                 }));

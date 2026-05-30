@@ -322,6 +322,7 @@ async fn run_prompt(
             | AgentEvent::TurnEnd { .. }
             | AgentEvent::ContextCompacted { .. }
             | AgentEvent::RetryNotice { .. }
+            | AgentEvent::SystemNotice { .. }
             | AgentEvent::RepairStats { .. }
             | AgentEvent::EscalationActivated { .. } => {
                 // Observability markers — no ACP-protocol

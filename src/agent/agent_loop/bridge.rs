@@ -25,6 +25,7 @@
 //! |                                           | + `ToolStarted { id }`           |
 //! | `ToolExecutionUpdate`                     | (none — no AgentEvent equivalent)|
 //! | `ToolExecutionEnd { id, name, result }`   | `ToolResult { id, output, kind }`|
+//! | `SystemNotice { content }`                | `SystemNotice { content }`       |
 //!
 //! **State maintained**:
 //!   - `turn_index`: increments on each `TurnStart`; used to label
@@ -146,6 +147,12 @@ impl EventBridge {
 
             LoopEvent::RepairStats { snapshot } => {
                 vec![AgentEvent::RepairStats { snapshot }]
+            }
+
+            LoopEvent::SystemNotice { content } => {
+                vec![AgentEvent::SystemNotice {
+                    content: CompactString::from(content),
+                }]
             }
 
             LoopEvent::EscalationActivated { provider, reason } => {
