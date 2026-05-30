@@ -113,7 +113,8 @@ pass openai-key | dirge --provider openai --api-key-stdin
 | `/toggle` | Toggle features on/off (currently todo tools) |
 | `/regen-prompts` | Restore built-in prompts |
 | `/mcp` | List MCP servers and tools |
-| `/panel [on\|off\|auto]` | Toggle the side panels — left: session vitals (context gauge, recent activity, git); right: system load, MCP, LSP, todos, modified files. `auto` shows them at ≥100 cols. |
+| `/panel [on\|off\|auto]` | Toggle both side panels together — left: session vitals (context gauge, recent activity, git); right: system load, MCP, LSP, todos, modified files. `auto` shows them at ≥100 cols. |
+| `/display <panes>` | Choose which panes show, e.g. `/display main`, `/display main\|right`, `/display left\|main\|right`. The main pane is always shown; left/right toggle independently. Set a default with the `display` config key. |
 | `/allow [list\|add\|remove\|clear]` | Manage the session permission allowlist; bare `/allow` lists it. See [docs/permissions.md](docs/permissions.md#allow-always-and-the-session-allowlist) |
 | `/why <tool> [input]` | Dry-run a permission decision and print the full policy trace |
 | `/retry` | Retry last prompt |

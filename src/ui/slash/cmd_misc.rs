@@ -1,5 +1,5 @@
 //! Miscellaneous / smaller slash command handlers:
-//! /mcp, /btw, /cd, /panel, /quit, /help, /allow, /loop.
+//! /mcp, /btw, /cd, /panel, /display, /quit, /help, /allow, /loop.
 
 use crossterm::style::Color;
 
@@ -211,16 +211,73 @@ pub(super) async fn cmd_panel(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow:
         ctx.renderer.set_panel_mode(mode);
         ctx.renderer.render_viewport()?;
     }
-    let current = ctx.renderer.panel_mode();
-    let visible = ctx.renderer.panel_visible();
+    // Both sides share a mode after /panel; report the left as the
+    // representative. For per-side control, see /display.
+    let current = ctx.renderer.left_panel_mode();
+    let left = ctx.renderer.left_panel_visible();
+    let right = ctx.renderer.right_panel_visible();
     ctx.renderer.write_line(
         &format!(
-            "panel mode: {:?} (currently {})",
+            "panel mode: {:?} (left {}, right {}). Use /display for per-pane control.",
             current,
-            if visible { "shown" } else { "hidden" }
+            if left { "shown" } else { "hidden" },
+            if right { "shown" } else { "hidden" },
         ),
         c_agent(),
     )?;
+    Ok(())
+}
+
+/// `/display <panes>` — choose which panes are visible. `panes` is a
+/// `|`/`,`/space-separated subset of `left`, `main`, `right` (e.g.
+/// `/display left|main|right`, `/display main`, `/display main|right`).
+/// The main conversation pane is always shown; this toggles the left and
+/// right side panels independently. With no argument, reports the current
+/// layout.
+pub(super) async fn cmd_display(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::Result<()> {
+    use crate::ui::renderer::parse_display_spec;
+
+    // Rejoin everything after the command so both `/display main|right`
+    // (one token) and `/display main right` (several) parse the same way.
+    let spec = parts[1..].join(" ");
+    if spec.trim().is_empty() {
+        let left = ctx.renderer.left_panel_visible();
+        let right = ctx.renderer.right_panel_visible();
+        let mut shown = vec!["main"];
+        if left {
+            shown.insert(0, "left");
+        }
+        if right {
+            shown.push("right");
+        }
+        ctx.renderer.write_line(
+            &format!(
+                "display: {} (usage: /display left|main|right)",
+                shown.join("|")
+            ),
+            c_agent(),
+        )?;
+        return Ok(());
+    }
+
+    match parse_display_spec(&spec) {
+        Ok(vis) => {
+            ctx.renderer.set_pane_visibility(vis);
+            ctx.renderer.render_viewport()?;
+            let mut shown = vec!["main"];
+            if vis.left {
+                shown.insert(0, "left");
+            }
+            if vis.right {
+                shown.push("right");
+            }
+            ctx.renderer
+                .write_line(&format!("display: {}", shown.join("|")), c_agent())?;
+        }
+        Err(msg) => {
+            ctx.renderer.write_line(&msg, c_error())?;
+        }
+    }
     Ok(())
 }
 
@@ -561,7 +618,11 @@ pub(super) async fn cmd_help(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
         c_result(),
     )?;
     renderer.write_line(
-        "  /panel [on|off|auto]   toggle right-hand info panel",
+        "  /panel [on|off|auto]   toggle both side panels together",
+        c_result(),
+    )?;
+    renderer.write_line(
+        "  /display <panes>       choose panes: left|main|right (e.g. main|right)",
         c_result(),
     )?;
     renderer.write_line(

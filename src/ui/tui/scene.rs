@@ -56,8 +56,11 @@ pub struct Scene<'a> {
     pub body: BottomBody<'a>,
     /// Status row text.
     pub status: &'a str,
-    /// Render side panels? (false on very narrow terminals.)
-    pub show_side_panels: bool,
+    /// Render the left side panel? (false when hidden via `/display`,
+    /// `/panel off`, or on a too-narrow terminal.)
+    pub show_left_panel: bool,
+    /// Render the right side panel? (independent of the left.)
+    pub show_right_panel: bool,
     /// Header / frame color.
     pub frame_color: crossterm::style::Color,
 }
@@ -73,7 +76,7 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     f.render_widget(TopFrame::new(&layout).style(frame_style), area);
 
     // Left panel — idle card or subagent list. Skip on narrow terminals.
-    if scene.show_side_panels && layout.left_panel.width >= 12 {
+    if scene.show_left_panel && layout.left_panel.width >= 12 {
         f.render_widget(
             LeftPanel::new(scene.left_info, scene.subagents),
             layout.left_panel,
@@ -89,7 +92,7 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     f.render_widget(chat, area);
 
     // Right panel — stacked sub-panels. Skip on narrow terminals.
-    if scene.show_side_panels && layout.right_panel.width >= 16 {
+    if scene.show_right_panel && layout.right_panel.width >= 16 {
         f.render_widget(
             RightPanel::new(scene.panel_data).modified_offset(scene.modified_offset),
             layout.right_panel,
@@ -182,7 +185,8 @@ pub fn empty_scene<'a>(
             completion_preview: "",
         },
         status,
-        show_side_panels: true,
+        show_left_panel: true,
+        show_right_panel: true,
         frame_color: crossterm::style::Color::Green,
     }
 }
@@ -282,7 +286,8 @@ mod tests {
                 lines: &overlay_lines,
             },
             status: "permission required",
-            show_side_panels: true,
+            show_left_panel: true,
+            show_right_panel: true,
             frame_color: crossterm::style::Color::Green,
         };
 
@@ -335,7 +340,9 @@ mod tests {
         let info = LeftPanelInfo::default();
         let subs: Vec<SubagentStatusRow> = Vec::new();
         let mut scene = empty_scene(&buf, &pd, &info, &subs, "narrow");
-        scene.show_side_panels = true; // request side panels even though they collapse
+        // request side panels even though they collapse on a narrow term
+        scene.show_left_panel = true;
+        scene.show_right_panel = true;
 
         let mut backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend.clone()).unwrap();
@@ -359,6 +366,64 @@ mod tests {
         assert!(
             !found_dirge,
             "DIRGE banner should not appear on narrow term"
+        );
+    }
+
+    /// `/display` granularity: the left and right panels are toggled
+    /// independently. With only the left shown, the left gutter has
+    /// content and the right gutter is blank; and vice-versa.
+    #[test]
+    fn left_and_right_panels_toggle_independently() {
+        fn region_has_content(backend: &TestBackend, r: ratatui::layout::Rect) -> bool {
+            for y in r.y..r.y.saturating_add(r.height) {
+                for x in r.x..r.x.saturating_add(r.width) {
+                    if let Some(cell) = backend.buffer().cell((x, y))
+                        && cell.symbol().trim() != ""
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        let buf: Vec<LineEntry> = Vec::new();
+        let pd = PanelData::default();
+        let info = LeftPanelInfo::default();
+        let subs: Vec<SubagentStatusRow> = Vec::new();
+        let layout = Layout::new(160, 30, 1);
+        assert!(layout.left_panel.width >= 12 && layout.right_panel.width >= 16);
+
+        let render = |show_left: bool, show_right: bool| {
+            let mut scene = empty_scene(&buf, &pd, &info, &subs, "ready");
+            scene.show_left_panel = show_left;
+            scene.show_right_panel = show_right;
+            let backend = TestBackend::new(160, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| render_frame(&scene, f)).unwrap();
+            terminal.backend().clone()
+        };
+
+        // Left only.
+        let b = render(true, false);
+        assert!(
+            region_has_content(&b, layout.left_panel),
+            "left should draw"
+        );
+        assert!(
+            !region_has_content(&b, layout.right_panel),
+            "right should be blank"
+        );
+
+        // Right only.
+        let b = render(false, true);
+        assert!(
+            !region_has_content(&b, layout.left_panel),
+            "left should be blank"
+        );
+        assert!(
+            region_has_content(&b, layout.right_panel),
+            "right should draw"
         );
     }
 
@@ -397,7 +462,8 @@ mod tests {
                 completion_preview: "",
             },
             status: "",
-            show_side_panels: true,
+            show_left_panel: true,
+            show_right_panel: true,
             frame_color: crossterm::style::Color::Green,
         };
         terminal.draw(|f| render_frame(&s1, f)).unwrap();
@@ -422,7 +488,8 @@ mod tests {
                 completion_preview: "",
             },
             status: "",
-            show_side_panels: true,
+            show_left_panel: true,
+            show_right_panel: true,
             frame_color: crossterm::style::Color::Green,
         };
         terminal.draw(|f| render_frame(&s2, f)).unwrap();

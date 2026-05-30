@@ -170,6 +170,57 @@ pub enum PanelMode {
     Off,
 }
 
+/// Which side panels a `/display` spec (or the `display` config value)
+/// asks for. The main conversation pane is always shown — the centered
+/// chat band is the layout's anchor and can't be hidden — so only the
+/// left and right gutters are toggled here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneVisibility {
+    pub left: bool,
+    pub right: bool,
+}
+
+/// Parse a `/display` / `display` spec into the set of side panels to show.
+///
+/// Tokens are the pane names `left`, `main`, `right`, separated by `|`,
+/// `,`, or whitespace and matched case-insensitively — e.g.
+/// `left|main|right`, `main`, `main right`, `MAIN, RIGHT`. `main` is
+/// accepted but has no effect on layout (the conversation always shows);
+/// listing it is how a user says "only the main pane" (`/display main`).
+///
+/// Returns `Err` with a user-facing message on an empty spec or an
+/// unrecognized token, so the caller can surface it instead of silently
+/// applying a wrong layout.
+pub fn parse_display_spec(spec: &str) -> Result<PaneVisibility, String> {
+    let mut vis = PaneVisibility {
+        left: false,
+        right: false,
+    };
+    let mut saw_token = false;
+    for tok in spec.split(['|', ',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        saw_token = true;
+        match tok.to_ascii_lowercase().as_str() {
+            "left" => vis.left = true,
+            "right" => vis.right = true,
+            // `main` is always shown; accept it so the user can name the
+            // full layout, but it doesn't toggle anything.
+            "main" => {}
+            other => {
+                return Err(format!(
+                    "unknown pane '{other}' (use left, main, and/or right, e.g. /display left|main|right)"
+                ));
+            }
+        }
+    }
+    if !saw_token {
+        return Err(
+            "usage: /display <panes> where panes are left|main|right (e.g. /display main|right)"
+                .to_string(),
+        );
+    }
+    Ok(vis)
+}
+
 // Re-exported from submodules so existing imports don't break.
 pub use crate::ui::panel_data::{LeftPanelInfo, PanelData, SubagentStatusRow};
 /// Normalized selection range — `start <= end` in row-major order.
@@ -241,7 +292,11 @@ pub struct Renderer {
     /// end position used when dragging past the line's right edge.
     pub selection_start: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
-    panel_mode: PanelMode,
+    /// Visibility mode for the left / right side panels, controlled
+    /// independently (`/display`, `/panel`, and the `display` config).
+    /// The main conversation pane is always shown.
+    left_panel_mode: PanelMode,
+    right_panel_mode: PanelMode,
     /// Most-recently set panel snapshot. The UI rebuilds and pushes this
     /// before each redraw so render_viewport/draw_bottom can repaint the
     /// panel along with the rest of the screen.
@@ -357,7 +412,8 @@ impl Renderer {
             selection_active: false,
             selection_start: None,
             selection_end: None,
-            panel_mode: PanelMode::Auto,
+            left_panel_mode: PanelMode::Auto,
+            right_panel_mode: PanelMode::Auto,
             panel_data: PanelData::default(),
             subagent_status: Vec::new(),
             left_panel_info: LeftPanelInfo::default(),
@@ -410,9 +466,10 @@ impl Renderer {
             format_terminal_title(self.avatar_state, tool)
         };
 
-        // panel_visible() borrows &self via terminal_size, so compute
+        // panel-visibility borrows &self via terminal_size, so compute
         // it BEFORE we take the split mutable borrow on tui_terminal.
-        let show_side_panels = self.panel_visible();
+        let show_left_panel = self.left_panel_visible();
+        let show_right_panel = self.right_panel_visible();
         let frame_color = crate::ui::theme::header();
 
         // Split borrows on Self so we can hold &mut tui_terminal
@@ -532,7 +589,7 @@ impl Renderer {
         // leave the offset stranded past the visible window.
         // Mirrors the math in `RightPanel::render` — kept in sync
         // via the shared `compute_modified_rect` helper.
-        let modified_rect_now = if show_side_panels && layout_now.right_panel.width >= 16 {
+        let modified_rect_now = if show_right_panel && layout_now.right_panel.width >= 16 {
             crate::ui::tui::panels::compute_modified_rect(panel_data, layout_now.right_panel)
         } else {
             None
@@ -571,7 +628,8 @@ impl Renderer {
             avatar,
             body,
             status: cached_status.as_str(),
-            show_side_panels,
+            show_left_panel,
+            show_right_panel,
             frame_color,
         };
 
@@ -799,12 +857,32 @@ impl Renderer {
         };
     }
 
+    /// Set BOTH side panels to the same mode (the `/panel on|off|auto`
+    /// command and any caller that toggles the sidebar as a unit).
     pub fn set_panel_mode(&mut self, mode: PanelMode) {
-        self.panel_mode = mode;
+        self.left_panel_mode = mode;
+        self.right_panel_mode = mode;
     }
 
-    pub fn panel_mode(&self) -> PanelMode {
-        self.panel_mode
+    /// Apply a parsed `/display` selection (or the `display` config
+    /// value): each listed side panel is forced on, each omitted one
+    /// forced off — an explicit user choice, so `On`/`Off` rather than
+    /// `Auto`.
+    pub fn set_pane_visibility(&mut self, vis: PaneVisibility) {
+        self.left_panel_mode = if vis.left {
+            PanelMode::On
+        } else {
+            PanelMode::Off
+        };
+        self.right_panel_mode = if vis.right {
+            PanelMode::On
+        } else {
+            PanelMode::Off
+        };
+    }
+
+    pub fn left_panel_mode(&self) -> PanelMode {
+        self.left_panel_mode
     }
 
     /// dirge-gek: replace the subagent panel data. UI loop calls this
@@ -889,19 +967,25 @@ impl Renderer {
         changed
     }
 
-    /// Whether the panel will actually be drawn given current mode and
-    /// terminal size. Hidden when `Off`, or when the terminal is too narrow
-    /// to fit both the panel and a usable content area.
-    pub fn panel_visible(&self) -> bool {
+    /// Resolve a single side panel's mode against the current terminal
+    /// size. Hidden when `Off`, or when the terminal is too narrow to fit
+    /// both the panel and a usable content area (content_indent reflects
+    /// each side's width in the centered layout, so require ~15 cols min).
+    fn side_panel_visible(&self, mode: PanelMode) -> bool {
         let (cols, _) = self.terminal_size();
-        match self.panel_mode {
+        match mode {
             PanelMode::Off => false,
-            // Show side panels only when there's enough margin to
-            // host them — content_indent reflects each side's width
-            // in the centered layout, so require ~15 cols min.
             PanelMode::On => self.content_indent() >= 15,
             PanelMode::Auto => cols >= PANEL_AUTO_MIN_COLS && self.content_indent() >= 15,
         }
+    }
+
+    pub fn left_panel_visible(&self) -> bool {
+        self.side_panel_visible(self.left_panel_mode)
+    }
+
+    pub fn right_panel_visible(&self) -> bool {
+        self.side_panel_visible(self.right_panel_mode)
     }
 
     pub fn set_monochrome(&mut self, monochrome: bool) {

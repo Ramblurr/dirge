@@ -232,6 +232,13 @@ pub struct Config {
     pub default_permission_mode: Option<String>,
     pub show_tool_details: Option<bool>,
     pub show_edit_diff: Option<bool>,
+    /// Preferred default pane layout for the TUI: a `|`/`,`/space-
+    /// separated subset of `left`, `main`, `right` (e.g.
+    /// `"left|main|right"`, `"main"`, `"main|right"`). The main pane is
+    /// always shown; this picks which side panels appear at startup. The
+    /// `/display` command overrides it at runtime. Absent → both side
+    /// panels follow the automatic width-based behavior.
+    pub display: Option<String>,
     pub tool_result_max_chars: Option<usize>,
     /// Cap on tool-result body lines shown by default inside a tool
     /// chamber. Anything past this collapses to a

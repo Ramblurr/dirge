@@ -1,5 +1,50 @@
 use super::*;
 
+#[test]
+fn parse_display_spec_full_layout() {
+    let v = parse_display_spec("left|main|right").unwrap();
+    assert!(v.left && v.right);
+}
+
+#[test]
+fn parse_display_spec_main_only_hides_both_sides() {
+    let v = parse_display_spec("main").unwrap();
+    assert!(!v.left && !v.right);
+}
+
+#[test]
+fn parse_display_spec_main_and_right() {
+    let v = parse_display_spec("main|right").unwrap();
+    assert!(!v.left && v.right);
+}
+
+#[test]
+fn parse_display_spec_left_only() {
+    // `main` omitted; it's always shown regardless, so only `left`
+    // toggles on here.
+    let v = parse_display_spec("left").unwrap();
+    assert!(v.left && !v.right);
+}
+
+#[test]
+fn parse_display_spec_accepts_whitespace_commas_and_case() {
+    let v = parse_display_spec("RIGHT, Left").unwrap();
+    assert!(v.left && v.right);
+    let v = parse_display_spec("main right").unwrap();
+    assert!(!v.left && v.right);
+}
+
+#[test]
+fn parse_display_spec_rejects_empty_and_unknown() {
+    assert!(parse_display_spec("").is_err());
+    assert!(parse_display_spec("   ").is_err());
+    let err = parse_display_spec("middle").unwrap_err();
+    assert!(
+        err.contains("middle"),
+        "error should name the bad token: {err}"
+    );
+}
+
 /// wrap_editor: empty buffer → one empty row, cursor at (0, 0).
 #[test]
 fn wrap_editor_empty() {

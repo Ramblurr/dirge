@@ -172,6 +172,16 @@ pub async fn run_interactive(
 
     let mut renderer = Renderer::new()?;
     renderer.set_monochrome(cli.no_color);
+    // Apply the preferred pane layout from config (`display`). An invalid
+    // spec is surfaced as a warning and ignored (panels keep their
+    // automatic width-based default); the `/display` command overrides
+    // this at runtime.
+    if let Some(spec) = cfg.display.as_deref() {
+        match crate::ui::renderer::parse_display_spec(spec) {
+            Ok(vis) => renderer.set_pane_visibility(vis),
+            Err(msg) => eprintln!("warning: invalid `display` config: {msg}"),
+        }
+    }
     let mut input = InputEditor::new();
     input.set_monochrome(cli.no_color);
     // Left-panel vitals: a background git-status poller (follows `/cd`)
