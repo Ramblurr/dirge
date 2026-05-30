@@ -53,6 +53,27 @@ the qualified form.
 
 Custom prompts can be placed in `$XDG_CONFIG_HOME/dirge/prompts/` as `.md` files.
 
+## Model-aware steering
+
+Separate from the selectable prompt modes above, the harness appends a
+model-specific guidance fragment to the preamble based on the **active model
+family** (resolved from the provider + model id). This is automatic and has no
+config key.
+
+Today only DeepSeek **chat** models (v3/v4) receive a fragment,
+`prompts/steering/deepseek.md`, embedded in the binary via `include_str!`. It
+encodes a Plan-Execute-Verify working method, structural-constraint framing, an
+explicit success/never contract, and an anti tool-call-repetition rule — the
+dominant failure modes for DeepSeek in agentic loops. It is appended **last** in
+the preamble so it sits closest to the conversation / action boundary, where
+rules best resist "prompt-distance drift" in long tool-calling sequences.
+
+The DeepSeek **reasoner** (R1) is deliberately excluded — it ignores the system
+prompt — and every non-DeepSeek model is unaffected. Steering fragments live
+under `prompts/steering/` rather than `prompts/`, so they are **not** selectable
+`/prompt` modes and never appear in the `/prompt` list. To edit the guidance,
+change the markdown file and rebuild.
+
 ## Context files
 
 The agent automatically loads `AGENTS.md` or `CLAUDE.md` from the project root,
