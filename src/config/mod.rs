@@ -102,6 +102,17 @@ pub enum ConfigRole {
     Subagent,
 }
 
+/// One VSCode-style key binding: bind a key chord to a named command.
+/// `key` is a chord like `"ctrl-t"` / `"pageup"` / `"ctrl-shift-x"`;
+/// `command` is one of the rebindable global commands (see
+/// `ui::keymap::KeyAction`), or `"none"` to unbind the default on that
+/// chord. Parsed by `ui::keymap::Keymap::from_config`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeybindingConfig {
+    pub key: String,
+    pub command: String,
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
@@ -260,6 +271,10 @@ pub struct Config {
     /// falls back to phosphor with a warning rather than refusing
     /// to start.
     pub theme: Option<String>,
+    /// VSCode-style key-binding overrides for the global command keys.
+    /// Each entry binds a chord to a command (see `KeybindingConfig`);
+    /// applied over the built-in defaults by `ui::keymap`.
+    pub keybindings: Option<Vec<KeybindingConfig>>,
     pub tools: Option<ToolsConfig>,
 
     /// Phase-3 (`docs/AGENTIC_LOOP_PLAN.md`): when true, ship only

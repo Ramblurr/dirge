@@ -349,6 +349,57 @@ Provider name matching is case-insensitive (`anthropic` matches
 }
 ```
 
+## Key bindings
+
+VSCode-style overrides for the global "command" keys. `keybindings` is an
+array of `{ "key": "<chord>", "command": "<command>" }`; each entry is
+layered over the built-in defaults, so you only list what you want to
+change.
+
+```json
+{
+  "keybindings": [
+    { "key": "ctrl-t",       "command": "toggle_reasoning" },
+    { "key": "ctrl-shift-k", "command": "kill_subagent" },
+    { "key": "ctrl-r",       "command": "none" }
+  ]
+}
+```
+
+- **`key`** — a chord: case-insensitive, `-` or `+` separated, modifiers
+  before the key. Modifiers: `ctrl`, `alt` (a.k.a. `meta`/`option`),
+  `shift`. Keys: a single character, `f1`–`f12`, or a named key
+  (`enter`, `esc`, `tab`, `backspace`, `delete`, `insert`, `space`,
+  `up`/`down`/`left`/`right`, `home`, `end`, `pageup`/`pgup`,
+  `pagedown`/`pgdn`). Examples: `ctrl-t`, `pageup`, `ctrl-shift-x`, `f5`.
+- **`command`** — one of the rebindable commands below, or **`none`**
+  (also `unbind`) to disable the default binding on that chord.
+- Binding a command to a new chord **adds** it (the default chord still
+  works unless you separately unbind it). Binding a chord that already
+  has a default **replaces** it.
+
+| Command | Default | Action |
+|---|---|---|
+| `toggle_reasoning` | `ctrl-r` | Show/hide reasoning tokens |
+| `scroll_page_up` | `pageup` | Scroll chat up one page |
+| `scroll_page_down` | `pagedown` | Scroll chat down one page |
+| `scroll_to_top` | `home` | Jump to top of chat |
+| `scroll_to_bottom` | `end` | Jump to bottom of chat |
+| `next_chat` | `ctrl-n` | Next subagent chat window |
+| `prev_chat` | `ctrl-p` | Previous subagent chat window |
+| `close_chat` | `ctrl-x` | Close the active chat window |
+| `kill_subagent` | `ctrl-k` | Kill the focused subagent |
+
+Notes:
+- **Not rebindable** (kept fixed): the text-editing keys in the input box
+  (Ctrl+A/E/W, kill-ring, word motion, history) and the universal
+  cancel/interrupt gesture (**Ctrl+C / Ctrl+D / Esc**) — the latter must
+  always be available as the panic button.
+- Rebinding a command to a key the input editor uses (e.g. `ctrl-a`)
+  shadows that editing key while the binding is active.
+- Unrecognized chords or unknown commands are skipped with a warning on
+  startup; the rest of the config still loads.
+
 ## Environment variables
 
 | Variable | Purpose |

@@ -5,6 +5,10 @@ slash-command list, see the top-level [README](../README.md#slash-commands).
 
 ## Key bindings
 
+The global command keys (toggle reasoning, scroll, chat navigation,
+kill-subagent) are **rebindable** via the `keybindings` config — see
+[config.md](config.md#key-bindings). The defaults are listed below.
+
 ### Input editing
 
 | Key | Action |

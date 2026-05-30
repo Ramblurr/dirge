@@ -9,6 +9,7 @@ mod events;
 pub(crate) mod gitstatus;
 mod highlight;
 pub(crate) mod input;
+pub(crate) mod keymap;
 mod markdown;
 pub(crate) mod notifications;
 pub(crate) mod panel_data;
@@ -72,6 +73,7 @@ use crate::ui::chat_state::{ChatUiState, load_chat_ui_state, save_chat_ui_state}
 use crate::ui::colors::{c_agent, c_error, c_perm, c_tool, resolve_color};
 use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
+use crate::ui::keymap::{KeyAction, Keymap};
 use crate::ui::panel_render::{build_left_panel_info, build_panel_data};
 use crate::ui::picker::ListPicker;
 use crate::ui::renderer::{LineEntry, Renderer};
@@ -176,6 +178,12 @@ pub async fn run_interactive(
     // and a ring of the most recent tool actions for the [ACTIVITY]
     // ticker. Both feed `build_left_panel_info` each loop tick.
     let gitstat = crate::ui::gitstatus::spawn_poller(std::time::Duration::from_secs(3));
+    // Configurable global key bindings (VSCode-style): defaults layered
+    // with the user's `keybindings` config. Surface any parse warnings.
+    let (keymap, keymap_warnings) = Keymap::from_config(cfg.keybindings.as_deref());
+    for w in &keymap_warnings {
+        eprintln!("warning: {w}");
+    }
     const TOOL_ACTIVITY_CAP: usize = 8;
     let mut tool_activity: std::collections::VecDeque<String> =
         std::collections::VecDeque::with_capacity(TOOL_ACTIVITY_CAP);
@@ -825,6 +833,11 @@ pub async fn run_interactive(
                         continue;
                     }
                     UserEvent::Key(key) => {
+                        // Resolve the key to a rebindable global command
+                        // (config-overridable). `None` for everything else
+                        // (typing, input-editor keys, the Ctrl+C/D/Esc
+                        // cancel gesture), which flows through unchanged.
+                        let action = keymap.resolve(&key);
                         let is_ctrl_c = key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL);
                         let is_ctrl_d = key.code == KeyCode::Char('d')
@@ -1040,9 +1053,7 @@ pub async fn run_interactive(
                             last_esc = None;
                         }
 
-                        let ctrl_r = key.code == KeyCode::Char('r')
-                            && key.modifiers.contains(KeyModifiers::CONTROL);
-                        if ctrl_r {
+                        if action == Some(KeyAction::ToggleReasoning) {
                             show_reasoning = !show_reasoning;
                             renderer.write_line(
                                 &format!("reasoning visibility: {}", if show_reasoning { "on" } else { "off" }),
@@ -1056,13 +1067,13 @@ pub async fn run_interactive(
                             continue;
                         }
 
-                        let ctrl_n = key.code == KeyCode::Char('n')
-                            && key.modifiers.contains(KeyModifiers::CONTROL);
-                        let ctrl_p = key.code == KeyCode::Char('p')
-                            && key.modifiers.contains(KeyModifiers::CONTROL);
-                        let ctrl_x = key.code == KeyCode::Char('x')
-                            && key.modifiers.contains(KeyModifiers::CONTROL);
-                        if (ctrl_n || ctrl_p || ctrl_x) && renderer.chat_count() > 1 {
+                        let ctrl_p = action == Some(KeyAction::PrevChat);
+                        let ctrl_x = action == Some(KeyAction::CloseChat);
+                        if matches!(
+                            action,
+                            Some(KeyAction::NextChat | KeyAction::PrevChat | KeyAction::CloseChat)
+                        ) && renderer.chat_count() > 1
+                        {
                             let old_active = renderer.active_chat();
                             save_chat_ui_state(
                                 &mut chat_ui_states[old_active],
@@ -1131,9 +1142,7 @@ pub async fn run_interactive(
                         // focused tab (if any). Only fires when the
                         // input buffer is empty so it doesn't shadow
                         // ordinary character input.
-                        let ctrl_k = key.code == KeyCode::Char('k')
-                            && key.modifiers.contains(KeyModifiers::CONTROL);
-                        if ctrl_k && input.expanded().is_empty() {
+                        if action == Some(KeyAction::KillSubagent) && input.expanded().is_empty() {
                             let active = renderer.active_chat();
                             if let Some(sub_id) = chat_idx_to_subagent.get(&active).cloned() {
                                 use crate::agent::tools::task::{KillOutcome, kill_subagent};
@@ -1181,8 +1190,8 @@ pub async fn run_interactive(
                             }
                         }
 
-                        match key.code {
-                            KeyCode::PageUp => {
+                        match action {
+                            Some(KeyAction::ScrollPageUp) => {
                                 renderer.scroll_page_up();
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
@@ -1192,7 +1201,7 @@ pub async fn run_interactive(
                                 )?;
                                 continue;
                             }
-                            KeyCode::PageDown => {
+                            Some(KeyAction::ScrollPageDown) => {
                                 renderer.scroll_page_down();
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
@@ -1202,7 +1211,7 @@ pub async fn run_interactive(
                                 )?;
                                 continue;
                             }
-                            KeyCode::Home => {
+                            Some(KeyAction::ScrollToTop) => {
                                 renderer.scroll_to_top();
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
@@ -1212,7 +1221,7 @@ pub async fn run_interactive(
                                 )?;
                                 continue;
                             }
-                            KeyCode::End => {
+                            Some(KeyAction::ScrollToBottom) => {
                                 renderer.scroll_to_bottom()?;
                                 renderer.draw_bottom(
                                     &input,
