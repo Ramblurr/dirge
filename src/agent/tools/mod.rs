@@ -411,6 +411,12 @@ pub async fn enforce(
                 ));
             };
             handle_ask_inner(tx, perm, tool, raw_scope).await?;
+            // Approved → clear the loop-guard counter so a repeated call
+            // the user keeps allowing never trips the doom-loop hard-deny
+            // (only repeatedly-denied prompts accumulate).
+            perm.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_allowed_scope(tool, raw_scope, is_path);
             Ok(resolved)
         }
     }
@@ -451,6 +457,10 @@ pub async fn enforce_request(
                 ));
             };
             handle_ask_inner(tx, perm, &req.tool, &req.display_input).await?;
+            // Approved → clear the loop-guard counter (see `enforce`).
+            perm.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_allowed_request(&req);
             Ok(())
         }
     }

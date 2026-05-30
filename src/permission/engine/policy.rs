@@ -46,6 +46,14 @@ impl RepeatCounter {
         *self.counts.entry(Self::key(op, key)).or_insert(0) += 1;
     }
 
+    /// Drop the count for a single (op, resource-key). Called when the
+    /// user APPROVES a prompt for it: an approved-but-repeated action is
+    /// a productive loop, not a stuck one, so it shouldn't accrue toward
+    /// the hard-deny. Only repeatedly *denied* prompts keep accumulating.
+    pub fn reset(&mut self, op: Operation, key: &str) {
+        self.counts.remove(&Self::key(op, key));
+    }
+
     /// Drop all counts (e.g. on cwd change, mirroring the old
     /// `set_working_dir` reset).
     pub fn clear(&mut self) {

@@ -146,6 +146,21 @@ impl PermissionChecker {
         decision
     }
 
+    /// Clear loop-guard retry pressure for a (tool, input) scope after
+    /// the user APPROVED its prompt. Rebuilds the same request the
+    /// matching `authorize_scope` committed (same `is_path` → same key),
+    /// so an approved-but-repeated action never trips the hard-deny.
+    pub fn note_allowed_scope(&mut self, tool: &str, input: &str, is_path: bool) {
+        let req = self.build_request(tool, input, is_path);
+        self.engine.note_allowed(&req);
+    }
+
+    /// Clear loop-guard retry pressure for a pre-built request after the
+    /// user APPROVED its prompt (the bash multi-claim path).
+    pub fn note_allowed_request(&mut self, req: &engine::types::AccessRequest) {
+        self.engine.note_allowed(req);
+    }
+
     /// The checker's working directory — tools building their own
     /// multi-claim requests need it to classify path resources. (Only
     /// the `semantic-bash` bash path uses this today.)

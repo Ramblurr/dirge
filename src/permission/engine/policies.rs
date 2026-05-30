@@ -471,6 +471,9 @@ mod tests {
             head: s.split_whitespace().next().unwrap_or("").to_string(),
         }
     }
+    fn url(u: &str) -> Resource {
+        Resource::Url(u.to_string())
+    }
     fn word(s: &str) -> Resource {
         Resource::Bareword(s.to_string())
     }
@@ -747,5 +750,50 @@ mod tests {
             "4th identical Ask retry hard-denied"
         );
         assert_eq!(effects[4], Effect::Deny);
+    }
+
+    #[test]
+    fn approved_repeats_never_trip_loop_guard() {
+        // A repeated Ask op that the user APPROVES each time (modeled by
+        // `note_allowed` after each commit) must keep prompting forever —
+        // it never accrues toward the hard-deny.
+        let mut e = engine(Effect::Ask);
+        let r = req(
+            Operation::Network,
+            SecurityMode::Standard,
+            vec![url("https://example.com/x")],
+        );
+        for i in 0..10 {
+            let d = e.authorize(&r);
+            assert_eq!(d.effect, Effect::Ask, "iteration {i}: must keep asking");
+            e.commit(&r, &d);
+            e.note_allowed(&r); // user approved this prompt
+        }
+    }
+
+    #[test]
+    fn denials_still_hard_deny_even_after_an_earlier_approval() {
+        // approve once (resets), then 4 denials → still hard-denies, so
+        // the protection against a genuinely-stuck loop is preserved.
+        let mut e = engine(Effect::Ask);
+        let r = req(
+            Operation::Execute,
+            SecurityMode::Standard,
+            vec![cmd("frobnicate")],
+        );
+        let d = e.authorize(&r);
+        e.commit(&r, &d);
+        e.note_allowed(&r); // approved → counter reset to 0
+        let mut effects = vec![];
+        for _ in 0..5 {
+            let d = e.authorize(&r);
+            effects.push(d.effect);
+            e.commit(&r, &d); // denied at the prompt → no note_allowed
+        }
+        assert_eq!(
+            effects[3],
+            Effect::Deny,
+            "hard-deny still trips on pure denials"
+        );
     }
 }

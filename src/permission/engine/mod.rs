@@ -274,6 +274,21 @@ impl Engine {
         }
     }
 
+    /// Clear the loop-guard retry pressure for `req` — call this once the
+    /// user has APPROVED its prompt. An approved-but-repeated action is a
+    /// productive loop (the user keeps saying yes), so it must not trip
+    /// the hard-deny; only prompts the user keeps DENYING accumulate. The
+    /// dedup mirrors `commit` so the reset matches what was recorded.
+    pub fn note_allowed(&mut self, req: &AccessRequest) {
+        let mut seen = std::collections::HashSet::new();
+        for claim in &req.claims {
+            let key = claim.resource.match_key();
+            if seen.insert((claim.op, key)) {
+                self.ctx.repeat.reset(claim.op, key);
+            }
+        }
+    }
+
     /// Register a session-scoped "allow always" grant (from the UI's
     /// AllowAlways reply).
     pub fn allow_always(&mut self, op: Operation, original: &str) {
