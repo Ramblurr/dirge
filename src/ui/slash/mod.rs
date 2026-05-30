@@ -360,6 +360,24 @@ fn split_command_parts(text: &str) -> SmallVec<[&str; 3]> {
     text.split_whitespace().collect()
 }
 
+/// The "ghost" autocomplete suffix for an in-progress slash command, or
+/// `None`. As the user types `/dis`, this returns `play` (for `/display`)
+/// to be shown inline in dark gray and accepted with the Right arrow.
+///
+/// Only fires for a single slash token (a leading `/`, at least one more
+/// char, no whitespace yet) that is a strict prefix of some command. The
+/// first match in the (sorted) registry wins, mirroring shell-style ghost
+/// completion.
+pub fn ghost_suffix(input: &str) -> Option<String> {
+    if !input.starts_with('/') || input.len() < 2 || input.contains(char::is_whitespace) {
+        return None;
+    }
+    slash_command_names()
+        .into_iter()
+        .find(|c| c.len() > input.len() && c.starts_with(input))
+        .map(|c| c[input.len()..].to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_slash(
     text: &str,
@@ -763,6 +781,20 @@ mod tests {
         let p = split_command_parts("/compress  keep   the auth flow");
         assert_eq!(p[0], "/compress");
         assert_eq!(p[1..].join(" "), "keep the auth flow");
+    }
+
+    #[test]
+    fn ghost_suffix_completes_a_unique_prefix() {
+        // `/display` is the only command with this prefix.
+        assert_eq!(ghost_suffix("/disp").as_deref(), Some("lay"));
+    }
+
+    #[test]
+    fn ghost_suffix_returns_none_when_not_completable() {
+        assert_eq!(ghost_suffix("/"), None); // too short / ambiguous
+        assert_eq!(ghost_suffix("not-a-command"), None); // no leading slash
+        assert_eq!(ghost_suffix("/display extra"), None); // past the command token
+        assert_eq!(ghost_suffix("/zzzznope"), None); // no match
     }
 
     fn msg(role: MessageRole, content: &str) -> SessionMessage {

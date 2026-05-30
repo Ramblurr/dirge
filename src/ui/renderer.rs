@@ -372,6 +372,10 @@ pub struct Renderer {
     /// slash commands from the most recent `draw_bottom` call.
     /// Empty when no tab-completion is active.
     cached_completion_preview: String,
+    /// Inline dark-gray ghost completion for an in-progress slash command
+    /// (e.g. typing `/dis` shows `play`). Empty when not applicable;
+    /// accepted with the Right arrow.
+    cached_input_ghost: String,
     /// Chat content rect from the most recent `tui_redraw` call.
     /// Used by `buffer_pos_at` to map mouse `(row, col)` into the
     /// chat buffer using the actual ratatui layout, not the legacy
@@ -453,6 +457,7 @@ impl Renderer {
             cached_status: String::new(),
             cached_is_running: false,
             cached_completion_preview: String::new(),
+            cached_input_ghost: String::new(),
             cached_chat_rect: None,
             modified_offset: 0,
             last_modified_len: None,
@@ -510,6 +515,7 @@ impl Renderer {
             cached_status,
             cached_is_running,
             cached_completion_preview,
+            cached_input_ghost,
             cached_chat_rect,
             modified_offset,
             cached_modified_rect,
@@ -561,6 +567,7 @@ impl Renderer {
                 cursor_col: *cached_input_cursor_col,
                 is_running: *cached_is_running,
                 completion_preview: cached_completion_preview.as_str(),
+                ghost: cached_input_ghost.as_str(),
             }
         };
 
@@ -1542,6 +1549,14 @@ impl Renderer {
         self.cached_input_rows = rows;
         self.cached_input_cursor_row = cursor_row;
         self.cached_input_cursor_col = cursor_col;
+        // Inline ghost completion: only when the cursor is at the very end
+        // of an in-progress slash command (so the ghost paints right after
+        // the typed text and Right-to-accept is unambiguous).
+        self.cached_input_ghost = if cursor_byte == full.len() {
+            crate::ui::slash::ghost_suffix(full).unwrap_or_default()
+        } else {
+            String::new()
+        };
         self.cached_status = status.to_string();
         self.cached_is_running = is_running;
         self.input_rows = total_rows.clamp(1, MAX_INPUT_VISIBLE_LINES as u16);
