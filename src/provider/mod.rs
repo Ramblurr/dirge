@@ -780,6 +780,10 @@ pub struct AnyAgent {
     /// UI's `EscalationActivated` line can show the user which
     /// provider is taking over. `None` when escalation is off.
     escalation_provider_name: Option<String>,
+    /// F6 tier 3: bounded LLM critic callback, built at `build_agent`
+    /// time when `ConfigRole::Critic` resolves (i.e. `critic_provider`
+    /// is configured). Forwarded to `LoopConfig.critic_fn`. `None` = off.
+    critic_fn: Option<crate::agent::agent_loop::critic::CriticFn>,
     /// Phase 4 part 2: optional context-depth reminder threshold.
     /// Forwarded to `spawn_runner`, which constructs a fresh
     /// `FileTouchTracker` for each session because the tracker is
@@ -849,6 +853,7 @@ impl AnyAgent {
             tool_def_filter: None,
             escalation_stream_fn: None,
             escalation_provider_name: None,
+            critic_fn: None,
             context_depth_reminder_threshold: None,
             max_turns: None,
             review_stream_fn: None,
@@ -934,6 +939,13 @@ impl AnyAgent {
     ) -> Self {
         self.escalation_stream_fn = Some(stream_fn);
         self.escalation_provider_name = Some(provider_name);
+        self
+    }
+
+    /// F6 tier 3: attach the bounded LLM critic. Called by `build_agent`
+    /// only when `ConfigRole::Critic` resolves (`critic_provider` set).
+    pub fn with_critic(mut self, critic_fn: crate::agent::agent_loop::critic::CriticFn) -> Self {
+        self.critic_fn = Some(critic_fn);
         self
     }
 
@@ -1299,6 +1311,9 @@ impl AnyAgent {
         // F6: pre-finalization verifier gate, always on (baked-in). Nudges
         // to verify before finishing when code was edited but not run.
         cfg.verifier = Some(crate::agent::agent_loop::verifier::VerifierGate::new());
+        // F6 tier 3: thread the bounded critic (only Some when
+        // critic_provider is configured). `None` → no critic.
+        cfg.critic_fn = self.critic_fn.clone();
         // dirge-nqr: forward the per-run turn cap. `None` keeps the
         // legacy unlimited behavior.
         cfg.max_turns = self.max_turns;
@@ -1834,6 +1849,34 @@ pub async fn build_agent(
         }
     }
 
+    // F6 tier 3 — bounded critic wiring. Opt-in: only when the user has
+    // set `critic_provider`. `resolve_role(Critic)` has no default
+    // fallback, so an unset provider means no critic (no cost).
+    if cfg.critic_provider.is_some() {
+        match cfg.resolve_role(crate::config::ConfigRole::Critic) {
+            Some((alias, entry)) => match build_critic_fn(&alias, &entry, &cfg.providers_map()) {
+                Ok(critic_fn) => {
+                    agent = agent.with_critic(critic_fn);
+                    tracing::info!(target: "dirge::provider", alias = %alias, "in-loop critic wired");
+                }
+                Err(e) => {
+                    tracing::error!(target: "dirge::provider", alias = %alias, error = %e, "failed to build critic client; running without critic");
+                    eprintln!(
+                        "warning: critic_provider '{alias}' configured but client build failed: {e}"
+                    );
+                }
+            },
+            None => {
+                let alias = cfg.critic_provider.clone().unwrap_or_default();
+                eprintln!(
+                    "error: critic_provider '{alias}' is configured but does not match any entry \
+                     in `providers` or any built-in. Either add it under `providers` or remove \
+                     the `critic_provider` setting."
+                );
+            }
+        }
+    }
+
     // Phase 4 part 2 — context-depth reminder wiring.
     if let Some(threshold) = cfg.resolve_context_depth_threshold() {
         agent = agent.with_context_depth_reminder(threshold);
@@ -1961,6 +2004,31 @@ fn build_escalation_stream_fn(
         .map(|t| loop_tool_to_rig_definition(t.as_ref()))
         .collect();
     Ok(model.build_stream_fn(tool_defs, chunk_timeout, Some(alias.to_string())))
+}
+
+/// F6 tier 3: build the bounded-critic callback. Constructs a fresh
+/// client for the critic alias and returns a [`CriticFn`] that runs one
+/// completion (via `summarize_with_model`) per call. No tools — the
+/// critic only reads a transcript and returns a verdict.
+fn build_critic_fn(
+    alias: &str,
+    entry: &ProviderEntry,
+    providers: &HashMap<String, ProviderEntry>,
+) -> anyhow::Result<crate::agent::agent_loop::critic::CriticFn> {
+    let client = std::sync::Arc::new(create_client(alias, None, providers)?);
+    let model_name = entry
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model_for(alias).to_string());
+    Ok(std::sync::Arc::new(move |prompt: String| {
+        let client = client.clone();
+        let model_name = model_name.clone();
+        Box::pin(async move {
+            let model = client.completion_model(model_name);
+            summarize::summarize_with_model(model, prompt).await
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>>
+    }))
 }
 
 /// dirge-z73i: build a stream_fn for the background-review path,

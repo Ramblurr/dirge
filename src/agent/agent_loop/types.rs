@@ -393,6 +393,11 @@ pub struct LoopConfig {
     /// check it. None disables it (loop behaves byte-identically).
     pub verifier: Option<std::sync::Arc<super::verifier::VerifierGate>>,
 
+    /// F6 tier 3: optional bounded LLM critic. `Some` only when a
+    /// `critic_provider` is configured; the verifier escalates to it at
+    /// finalization on substantive runs. `None` = no critic (default).
+    pub critic_fn: Option<super::critic::CriticFn>,
+
     /// dirge-nqr: hard cap on assistant turns within a single run.
     /// `None` = unlimited (matches the legacy behaviour). When set,
     /// the run loop terminates after `max_turns` assistant turns
@@ -537,6 +542,7 @@ impl std::fmt::Debug for LoopConfig {
                 &self.file_touch_tracker.as_ref().map(|_| "<tracker>"),
             )
             .field("verifier", &self.verifier.as_ref().map(|_| "<gate>"))
+            .field("critic_fn", &self.critic_fn.as_ref().map(|_| "<critic>"))
             .field("max_turns", &self.max_turns)
             .finish()
     }
@@ -578,6 +584,7 @@ impl Clone for LoopConfig {
             escalation_remaining: self.escalation_remaining.clone(),
             file_touch_tracker: self.file_touch_tracker.clone(),
             verifier: self.verifier.clone(),
+            critic_fn: self.critic_fn.clone(),
             max_turns: self.max_turns,
         }
     }

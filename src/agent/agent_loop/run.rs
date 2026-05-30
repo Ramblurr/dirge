@@ -645,6 +645,9 @@ pub async fn run_loop(
     // Lives outside the outer loop so it persists across turns.
     let mut reflections = super::reflexion::ReflectionLog::new();
 
+    // F6 tier 3: the bounded LLM critic fires at most once per run.
+    let mut critic_done = false;
+
     'outer: loop {
         // Storm: fresh intent on each new user turn.
         // Port of Reasonix loop.ts:621 `this.repair.resetStorm()`.
@@ -1293,6 +1296,21 @@ pub async fn run_loop(
         {
             follow_up = verifier.check_before_finalize();
         }
+        // F6 tier 3: if a critic is configured and the run did real work,
+        // run one bounded LLM critique before finalizing. `critic_done`
+        // is set unconditionally so it fires at most once per run
+        // regardless of the verdict.
+        if follow_up.is_empty()
+            && !critic_done
+            && config.critic_fn.is_some()
+            && run_made_tool_calls(&new_messages)
+        {
+            critic_done = true;
+            if let Some(critic) = &config.critic_fn {
+                let transcript = build_critic_transcript(&new_messages);
+                follow_up = super::critic::run_critic(critic, &transcript).await;
+            }
+        }
         if !follow_up.is_empty() {
             pending_messages = follow_up;
             continue 'outer;
@@ -1325,6 +1343,73 @@ pub async fn run_loop(
 /// inline so `run.rs` doesn't reach into `tools` for tiny helpers.
 fn extract_tool_calls_from(msg: &AssistantMessage) -> Vec<super::tools::ToolCall> {
     super::tools::extract_tool_calls(msg)
+}
+
+/// Did this run actually use tools? Gates the F6 critic so pure Q&A turns
+/// (no tool calls) never trigger an LLM critique.
+fn run_made_tool_calls(new_messages: &[LoopMessage]) -> bool {
+    new_messages
+        .iter()
+        .any(|m| matches!(m, LoopMessage::ToolResult(_)))
+}
+
+/// Build a compact transcript of one run for the F6 critic: the user
+/// request, the assistant's text, the tool calls it made, and a short
+/// slice of each tool result. Capped so a giant run can't blow up the
+/// critic prompt.
+fn build_critic_transcript(new_messages: &[LoopMessage]) -> String {
+    const MAX_CHARS: usize = 8000;
+    const PER_RESULT_CHARS: usize = 400;
+    let mut s = String::new();
+    for m in new_messages {
+        match m {
+            LoopMessage::User(u) => {
+                s.push_str("USER: ");
+                s.push_str(u.content.trim());
+                s.push('\n');
+            }
+            LoopMessage::Assistant(a) => {
+                for block in &a.content {
+                    match block {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            s.push_str("ASSISTANT: ");
+                            s.push_str(text.trim());
+                            s.push('\n');
+                        }
+                        ContentBlock::ToolCall {
+                            name, arguments, ..
+                        } => {
+                            let args = serde_json::to_string(arguments).unwrap_or_default();
+                            let args: String = args.chars().take(200).collect();
+                            s.push_str(&format!("ASSISTANT called {name}({args})\n"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            LoopMessage::ToolResult(t) => {
+                let text: String = t
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let text: String = text.chars().take(PER_RESULT_CHARS).collect();
+                let tag = if t.is_error { "ERROR" } else { "result" };
+                s.push_str(&format!(
+                    "TOOL {} [{}]: {}\n",
+                    t.tool_name,
+                    tag,
+                    text.trim()
+                ));
+            }
+            _ => {}
+        }
+    }
+    s.chars().take(MAX_CHARS).collect()
 }
 
 /// Convert a `LoopMessage` to the placeholder `Value` shape used

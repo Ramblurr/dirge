@@ -66,6 +66,7 @@ Accepted top-level keys:
 | `escalation_provider`     | string  | Provider alias for the one-shot retry after repair-exhaustion / pre-write syntax failure. Falls back to `provider` (no-op when equal). |
 | `summarization_provider`  | string  | Provider alias for context compaction. Falls back to `provider`. |
 | `subagent_provider`       | string  | Provider alias for `task` tool subagents. Falls back to `provider`. |
+| `critic_provider`         | string  | Provider alias for the F6 in-loop critic (tier 3). When set, the verifier escalates to a bounded LLM critique at finalization on substantive runs (one call per run). **No fallback** — unset means no critic and no cost. |
 | `max_tokens`              | integer | Maximum response tokens. Default: `8192`.                                                                                                                                   |
 | `max_agent_turns`         | integer | Maximum agent turns per response. Default: `100`.                                                                                                                           |
 | `temperature`             | number  | Model sampling temperature in `0.0`–`2.0`. `--temperature` CLI flag overrides this. Values outside the range are clamped with a stderr warning.                            |
@@ -148,6 +149,7 @@ role-assignment keys.
 | `escalation_provider` | One-shot retry after repair-exhaustion / pre-write syntax failure | `provider` (no-op when equal) |
 | `summarization_provider` | Context compaction | `provider` |
 | `subagent_provider` | `task` tool subagents | `provider` |
+| `critic_provider` | F6 in-loop critic (tier 3) | none (off) |
 
 When a role's provider equals `provider` (either explicitly or by fallback), no
 duplicate client is constructed and the feature has zero overhead — escalation

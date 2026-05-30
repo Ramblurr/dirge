@@ -84,6 +84,7 @@ fn build_config() -> LoopConfig {
         escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
         file_touch_tracker: None,
         verifier: None,
+        critic_fn: None,
         max_turns: None,
     }
 }
@@ -929,6 +930,119 @@ async fn verifier_gate_nudges_on_failing_build_after_edit() {
     assert!(
         nudge.contains("failed") && nudge.contains("red build"),
         "the nudge should be the red-build fix-it variant, got: {nudge}",
+    );
+}
+
+/// F6 tier 3 — when a critic is configured and the run used tools, a
+/// bounded LLM critique runs at finalization. An "INCOMPLETE" verdict
+/// injects the issues and re-enters the loop exactly once.
+#[tokio::test]
+async fn critic_reenters_loop_on_incomplete_verdict() {
+    use std::sync::Arc;
+    let tool = Arc::new(RecordingTool::new("edit"));
+    let mut ctx = empty_context();
+    ctx.tools.push(tool);
+
+    let mut cfg = build_config();
+    cfg.tool_execution = ToolExecutionMode::Sequential;
+    cfg.critic_fn = Some(Arc::new(|_prompt| {
+        Box::pin(async { Ok("VERDICT: INCOMPLETE\n- you never ran the tests".to_string()) })
+    }));
+
+    let stream = scripted_stream(vec![
+        vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: tool_use_response("c1", "edit", serde_json::json!({"path": "src/x.rs"})),
+            usage: None,
+        }],
+        vec![StreamEvent::Done {
+            reason: StopReason::Stop,
+            message: text_response("done"),
+            usage: None,
+        }],
+        vec![StreamEvent::Done {
+            reason: StopReason::Stop,
+            message: text_response("now really done"),
+            usage: None,
+        }],
+    ]);
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(256);
+    let messages = run_agent_loop(
+        vec![user("change x")],
+        ctx,
+        cfg,
+        AbortSignal::new(),
+        &tx,
+        &stream,
+        None,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    let critic_msgs: Vec<&String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            LoopMessage::User(u) if u.content.contains("[critic]") => Some(&u.content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(critic_msgs.len(), 1, "critic should fire exactly once");
+    assert!(
+        critic_msgs[0].contains("never ran the tests"),
+        "critique issues should be injected: {}",
+        critic_msgs[0]
+    );
+}
+
+/// A "COMPLETE" verdict stays silent — the run finalizes without the
+/// critic injecting anything.
+#[tokio::test]
+async fn critic_silent_on_complete_verdict() {
+    use std::sync::Arc;
+    let tool = Arc::new(RecordingTool::new("edit"));
+    let mut ctx = empty_context();
+    ctx.tools.push(tool);
+
+    let mut cfg = build_config();
+    cfg.tool_execution = ToolExecutionMode::Sequential;
+    cfg.critic_fn = Some(Arc::new(|_p| {
+        Box::pin(async { Ok("VERDICT: COMPLETE".to_string()) })
+    }));
+
+    let stream = scripted_stream(vec![
+        vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: tool_use_response("c1", "edit", serde_json::json!({"path": "src/x.rs"})),
+            usage: None,
+        }],
+        vec![StreamEvent::Done {
+            reason: StopReason::Stop,
+            message: text_response("done"),
+            usage: None,
+        }],
+    ]);
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(256);
+    let messages = run_agent_loop(
+        vec![user("change x")],
+        ctx,
+        cfg,
+        AbortSignal::new(),
+        &tx,
+        &stream,
+        None,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, LoopMessage::User(u) if u.content.contains("[critic]"))),
+        "a COMPLETE verdict should not inject a critic message",
     );
 }
 

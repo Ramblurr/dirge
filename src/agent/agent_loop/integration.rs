@@ -393,6 +393,10 @@ pub struct LoopSpawnConfig {
     /// feature off (byte-identical to today).
     pub verifier: Option<std::sync::Arc<crate::agent::agent_loop::verifier::VerifierGate>>,
 
+    /// F6 tier 3: optional bounded LLM critic, threaded into
+    /// `LoopConfig.critic_fn`. `None` = off (default).
+    pub critic_fn: Option<crate::agent::agent_loop::critic::CriticFn>,
+
     /// dirge-nqr: hard cap on assistant turns within a single run.
     /// `None` = unlimited. Forwarded to `LoopConfig.max_turns`.
     pub max_turns: Option<usize>,
@@ -444,6 +448,7 @@ impl LoopSpawnConfig {
             escalation_max_per_session: None,
             file_touch_tracker: None,
             verifier: None,
+            critic_fn: None,
             max_turns: None,
             bg_store: None,
             memory_provider: None,
@@ -516,6 +521,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         )),
         file_touch_tracker: cfg.file_touch_tracker.clone(),
         verifier: cfg.verifier.clone(),
+        critic_fn: cfg.critic_fn.clone(),
         max_turns: cfg.max_turns,
     };
 

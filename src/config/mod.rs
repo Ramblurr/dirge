@@ -100,6 +100,7 @@ pub enum ConfigRole {
     Escalation,
     Summarization,
     Subagent,
+    Critic,
 }
 
 /// One VSCode-style key binding: bind a key chord to a named command.
@@ -265,6 +266,10 @@ pub struct Config {
     pub summarization_provider: Option<String>,
     /// Optional provider for sub-agents (`task` tool).
     pub subagent_provider: Option<String>,
+    /// Optional provider for the F6 in-loop critic (tier 3). When set,
+    /// the verifier escalates to a bounded LLM critique at finalization
+    /// on substantive runs. Unset (default) = no critic, no cost.
+    pub critic_provider: Option<String>,
     /// UI color theme. Known built-in values: `phosphor` (default,
     /// 80s CRT green) and `plain` (white/cyan).
     ///
@@ -352,6 +357,9 @@ impl Config {
                 .subagent_provider
                 .as_deref()
                 .or(self.provider.as_deref()),
+            // No fallback to the default provider: the critic is opt-in,
+            // so it resolves only when `critic_provider` is explicitly set.
+            ConfigRole::Critic => self.critic_provider.as_deref(),
         };
         let alias = role_name?.to_string();
         if let Some(map) = providers

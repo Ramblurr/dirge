@@ -462,6 +462,7 @@ mod tests {
             escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
             file_touch_tracker: None,
             verifier: None,
+            critic_fn: None,
             max_turns: None,
         }
     }
@@ -775,6 +776,7 @@ mod tests {
             escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
             file_touch_tracker: None,
             verifier: None,
+            critic_fn: None,
             max_turns: None,
         };
         let signal = AbortSignal::new();
