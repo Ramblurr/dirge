@@ -1355,6 +1355,33 @@ mod reminder_tests {
         );
     }
 
+    /// F5 — the base preamble carries the ask-vs-proceed calibration so
+    /// the agent decides by cost/recoverability rather than reflex, and
+    /// proceeds with a stated assumption when a question isn't warranted.
+    #[test]
+    fn base_preamble_includes_ask_calibration() {
+        let p = assemble_base_preamble();
+        let lower = p.to_lowercase();
+        assert!(
+            p.contains("# Clarifying vs. proceeding"),
+            "missing the Clarifying-vs-proceeding section"
+        );
+        // Calibration signals.
+        assert!(
+            lower.contains("hard to reverse") || lower.contains("costly"),
+            "missing the cost/recoverability signal"
+        );
+        assert!(
+            lower.contains("infer"),
+            "missing the inferable-from-context signal"
+        );
+        // The proceed-and-state-the-assumption path.
+        assert!(
+            lower.contains("assumption"),
+            "missing the state-your-assumption path"
+        );
+    }
+
     /// dirge-fmau — the memory-preamble injection path goes through
     /// the `MemoryProvider` trait, so a non-default backend's prompt
     /// block lands in the preamble too. Recording provider verifies
