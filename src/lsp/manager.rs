@@ -504,6 +504,29 @@ impl LspManager {
         }
     }
 
+    /// Diagnostics for a single file, merged across attached clients.
+    /// Returns `None` when no client tracks the file (so the caller can
+    /// distinguish "no diagnostics" from "untracked" and fall back to a
+    /// canonical-path lookup). Avoids cloning the whole project diagnostic
+    /// map the way [`all_diagnostics`](Self::all_diagnostics) does — O(one
+    /// file) instead of O(all files).
+    pub fn diagnostics_for(&self, file: &Path) -> Option<Vec<Diagnostic>> {
+        let entries: Vec<_> = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.clients.values().cloned().collect()
+        };
+        let mut merged: Vec<Diagnostic> = Vec::new();
+        let mut tracked = false;
+        for entry in entries {
+            let diags = entry.client.diagnostics_for(file);
+            if !diags.is_empty() {
+                tracked = true;
+                merged.extend(diags);
+            }
+        }
+        tracked.then_some(merged)
+    }
+
     /// Aggregated diagnostics across all attached clients. Same key/dedupe
     /// semantics as [`LspClient::all_diagnostics`].
     pub fn all_diagnostics(&self) -> HashMap<PathBuf, Vec<Diagnostic>> {

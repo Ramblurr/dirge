@@ -12,7 +12,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::lsp::manager::{LspManager, TouchMode};
+use crate::lsp::manager::LspManager;
+use crate::lsp::query::{self, Operation};
 
 /// The JSON request shape built by `harness/__lsp` in the plugin worker.
 #[derive(serde::Deserialize)]
@@ -37,41 +38,32 @@ pub async fn run_query(manager: &LspManager, request_json: &str) -> String {
     };
     let path = Path::new(&req.file);
 
-    // Position/symbol ops need the file in sync with the server first
-    // (same as the lsp tool; we don't wait for diagnostics).
-    if !matches!(req.op.as_str(), "diagnostics") {
-        manager.touch_file(path, TouchMode::Notify).await;
+    // `diagnostics` reads already-published state — it isn't a positional
+    // query, so it's handled here rather than through the shared dispatch.
+    if req.op == "diagnostics" {
+        // The manager keys diagnostics by the path it opened the file
+        // under; try the literal path, then its canonical form.
+        let diags = manager
+            .diagnostics_for(path)
+            .or_else(|| {
+                path.canonicalize()
+                    .ok()
+                    .and_then(|c| manager.diagnostics_for(&c))
+            })
+            .unwrap_or_default();
+        return json!(diags).to_string();
     }
 
-    // 1-based editor coordinates → 0-based LSP wire format.
-    let line = req.line.saturating_sub(1);
-    let ch = req.char.saturating_sub(1);
-
-    let result: Value = match req.op.as_str() {
-        "definition" => json!(manager.definition(path, line, ch).await),
-        "references" => json!(manager.references(path, line, ch).await),
-        "hover" => json!(manager.hover(path, line, ch).await),
-        "implementation" => json!(manager.implementation(path, line, ch).await),
-        "documentSymbol" => json!(manager.document_symbol(path).await),
-        "workspaceSymbol" => json!(manager.workspace_symbol(path, &req.query).await),
-        "prepareCallHierarchy" => json!(manager.prepare_call_hierarchy(path, line, ch).await),
-        "incomingCalls" => json!(manager.incoming_calls(path, line, ch).await),
-        "outgoingCalls" => json!(manager.outgoing_calls(path, line, ch).await),
-        "diagnostics" => {
-            // Current published diagnostics for the file. The manager keys
-            // by the path it opened the file under; try the literal path
-            // then its canonical form.
-            let all = manager.all_diagnostics();
-            let diags = all
-                .get(path)
-                .or_else(|| path.canonicalize().ok().and_then(|c| all.get(&c)))
-                .cloned()
-                .unwrap_or_default();
-            json!(diags)
+    // Everything else goes through the shared op dispatch (coordinate
+    // conversion + touch_file + op→method match), which the lsp tool uses
+    // too — so the op set and aliases can't drift between the two.
+    match Operation::parse(&req.op) {
+        Some(op) => {
+            let result: Value = query::run(manager, op, path, req.line, req.char, &req.query).await;
+            result.to_string()
         }
-        other => return json!({ "error": format!("unknown lsp op: {other}") }).to_string(),
-    };
-    result.to_string()
+        None => json!({ "error": format!("unknown lsp op: {}", req.op) }).to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +117,21 @@ mod tests {
             Some("unknown lsp op: frobnicate"),
             "got {out}"
         );
+    }
+
+    #[tokio::test]
+    async fn accepts_operation_aliases_shared_with_the_lsp_tool() {
+        // `goToDefinition` is the alias the lsp tool accepts for
+        // `definition`. The harness must resolve it too (shared dispatch),
+        // not reject it as an unknown op. No server matches the temp file,
+        // so the result is a null/empty value — the point is the absence of
+        // an "unknown lsp op" error.
+        let req = json!({ "op": "goToDefinition", "file": "/tmp/none.xyz", "line": 1, "char": 1 })
+            .to_string();
+        let out = run_query(&test_manager(), &req).await;
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(!err.contains("unknown"), "alias should resolve, got {out}");
     }
 
     #[tokio::test]

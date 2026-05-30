@@ -8,6 +8,7 @@ pub mod init;
 pub mod jsonrpc;
 pub mod language;
 pub mod manager;
+pub mod query;
 pub mod rpc;
 pub mod server;
 pub mod spawn;

@@ -585,10 +585,9 @@ const HARNESS_DIALOG_INIT: &str = r#"
 "#;
 
 /// Janet wrappers for the LSP bridge. Installed after the C function is
-/// (conditionally) registered. Every wrapper guards on the presence of
-/// `harness/__lsp` so that on a build without the `lsp` feature the
-/// functions exist but return `nil` instead of erroring — plugins can
-/// feature-detect with `(harness/lsp? )`.
+/// (conditionally) registered. Every wrapper guards on `(harness/lsp?)`
+/// so that on a build without the `lsp` feature — or when LSP is disabled
+/// at runtime — the functions exist but return `nil` instead of erroring.
 ///
 /// `harness/lsp` returns a JSON string (the LSP result) or nil. The
 /// typed wrappers fill in the operation name. Positions are 1-based
@@ -596,9 +595,15 @@ const HARNESS_DIALOG_INIT: &str = r#"
 #[cfg(feature = "plugin")]
 const HARNESS_LSP_INIT: &str = r#"
 (defn harness/lsp?
-  "True when the LSP bridge is available (the `lsp` feature is built in)."
+  "True when the LSP bridge is available AND wired to a live language-
+   server manager. False on builds without the `lsp` feature, and also
+   when LSP is disabled at runtime — so a true result guarantees that a
+   following `harness/lsp` call will actually reach a server (returning a
+   JSON string), never a silent nil."
   []
-  (truthy? (get (curenv) 'harness/__lsp)))
+  (if-let [entry (get (curenv) 'harness/__lsp-live)]
+    (truthy? ((entry :value)))
+    false))
 
 (defn harness/lsp
   "Query the language servers. `op` is one of definition, references,
@@ -607,11 +612,19 @@ const HARNESS_LSP_INIT: &str = r#"
    the result, or nil when LSP is unavailable. line/char are 1-based;
    query is the search string for workspaceSymbol."
   [op file &opt line char query]
-  (if (harness/lsp?)
-    (harness/__lsp (string op) (string file)
-                   (if line line 1) (if char char 1)
-                   (if query (string query) ""))
-    nil))
+  (let [l (if line line 1)
+        c (if char char 1)]
+    # Validate before anything else — 1-based coordinates must be
+    # positive integers. A bad value is a plugin bug; surface it loudly
+    # rather than silently clamping it to the first line/column.
+    (assert (and (number? l) (>= l 1))
+            "harness/lsp: line must be a positive (1-based) integer")
+    (assert (and (number? c) (>= c 1))
+            "harness/lsp: char must be a positive (1-based) integer")
+    (if (harness/lsp?)
+      (harness/__lsp (string op) (string file) l c
+                     (if query (string query) ""))
+      nil)))
 
 (defn harness/lsp-definition [file line char] (harness/lsp "definition" file line char))
 (defn harness/lsp-references [file line char] (harness/lsp "references" file line char))
@@ -917,7 +930,10 @@ fn worker_loop(
         // in. The Janet `harness/lsp` wrappers (HARNESS_LSP_INIT) guard on
         // this symbol's existence and degrade to nil when it's absent.
         #[cfg(feature = "lsp")]
-        env.add_c_fn(CFunOptions::new(c"__lsp", janet_lsp_cfn).namespace(c"harness"));
+        {
+            env.add_c_fn(CFunOptions::new(c"__lsp", janet_lsp_cfn).namespace(c"harness"));
+            env.add_c_fn(CFunOptions::new(c"__lsp-live", janet_lsp_live_cfn).namespace(c"harness"));
+        }
     }
 
     if let Err(e) = client.run(HARNESS_INIT) {
@@ -1251,10 +1267,13 @@ unsafe fn read_uint_arg(argv: *mut janetrs::lowlevel::Janet, i: i32) -> Option<u
         return None;
     }
     let n = unsafe { janet_unwrap_number(v) };
+    // Reject non-finite / negative rather than coercing to 0 — a bogus
+    // coordinate should not silently become line 0. The Janet `harness/lsp`
+    // wrapper validates positivity before we get here; this is the backstop.
     if n.is_finite() && n >= 0.0 {
         Some(n as u32)
     } else {
-        Some(0)
+        None
     }
 }
 
@@ -1285,6 +1304,28 @@ unsafe extern "C-unwind" fn janet_lsp_cfn(
             unsafe { janet_wrap_nil() }
         }
     }
+}
+
+/// C-function backing `harness/__lsp-live`. Returns `true` only when the
+/// bridge is wired to a live request receiver — i.e. the host spawned the
+/// LSP responder against a real `LspManager`. When LSP is disabled at
+/// runtime (no manager) the receiver is dropped, so `is_closed()` is true
+/// and we report `false`. This makes `(harness/lsp?)` reflect *runtime*
+/// availability rather than mere compile-time presence, so a plugin that
+/// feature-detects won't then try to decode a nil result.
+#[cfg(all(feature = "plugin", feature = "lsp"))]
+unsafe extern "C-unwind" fn janet_lsp_live_cfn(
+    _argc: i32,
+    _argv: *mut janetrs::lowlevel::Janet,
+) -> janetrs::lowlevel::Janet {
+    use janetrs::lowlevel::*;
+    let live = LSP_TX.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|tx| !tx.is_closed())
+            .unwrap_or(false)
+    });
+    unsafe { janet_wrap_boolean(if live { 1 } else { 0 }) }
 }
 
 #[cfg(all(feature = "plugin", feature = "lsp"))]
@@ -1324,8 +1365,26 @@ unsafe fn lsp_body(argc: i32, argv: *mut janetrs::lowlevel::Janet) -> janetrs::l
     }
 }
 
+/// Upper bound on a single `harness/lsp` query. Unlike dialogs (bounded by
+/// a human), an LSP query can hang against a slow or wedged language
+/// server; without a cap it would freeze the Janet worker thread — and
+/// thus every plugin hook — indefinitely. After this elapses we give up
+/// and return nil to the plugin.
+#[cfg(all(feature = "plugin", feature = "lsp"))]
+const LSP_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Whether `send_lsp` should stop waiting: either the worker is shutting
+/// down, or the query has exceeded [`LSP_QUERY_TIMEOUT`]. Split out so the
+/// give-up policy is unit-testable without a real hung server.
+#[cfg(all(feature = "plugin", feature = "lsp"))]
+fn lsp_should_abort(elapsed: Duration, shutting_down: bool) -> bool {
+    shutting_down || elapsed >= LSP_QUERY_TIMEOUT
+}
+
 /// Send an LSP request and block on the JSON reply, polling the shutdown
-/// flag so `Worker::Drop` can unblock us (mirrors `send_dialog`).
+/// flag so `Worker::Drop` can unblock us (mirrors `send_dialog`). Unlike
+/// dialogs, also bounded by [`LSP_QUERY_TIMEOUT`] so a wedged language
+/// server can't pin the worker thread forever.
 #[cfg(all(feature = "plugin", feature = "lsp"))]
 fn send_lsp(tx: &tmpsc::UnboundedSender<LspRequest>, request: String) -> Option<String> {
     let (reply_tx, reply_rx) = mpsc::channel::<String>();
@@ -1334,6 +1393,7 @@ fn send_lsp(tx: &tmpsc::UnboundedSender<LspRequest>, request: String) -> Option<
         reply: reply_tx,
     })
     .ok()?;
+    let start = std::time::Instant::now();
     loop {
         match reply_rx.recv_timeout(DIALOG_POLL) {
             Ok(r) => return Some(r),
@@ -1345,7 +1405,14 @@ fn send_lsp(tx: &tmpsc::UnboundedSender<LspRequest>, request: String) -> Option<
                         .map(|f| f.load(Ordering::SeqCst))
                         .unwrap_or(false)
                 });
-                if shutting_down {
+                if lsp_should_abort(start.elapsed(), shutting_down) {
+                    if !shutting_down {
+                        tracing::warn!(
+                            target: "dirge::plugin",
+                            timeout_secs = LSP_QUERY_TIMEOUT.as_secs(),
+                            "harness/lsp query timed out — returning nil",
+                        );
+                    }
                     return None;
                 }
             }
@@ -1385,9 +1452,10 @@ mod tests {
     #[cfg(feature = "lsp")]
     #[test]
     fn lsp_harness_is_available_and_wrappers_are_defined() {
+        // Hold the receiver alive so the bridge counts as live.
         let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
-        // With the lsp feature the `__lsp` C-function is registered, so
-        // the predicate reports the bridge as available.
+        // With the lsp feature the `__lsp` C-function is registered and a
+        // live receiver is attached, so the predicate reports available.
         assert_eq!(worker.eval("(harness/lsp?)").unwrap(), "true");
         // The core fn and every typed wrapper are installed.
         for sym in [
@@ -1407,6 +1475,59 @@ mod tests {
                 .unwrap();
             assert_eq!(r, "true", "{sym} should be defined");
         }
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn lsp_predicate_is_false_when_bridge_has_no_live_receiver() {
+        // Simulate the runtime-disabled case (lsp_manager None → no
+        // responder spawned → the request receiver is dropped). The
+        // predicate must reflect that the bridge is NOT live, so plugins
+        // that feature-detect don't then crash decoding a nil result.
+        let (mut worker, _dialog_rx, lsp_rx) = Worker::try_spawn().unwrap();
+        drop(lsp_rx);
+        assert_eq!(worker.eval("(harness/lsp?)").unwrap(), "false");
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn lsp_query_rejects_nonpositive_coordinates() {
+        // Coordinates are 1-based; 0, negative, or non-numbers are plugin
+        // bugs and must surface as a Janet error rather than being silently
+        // clamped to line 0. Drop the receiver so the validation (which runs
+        // before the bridge call) is what fails — never a blocked query.
+        let (mut worker, _dialog_rx, lsp_rx) = Worker::try_spawn().unwrap();
+        drop(lsp_rx);
+        for code in [
+            r#"(harness/lsp "definition" "f.rs" 0 1)"#,
+            r#"(harness/lsp "definition" "f.rs" 1 0)"#,
+            r#"(harness/lsp "definition" "f.rs" -3 1)"#,
+        ] {
+            assert!(worker.eval(code).is_err(), "expected error for {code}");
+        }
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn lsp_abort_decision_covers_shutdown_and_timeout() {
+        // Give up on shutdown immediately, or once the query timeout elapses.
+        assert!(!lsp_should_abort(Duration::from_secs(0), false));
+        assert!(lsp_should_abort(Duration::from_secs(0), true));
+        assert!(lsp_should_abort(LSP_QUERY_TIMEOUT, false));
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn lsp_query_returns_nil_when_bridge_has_no_live_receiver() {
+        // Even if a plugin ignores the predicate, a query against a
+        // dropped receiver must return nil immediately — never block the
+        // worker thread (the load-time deadlock guard).
+        let (mut worker, _dialog_rx, lsp_rx) = Worker::try_spawn().unwrap();
+        drop(lsp_rx);
+        let r = worker
+            .eval(r#"(harness/lsp "definition" "f.rs" 1 1)"#)
+            .unwrap();
+        assert_eq!(r, "nil");
     }
 
     #[test]

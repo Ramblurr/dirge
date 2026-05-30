@@ -13,7 +13,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agent::tools::{AskSender, PermCheck, ToolError};
-use crate::lsp::manager::{LspManager, TouchMode};
+use crate::lsp::manager::LspManager;
+use crate::lsp::query::{self, Operation};
 
 #[allow(dead_code)]
 const DESCRIPTION: &str = "Interact with Language Server Protocol (LSP) servers for code intelligence.\n\
@@ -73,57 +74,6 @@ pub struct LspArgs {
     pub character: Option<u32>,
     #[serde(default)]
     pub query: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Operation {
-    Definition,
-    References,
-    Hover,
-    DocumentSymbol,
-    WorkspaceSymbol,
-    Implementation,
-    PrepareCallHierarchy,
-    IncomingCalls,
-    OutgoingCalls,
-}
-
-impl Operation {
-    fn parse(s: &str) -> Option<Operation> {
-        match s {
-            "definition" | "goToDefinition" => Some(Operation::Definition),
-            "references" | "findReferences" => Some(Operation::References),
-            "hover" => Some(Operation::Hover),
-            "documentSymbol" => Some(Operation::DocumentSymbol),
-            "workspaceSymbol" => Some(Operation::WorkspaceSymbol),
-            "implementation" | "goToImplementation" => Some(Operation::Implementation),
-            "prepareCallHierarchy" => Some(Operation::PrepareCallHierarchy),
-            "incomingCalls" => Some(Operation::IncomingCalls),
-            "outgoingCalls" => Some(Operation::OutgoingCalls),
-            _ => None,
-        }
-    }
-
-    fn needs_position(self) -> bool {
-        matches!(
-            self,
-            Operation::Definition
-                | Operation::References
-                | Operation::Hover
-                | Operation::Implementation
-                | Operation::PrepareCallHierarchy
-                | Operation::IncomingCalls
-                | Operation::OutgoingCalls
-        )
-    }
-
-    /// All operations need a `file_path`, including `workspaceSymbol`. The
-    /// file isn't sent in the workspace/symbol RPC; it's used to pick which
-    /// server's workspace to search (matches opencode behaviour). Without
-    /// one, no LSP attaches and the request silently returns nothing.
-    fn needs_file(self) -> bool {
-        true
-    }
 }
 
 impl Tool for LspTool {
@@ -188,7 +138,11 @@ impl Tool for LspTool {
             ))
         })?;
 
-        if op.needs_file() && args.file_path.is_none() {
+        // Every operation needs a file_path — even workspaceSymbol, where
+        // the file isn't sent in the RPC but picks which server's
+        // workspace to search. Without one, no LSP attaches and the
+        // request silently returns nothing.
+        if args.file_path.is_none() {
             return Err(ToolError::Msg(format!(
                 "operation {:?} requires file_path",
                 args.operation
@@ -237,86 +191,22 @@ impl Tool for LspTool {
             return Err(ToolError::Msg(format!("file not found: {}", p.display())));
         }
 
-        // For position-based ops, the file must be in sync with the server.
-        // We do not wait for diagnostics — that's the edit tool's concern.
-        if op.needs_file()
-            && let Some(p) = &abs_path
-        {
-            self.manager.touch_file(p, TouchMode::Notify).await;
-        }
-
-        // Convert 1-based editor coordinates to 0-based LSP wire format.
-        let line = args.line.map(|l| l.saturating_sub(1));
-        let character = args.character.map(|c| c.saturating_sub(1));
-
-        let result: Value = match op {
-            Operation::Definition => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .definition(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-            Operation::References => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .references(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-            Operation::Hover => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .hover(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-            Operation::DocumentSymbol => {
-                let p = abs_path.as_ref().unwrap();
-                json!(self.manager.document_symbol(p).await)
-            }
-            Operation::WorkspaceSymbol => {
-                // file_path is required for every operation, so unwrap is safe.
-                let anchor = abs_path.as_ref().unwrap();
-                let q = args.query.as_deref().unwrap_or("");
-                json!(self.manager.workspace_symbol(anchor, q).await)
-            }
-            Operation::Implementation => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .implementation(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-            Operation::PrepareCallHierarchy => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .prepare_call_hierarchy(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-            Operation::IncomingCalls => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .incoming_calls(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-            Operation::OutgoingCalls => {
-                let p = abs_path.as_ref().unwrap();
-                json!(
-                    self.manager
-                        .outgoing_calls(p, line.unwrap(), character.unwrap())
-                        .await
-                )
-            }
-        };
+        // Shared op dispatch: syncs the file with the server, converts the
+        // 1-based coordinates, and runs the op→method match. The harness
+        // (`harness/lsp`) uses the same path so the two can't drift. The
+        // `unwrap_or(1)` is harmless for the symbol ops that ignore the
+        // position; the position ops were already validated above. file_path
+        // is required for every op, so the unwrap is safe.
+        let p = abs_path.as_ref().unwrap();
+        let result: Value = query::run(
+            &self.manager,
+            op,
+            p,
+            args.line.unwrap_or(1),
+            args.character.unwrap_or(1),
+            args.query.as_deref().unwrap_or(""),
+        )
+        .await;
 
         // Empty result is more agent-readable as "(no results)".
         let is_empty = match &result {

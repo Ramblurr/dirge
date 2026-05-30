@@ -227,19 +227,28 @@ hook or command.
 
 Query the running language servers from a plugin. Like dialogs these
 block the Janet worker until the async query returns, so they are safe to
-call from any hook or command. They are only available when dirge is
-built with the `lsp` feature; feature-detect with `(harness/lsp?)` and
-fall back gracefully — every function returns `nil` when LSP is off.
+call from any hook or command.
+
+Feature-detect with `(harness/lsp?)` and fall back gracefully. The
+predicate is **true only when LSP is both compiled in and active at
+runtime** — so when it returns true, a following `harness/lsp` call is
+guaranteed to reach a server (returning a JSON string), never a silent
+`nil`. When LSP is unavailable (not built, or disabled in config) the
+predicate is false and every query returns `nil`.
 
 Positions are **1-based** line/column (matching the `lsp` tool and most
-editors). The result is a **JSON string** of the underlying LSP response
-(parse with `(json/decode result)`); errors come back as
-`{"error": "..."}` rather than raising.
+editors); passing `0`, a negative, or a non-number raises a Janet error
+(it's a plugin bug, not a no-op). The result is a **JSON string** of the
+underlying LSP response (parse with `(json/decode result)`); bad-request
+and unknown-op errors come back as `{"error": "..."}` rather than raising.
+
+A query is bounded by a 30-second timeout: if a language server is wedged
+or unusually slow, the call returns `nil` instead of freezing the plugin.
 
 | Function | Signature | Effect |
 |----------|-----------|--------|
-| `harness/lsp?` | `()` | `true` when the LSP bridge is built in, else `false` |
-| `harness/lsp` | `(op file &opt line char query)` | Generic query. `op` ∈ `"definition"`, `"references"`, `"hover"`, `"documentSymbol"`, `"workspaceSymbol"`, `"implementation"`, `"incomingCalls"`, `"outgoingCalls"`, `"diagnostics"`. Returns a JSON string or `nil` |
+| `harness/lsp?` | `()` | `true` when the LSP bridge is built in **and** wired to a live server manager, else `false` |
+| `harness/lsp` | `(op file &opt line char query)` | Generic query. `op` ∈ `"definition"`, `"references"`, `"hover"`, `"documentSymbol"`, `"workspaceSymbol"`, `"implementation"`, `"incomingCalls"`, `"outgoingCalls"`, `"diagnostics"` (camelCase aliases `goToDefinition`/`findReferences`/`goToImplementation` also accepted). Returns a JSON string or `nil` |
 | `harness/lsp-definition` | `(file line char)` | Go-to-definition at the position |
 | `harness/lsp-references` | `(file line char)` | All references to the symbol at the position |
 | `harness/lsp-hover` | `(file line char)` | Hover (type/doc) for the symbol |
@@ -330,6 +339,14 @@ Janet runs on a single dedicated worker thread.
   cancels, an in-flight handler runs to completion in the background;
   its result is discarded but it holds the plugin lock until it
   returns. Keep handlers bounded.
+- The blocking bridges (`harness/confirm`, `harness/select`,
+  `harness/lsp`) are answered by the host's async runtime, which only
+  makes progress once startup finishes. Call them from hooks or
+  commands, **not** at plugin load time (top level): a load-time call
+  can't be serviced while the loader is blocked, so it falls back
+  (LSP times out to `nil` after 30s; dialogs in a headless run return
+  the auto-confirm default). Hooks and commands run after startup, so
+  there they work normally.
 - No hot reload. Restart dirge to pick up plugin changes.
 
 ### Common gotchas

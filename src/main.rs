@@ -39,7 +39,7 @@ use crate::ui::ansi::{self, StripPolicy};
 
 /// Per-session channels and shared state, threaded through the agent build
 /// chain in place of a ten-position tuple. Cloneable senders + shared state
-/// (`bg_store`, `lsp_manager`, `permission`) survive being moved through
+/// (`bg_store`, `permission`) survive being moved through
 /// `build_agent`; the receivers (`ask_rx`, `question_rx`, `plan_rx`,
 /// `lifecycle_rx`) are unique-owner and end up consumed by the UI loop.
 #[derive(Default)]
@@ -53,8 +53,6 @@ struct Channels {
     plan_rx: Option<PlanSwitchReceiver>,
     bg_store: Option<BackgroundStore>,
     lifecycle_rx: Option<LifecycleReceiver>,
-    #[cfg(feature = "lsp")]
-    lsp_manager: Option<std::sync::Arc<LspManager>>,
 }
 
 /// Resolve the session id passed to `build_agent` for the
@@ -173,27 +171,6 @@ fn build_channels(cli: &cli::Cli, cfg: &config::Config) -> Channels {
     let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
     let bg_store = BackgroundStore::with_ui_sink(lifecycle_tx);
 
-    #[cfg(feature = "lsp")]
-    let lsp_manager = if cli.resolve_lsp_enabled(cfg) {
-        let worktree = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let commands = compile_lsp_commands(cfg);
-        let spawner = std::sync::Arc::new(ProcessSpawner::new(commands));
-        // Apply per-server config overrides (extensions, disabled).
-        // Without this, user config like
-        //   "lsp": { "rust": { "extensions": ["rs", "rlib"] } }
-        // was silently ignored — the manager always used the
-        // builtin list.
-        let mut servers = crate::lsp::server::builtin_servers();
-        if let Some(lsp_cfg) = &cfg.lsp {
-            crate::lsp::server::apply_extension_overrides(&mut servers, lsp_cfg.server_overrides());
-        }
-        Some(std::sync::Arc::new(LspManager::with_servers(
-            spawner, worktree, servers,
-        )))
-    } else {
-        None
-    };
-
     Channels {
         permission: Some(perm),
         ask_tx: Some(ask_tx),
@@ -204,9 +181,34 @@ fn build_channels(cli: &cli::Cli, cfg: &config::Config) -> Channels {
         plan_rx: Some(plan_rx),
         bg_store: Some(bg_store),
         lifecycle_rx: Some(lifecycle_rx),
-        #[cfg(feature = "lsp")]
-        lsp_manager,
     }
+}
+
+/// Construct the `LspManager` (if LSP is enabled). Built standalone —
+/// rather than inside `build_channels` — so the host can wire the plugin
+/// LSP responder to it BEFORE plugins are loaded. A plugin that queries
+/// `harness/lsp` at load time would otherwise deadlock against a
+/// not-yet-spawned drainer. Returns `None` when tools are disabled
+/// (`--no-tools`) or LSP is turned off in config/CLI.
+#[cfg(feature = "lsp")]
+fn build_lsp_manager(cli: &cli::Cli, cfg: &config::Config) -> Option<std::sync::Arc<LspManager>> {
+    if cli.resolve_no_tools(cfg) || !cli.resolve_lsp_enabled(cfg) {
+        return None;
+    }
+    let worktree = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let commands = compile_lsp_commands(cfg);
+    let spawner = std::sync::Arc::new(ProcessSpawner::new(commands));
+    // Apply per-server config overrides (extensions, disabled).
+    // Without this, user config like
+    //   "lsp": { "rust": { "extensions": ["rs", "rlib"] } }
+    // was silently ignored — the manager always used the builtin list.
+    let mut servers = crate::lsp::server::builtin_servers();
+    if let Some(lsp_cfg) = &cfg.lsp {
+        crate::lsp::server::apply_extension_overrides(&mut servers, lsp_cfg.server_overrides());
+    }
+    Some(std::sync::Arc::new(LspManager::with_servers(
+        spawner, worktree, servers,
+    )))
 }
 
 /// Compile the spawn commands by starting from `ProcessSpawner::default_commands`
@@ -568,6 +570,30 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
+
+    // Build the LSP manager and wire the plugin LSP responder to it BEFORE
+    // loading plugins. The responder drains `harness/lsp` requests from the
+    // worker thread; if a plugin queries LSP at load time, the drainer must
+    // already be running or the worker would block forever on a reply that
+    // never comes (and main couldn't reach a later spawn point). When LSP is
+    // disabled (`lsp_manager` is None) we deliberately do NOT spawn it and
+    // drop the receiver, so `harness/lsp?` reports the bridge as not live
+    // and queries return nil instead of hanging.
+    #[cfg(feature = "lsp")]
+    let lsp_manager = build_lsp_manager(&cli, &cfg);
+    #[cfg(all(feature = "plugin", feature = "lsp"))]
+    let _lsp_responder: Option<tokio::task::JoinHandle<()>> = {
+        let lsp_rx = plugin_manager
+            .as_ref()
+            .and_then(|pm| pm.lock().unwrap_or_else(|e| e.into_inner()).take_lsp_rx());
+        match (lsp_rx, lsp_manager.clone()) {
+            (Some(rx), Some(mgr)) => Some(plugin::spawn_lsp_responder(rx, mgr)),
+            // No manager (LSP off) or no receiver: drop `lsp_rx` here so the
+            // worker's sender sees a closed channel.
+            _ => None,
+        }
+    };
+
     #[cfg(feature = "plugin")]
     if let Some(pm_arc) = plugin_manager.as_ref() {
         use std::path::PathBuf;
@@ -749,8 +775,6 @@ async fn main() -> anyhow::Result<()> {
         plan_rx,
         bg_store,
         lifecycle_rx,
-        #[cfg(feature = "lsp")]
-        lsp_manager,
     } = build_channels(&cli, &cfg);
 
     if let Some(perm) = &permission {
@@ -769,23 +793,6 @@ async fn main() -> anyhow::Result<()> {
     // first opportunity to wire it into the now-existing checker
     // (the checker is built inside `build_channels`).
     crate::permission::apply_prompt_deny(&permission, &context.current_prompt_deny_tools);
-
-    // Spawn the LSP responder for plugins: drains `harness/lsp` requests
-    // from the worker thread and answers them against the LspManager.
-    // Unlike dialogs this needs no UI, so it runs in every mode
-    // (interactive, --print, --loop). Lives until the worker shuts down
-    // and closes the channel. Held in `_lsp_responder` so the JoinHandle
-    // isn't dropped (which would abort the task).
-    #[cfg(all(feature = "plugin", feature = "lsp"))]
-    let _lsp_responder: Option<tokio::task::JoinHandle<()>> = {
-        let lsp_rx = plugin_manager
-            .as_ref()
-            .and_then(|pm| pm.lock().unwrap_or_else(|e| e.into_inner()).take_lsp_rx());
-        match (lsp_rx, lsp_manager.clone()) {
-            (Some(rx), Some(mgr)) => Some(plugin::spawn_lsp_responder(rx, mgr)),
-            _ => None,
-        }
-    };
 
     let completion_model = client.completion_model(model.to_string());
 
