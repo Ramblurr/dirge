@@ -40,6 +40,8 @@ mod tree;
 mod tui;
 mod wrap;
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Color;
 use tokio::sync::mpsc;
@@ -438,22 +440,15 @@ pub async fn run_interactive(
     #[cfg(feature = "plugin")]
     let mut plugin_shortcuts: Vec<crate::plugin::extension::ParsedShortcut> = {
         let metas = crate::plugin::hook::global()
-            .map(|pm| {
-                pm.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .list_shortcuts()
-            })
+            .map(|pm| pm.lock_ignore_poison().list_shortcuts())
             .unwrap_or_default();
         crate::plugin::extension::parse_shortcuts(metas)
     };
 
     let perm_mode = || -> Option<String> {
-        permission.as_ref().map(|p| {
-            p.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .mode()
-                .to_string()
-        })
+        permission
+            .as_ref()
+            .map(|p| p.lock_ignore_poison().mode().to_string())
     };
 
     // Populate the right-hand info panel *before* the initial paint so
@@ -1277,7 +1272,7 @@ pub async fn run_interactive(
                                 let spec = hit.spec.clone();
                                 if let Some(pm_arc) = crate::plugin::hook::global() {
                                     let result = {
-                                        let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                        let mut mgr = pm_arc.lock_ignore_poison();
                                         mgr.invoke_command(&handler, &spec)
                                     };
                                     if let Ok(Some(msg)) = result {
@@ -1655,7 +1650,7 @@ pub async fn run_interactive(
                                 let mut plugin_replace: Option<String> = None;
                                 #[cfg(feature = "plugin")]
                                 if let Some(pm) = plugin_manager {
-                                    let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut mgr = pm.lock_ignore_poison();
                                     match mgr.dispatch(
                                         "on-prompt",
                                         &format!(

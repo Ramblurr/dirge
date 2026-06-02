@@ -27,6 +27,8 @@
 //! the `UnboundedSender<DapCommand>` that the C functions read from the
 //! thread-local. The bridge runs until the sender is dropped (worker shutdown).
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -109,7 +111,7 @@ static PENDING_DAP_TX: std::sync::Mutex<Option<tmpsc::UnboundedSender<DapCommand
 /// Called by the plugin manager after spawning the bridge. Stores the
 /// sender so the worker thread can pick it up.
 pub fn store_dap_tx(tx: tmpsc::UnboundedSender<DapCommand>) {
-    *PENDING_DAP_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    *PENDING_DAP_TX.lock_ignore_poison() = Some(tx);
 }
 
 /// Called by the worker thread during init. Takes ownership of the
@@ -117,10 +119,7 @@ pub fn store_dap_tx(tx: tmpsc::UnboundedSender<DapCommand>) {
 /// context or non-plugin builds) — in that case the worker skips
 /// DAP Janet init and plugins that call (dap/available?) get false.
 pub fn take_dap_tx_for_worker() -> Option<tmpsc::UnboundedSender<DapCommand>> {
-    PENDING_DAP_TX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
+    PENDING_DAP_TX.lock_ignore_poison().take()
 }
 
 /// Install the command sender on this thread. Must be called once before
@@ -786,20 +785,27 @@ mod tests {
     #[test]
     fn dap_perm_check_roundtrips() {
         let perm = make_checker(SecurityMode::Standard);
-        *DAP_PERM_CHECK.lock().unwrap() = Some(perm.clone());
-        let read_back = DAP_PERM_CHECK.lock().unwrap().clone();
-        assert!(read_back.is_some());
-        // Clean up so other tests aren't contaminated.
-        *DAP_PERM_CHECK.lock().unwrap() = None;
+        // Hold the lock across set→read→cleanup as ONE critical section.
+        // `DAP_PERM_CHECK` is a process-global static that the sibling test
+        // (`no_perm_check_when_none`) also mutates; with per-statement locks the
+        // two race under parallel test execution — the sibling could set `None`
+        // between our write and read. Serializing on the global's own mutex
+        // (both tests hold it for their whole body) removes the race.
+        let mut guard = DAP_PERM_CHECK.lock_ignore_poison();
+        *guard = Some(perm.clone());
+        assert!(guard.is_some());
+        *guard = None; // clean up so other tests aren't contaminated
     }
 
     /// When DAP_PERM_CHECK is None, the guard should be skipped (no crash).
     #[test]
     fn no_perm_check_when_none() {
-        *DAP_PERM_CHECK.lock().unwrap() = None;
-        // Verify the guard in handle_dap_command's DAP_PERM_CHECK read
-        // gracefully returns None -> no check, no panic.
-        let guard = DAP_PERM_CHECK.lock().ok().and_then(|g| g.clone());
+        // Same single-critical-section discipline as `dap_perm_check_roundtrips`
+        // so the two DAP_PERM_CHECK tests can't interleave.
+        let mut guard = DAP_PERM_CHECK.lock_ignore_poison();
+        *guard = None;
+        // The guard in handle_dap_command's DAP_PERM_CHECK read gracefully
+        // returns None -> no check, no panic.
         assert!(
             guard.is_none(),
             "DAP_PERM_CHECK should be None after cleanup"

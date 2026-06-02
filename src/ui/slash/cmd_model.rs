@@ -5,6 +5,8 @@
 //! pattern. Extracted from the original mega-match in slash.rs as
 //! part of the arch/split-large-modules refactor.
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use compact_str::CompactString;
 
 use super::{SlashCtx, c_agent, c_error, c_result};
@@ -78,7 +80,7 @@ pub(super) async fn cmd_mode(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::
     let current_mode = ctx
         .permission
         .as_ref()
-        .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).mode())
+        .map(|p| p.lock_ignore_poison().mode())
         .unwrap_or(SecurityMode::Standard);
 
     if parts.len() < 2 {
@@ -105,9 +107,7 @@ pub(super) async fn cmd_mode(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::
         match parts[1] {
             "standard" => {
                 if let Some(p) = ctx.permission {
-                    p.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .set_mode(SecurityMode::Standard);
+                    p.lock_ignore_poison().set_mode(SecurityMode::Standard);
                     ctx.renderer
                         .write_line("security mode: standard", c_agent())?;
                 } else {
@@ -117,9 +117,7 @@ pub(super) async fn cmd_mode(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::
             }
             "restrictive" => {
                 if let Some(p) = ctx.permission {
-                    p.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .set_mode(SecurityMode::Restrictive);
+                    p.lock_ignore_poison().set_mode(SecurityMode::Restrictive);
                     ctx.renderer
                         .write_line("security mode: restrictive", c_agent())?;
                 } else {
@@ -129,9 +127,7 @@ pub(super) async fn cmd_mode(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::
             }
             "accept" => {
                 if let Some(p) = ctx.permission {
-                    p.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .set_mode(SecurityMode::Accept);
+                    p.lock_ignore_poison().set_mode(SecurityMode::Accept);
                     ctx.renderer
                         .write_line("security mode: accept (auto-allow within CWD)", c_agent())?;
                 } else {
@@ -141,9 +137,7 @@ pub(super) async fn cmd_mode(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::
             }
             "yolo" => {
                 if let Some(p) = ctx.permission {
-                    p.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .set_mode(SecurityMode::Yolo);
+                    p.lock_ignore_poison().set_mode(SecurityMode::Yolo);
                     ctx.renderer
                         .write_line("security mode: YOLO (all operations allowed)", c_agent())?;
                 } else {

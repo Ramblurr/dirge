@@ -7,6 +7,8 @@
 
 use super::check::*;
 use super::*;
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use tokio::process::Command;
 use tokio::time::Duration;
 
@@ -726,8 +728,7 @@ mod gating_corpus {
     async fn grant_then_recheck(cmd: &str) -> bool {
         let perm = checker();
         let pat = crate::ui::permission_ui::suggest_pattern("bash", cmd);
-        perm.lock()
-            .unwrap_or_else(|e| e.into_inner())
+        perm.lock_ignore_poison()
             .add_session_allowlist("bash".to_string(), &pat);
         check_bash_segments(&Some(perm), &None, cmd).await.is_ok()
     }
@@ -970,8 +971,7 @@ mod gating_corpus {
         let seen: Arc<Mutex<Option<(String, usize)>>> = Arc::new(Mutex::new(None));
         let seen2 = seen.clone();
         let stub: ApprovalFn = std::sync::Arc::new(move |req: ApprovalRequest| {
-            *seen2.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some((req.command.clone(), req.resources.len()));
+            *seen2.lock_ignore_poison() = Some((req.command.clone(), req.resources.len()));
             Box::pin(async { Ok(ApprovalDecision::Allow) })
                 as Pin<Box<dyn Future<Output = anyhow::Result<ApprovalDecision>> + Send>>
         });
@@ -979,8 +979,7 @@ mod gating_corpus {
         // Two prompting segments → aggregate Ask → evaluator sees both.
         let _ = check_bash_segments(&Some(perm), &None, "npx foo && mycli bar").await;
         let (cmd, n) = seen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_ignore_poison()
             .clone()
             .expect("evaluator should have been called");
         assert_eq!(cmd, "npx foo && mycli bar");

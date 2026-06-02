@@ -18,13 +18,17 @@ mod semantic;
 mod session;
 mod shell;
 mod skill;
+mod sync_util;
 mod text;
+mod time_util;
 mod timeout;
 mod ui;
 
 #[cfg(test)]
 mod tests;
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use clap::Parser;
 use compact_str::CompactString;
 use session::MessageRole;
@@ -547,11 +551,9 @@ async fn main() -> anyhow::Result<()> {
     // take_dialog_rx again returns None — single owner by design. Always
     // an Option so the UI signature is uniform across feature flags.
     #[cfg(feature = "plugin")]
-    let mut dialog_rx = plugin_manager.as_ref().and_then(|pm| {
-        pm.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take_dialog_rx()
-    });
+    let mut dialog_rx = plugin_manager
+        .as_ref()
+        .and_then(|pm| pm.lock_ignore_poison().take_dialog_rx());
     #[cfg(not(feature = "plugin"))]
     let dialog_rx: Option<tokio::sync::mpsc::UnboundedReceiver<plugin::DialogRequest>> = None;
     // Headless modes (--print, --loop) have no UI to render plugin
@@ -599,7 +601,7 @@ async fn main() -> anyhow::Result<()> {
     let _lsp_responder: Option<tokio::task::JoinHandle<()>> = {
         let lsp_rx = plugin_manager
             .as_ref()
-            .and_then(|pm| pm.lock().unwrap_or_else(|e| e.into_inner()).take_lsp_rx());
+            .and_then(|pm| pm.lock_ignore_poison().take_lsp_rx());
         match (lsp_rx, lsp_manager.clone()) {
             (Some(rx), Some(mgr)) => Some(plugin::spawn_lsp_responder(rx, mgr)),
             // No manager (LSP off) or no receiver: drop `lsp_rx` here so the
@@ -667,7 +669,7 @@ async fn main() -> anyhow::Result<()> {
                 if cli.verbose {
                     eprintln!("loading plugin: {}", path.display());
                 }
-                let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let mut mgr = pm_arc.lock_ignore_poison();
                 mgr.set_loading_plugin_config(true, cfg.plugin_auto_start(&plugin_name));
                 match plugin::load_plugin(&mut mgr, &path) {
                     Ok(loaded) => {
@@ -701,7 +703,7 @@ async fn main() -> anyhow::Result<()> {
         // into the global provider resolver. Config-declared
         // custom_providers still take precedence on name collision.
         let plugin_providers: std::collections::HashMap<String, config::ProviderEntry> = {
-            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mgr = pm_arc.lock_ignore_poison();
             mgr.list_providers()
                 .into_iter()
                 .map(|(name, ptype, base_url, api_key_env)| {
@@ -830,9 +832,7 @@ async fn main() -> anyhow::Result<()> {
             .iter()
             .map(|e| (e.tool.clone(), e.pattern.clone()))
             .collect();
-        perm.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .load_session_allowlist(&allowlist);
+        perm.lock_ignore_poison().load_session_allowlist(&allowlist);
     }
     // Push the active prompt's `deny_tools` into the freshly-built
     // checker. `context.current_prompt_deny_tools` was populated by
@@ -852,9 +852,7 @@ async fn main() -> anyhow::Result<()> {
                 match provider::build_approval_fn(&alias, &entry, &cfg.providers_map()) {
                     Ok(f) => {
                         if let Some(perm) = &permission {
-                            perm.lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .set_approval_fn(f);
+                            perm.lock_ignore_poison().set_approval_fn(f);
                             eprintln!(
                                 "info: approval_provider '{alias}' enabled — permission prompts will be auto-evaluated by the LLM"
                             );
@@ -905,10 +903,7 @@ async fn main() -> anyhow::Result<()> {
         // author can see why their model swap didn't take effect.
         #[cfg(feature = "plugin")]
         if let Some(pm_arc) = plugin_manager.as_ref()
-            && let Some(m) = pm_arc
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take_pending_next_model()
+            && let Some(m) = pm_arc.lock_ignore_poison().take_pending_next_model()
         {
             let t = m.trim();
             if !t.is_empty() {
@@ -1091,7 +1086,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| ".".into())
                 .display()
                 .to_string();
-            let mut pm = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pm = pm_arc.lock_ignore_poison();
             if let Err(e) = pm.dispatch(
                 "on-init",
                 &format!(
@@ -1109,9 +1104,7 @@ async fn main() -> anyhow::Result<()> {
             && let Some(perm) = &permission
         {
             let mode = resolve_mode(&cli, &cfg);
-            perm.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .set_mode(mode);
+            perm.lock_ignore_poison().set_mode(mode);
         }
 
         let initial_msg = cli.message.join(" ");
@@ -1352,7 +1345,7 @@ async fn run_headless_loop(
         // line lands in the right narrative slot.
         #[cfg(feature = "plugin")]
         if let Some(pm_arc) = plugin_manager {
-            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mgr = pm_arc.lock_ignore_poison();
             if let Some(raw) = mgr.take_pending_next_model() {
                 let trimmed = raw.trim();
                 if !trimmed.is_empty() {

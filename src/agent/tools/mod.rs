@@ -68,6 +68,8 @@ pub use webfetch::WebFetchTool;
 pub use websearch::WebSearchTool;
 pub use write::WriteTool;
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use std::io;
 
 use serde::Deserialize;
@@ -314,8 +316,7 @@ async fn handle_ask_inner(
         Ok(UserDecision::AllowOnce) => Ok(()),
         Ok(UserDecision::AllowAlways(pattern)) => {
             permission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .lock_ignore_poison()
                 .add_session_allowlist(tool.to_string(), &pattern);
             Ok(())
         }
@@ -344,7 +345,7 @@ async fn try_auto_approve(
     // drop the lock BEFORE the await so we never hold it across the LLM
     // call. `None` evaluator → caller falls back to the human prompt.
     let (f, working_dir) = {
-        let g = perm.lock().unwrap_or_else(|e| e.into_inner());
+        let g = perm.lock_ignore_poison();
         match g.approval_fn() {
             Some(f) => (f, g.working_dir().to_string()),
             None => return None,
@@ -450,7 +451,7 @@ pub async fn enforce(
     // is no Scope-dispatched `check`/`check_path` split here.
     let is_path = matches!(scope, Scope::Path(_) | Scope::PathResolve(_));
     let (effect, reason, resolved) = {
-        let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = perm.lock_ignore_poison();
         let decision = guard.authorize_scope(tool, raw_scope, is_path);
         // Only PathResolve callers want the canonicalized path back
         // (to pin the file across the check→open window); Raw/Path
@@ -474,8 +475,7 @@ pub async fn enforce(
             // dirge-0g6i: optional LLM auto-approval before the human prompt.
             if let Some(outcome) = try_auto_approve(perm, tool, raw_scope, Vec::new()).await {
                 outcome?; // Deny → propagate; Allow → fall through.
-                perm.lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                perm.lock_ignore_poison()
                     .note_allowed_scope(tool, raw_scope, is_path);
                 return Ok(resolved);
             }
@@ -488,8 +488,7 @@ pub async fn enforce(
             // Approved → clear the loop-guard counter so a repeated call
             // the user keeps allowing never trips the doom-loop hard-deny
             // (only repeatedly-denied prompts accumulate).
-            perm.lock()
-                .unwrap_or_else(|e| e.into_inner())
+            perm.lock_ignore_poison()
                 .note_allowed_scope(tool, raw_scope, is_path);
             Ok(resolved)
         }
@@ -517,7 +516,7 @@ pub async fn enforce_request(
         return Ok(()); // no checker (ACP / --no-tools) → pass through
     };
     let (effect, reason) = {
-        let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = perm.lock_ignore_poison();
         let decision = guard.authorize_request(&req);
         (decision.effect, decision.reason())
     };
@@ -533,9 +532,7 @@ pub async fn enforce_request(
                 try_auto_approve(perm, &req.tool, &req.display_input, resources).await
             {
                 outcome?; // Deny → propagate; Allow → fall through.
-                perm.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .note_allowed_request(&req);
+                perm.lock_ignore_poison().note_allowed_request(&req);
                 return Ok(());
             }
             let Some(tx) = ask_tx else {
@@ -545,9 +542,7 @@ pub async fn enforce_request(
             };
             handle_ask_inner(tx, perm, &req.tool, &req.display_input).await?;
             // Approved → clear the loop-guard counter (see `enforce`).
-            perm.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .note_allowed_request(&req);
+            perm.lock_ignore_poison().note_allowed_request(&req);
             Ok(())
         }
     }

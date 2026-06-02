@@ -1,6 +1,8 @@
 //! Miscellaneous / smaller slash command handlers:
 //! /mcp, /btw, /cd, /panel, /display, /quit, /help, /allow, /loop.
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use crossterm::style::Color;
 
 use super::{SlashCtx, c_agent, c_error, c_result};
@@ -317,7 +319,7 @@ pub(super) async fn cmd_why(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::R
     let input = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
     let is_path = crate::permission::engine::is_path_tool_name(tool);
     let report = {
-        let guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = perm.lock_ignore_poison();
         guard.explain(tool, &input, is_path)
     };
     for line in report.lines() {
@@ -345,7 +347,7 @@ pub(super) async fn cmd_allow(
     match sub {
         "list" => {
             let entries = {
-                let guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = perm.lock_ignore_poison();
                 guard.allowlist_entries()
             };
             if entries.is_empty() {
@@ -416,7 +418,7 @@ pub(super) async fn cmd_allow(
                 )?;
             } else {
                 {
-                    let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut guard = perm.lock_ignore_poison();
                     guard.add_session_allowlist(tool.to_string(), pattern);
                 }
                 let entry = crate::session::PermissionAllowEntry {
@@ -448,7 +450,7 @@ pub(super) async fn cmd_allow(
                 }
             };
             let removed = {
-                let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = perm.lock_ignore_poison();
                 guard.remove_session_allowlist_at(idx)
             };
             match removed {
@@ -467,7 +469,7 @@ pub(super) async fn cmd_allow(
         }
         "clear" => {
             {
-                let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = perm.lock_ignore_poison();
                 guard.clear_session_allowlist();
             }
             ctx.session.permission_allowlist.clear();
@@ -797,7 +799,7 @@ pub(super) async fn cmd_help(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     #[cfg(feature = "plugin")]
     if let Some(pm_arc) = crate::plugin::hook::global() {
         let cmds = {
-            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mgr = pm_arc.lock_ignore_poison();
             mgr.list_commands()
         };
         if !cmds.is_empty() {

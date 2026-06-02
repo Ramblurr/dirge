@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use indexmap::IndexMap;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -272,7 +274,7 @@ impl BackgroundStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock_ignore_poison()
     }
 
     #[cfg(test)]

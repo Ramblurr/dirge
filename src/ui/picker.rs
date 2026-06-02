@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use std::io::Write;
 use std::path::{Component, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -158,7 +160,7 @@ impl FilePicker {
 
     fn load_files(&mut self) {
         let files = walk_files(".");
-        *self.file_cache.lock().unwrap_or_else(|e| e.into_inner()) = files;
+        *self.file_cache.lock_ignore_poison() = files;
     }
 
     pub fn char_input(&mut self, c: char) {
@@ -190,7 +192,7 @@ impl FilePicker {
     }
 
     fn filter(&mut self) {
-        let cache = self.file_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = self.file_cache.lock_ignore_poison();
         if cache.is_empty() {
             self.matches.clear();
             return;
@@ -230,7 +232,7 @@ impl FilePicker {
 
     #[cfg(test)]
     pub fn test_set_cache(&mut self, files: Vec<PathBuf>) {
-        *self.file_cache.lock().unwrap_or_else(|e| e.into_inner()) = files;
+        *self.file_cache.lock_ignore_poison() = files;
     }
 
     /// Draw the picker overlay just above the input box.

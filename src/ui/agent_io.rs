@@ -7,6 +7,8 @@
 //! state. They're grouped here because they're the I/O surface the
 //! event loop reaches for on every turn.
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use compact_str::CompactString;
 use crossterm::style::Color;
 
@@ -288,7 +290,7 @@ pub(crate) fn render_plugin_entry(
     entry: &crate::session::PluginEntry,
 ) -> std::io::Result<()> {
     let handler_name = {
-        let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mgr = pm_arc.lock_ignore_poison();
         mgr.list_renderers()
             .into_iter()
             .find(|(t, _)| t == &entry.custom_type)
@@ -297,7 +299,7 @@ pub(crate) fn render_plugin_entry(
 
     if let Some(handler) = handler_name {
         let lines = {
-            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mgr = pm_arc.lock_ignore_poison();
             mgr.invoke_renderer(&handler, &entry.data)
                 .unwrap_or_default()
         };

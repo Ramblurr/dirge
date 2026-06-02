@@ -15,6 +15,8 @@
 //! buffer small; an unread buffer is hard-capped so a never-read flood
 //! can't OOM.
 
+#[allow(unused_imports)]
+use crate::sync_util::LockExt;
 use indexmap::IndexMap;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -131,7 +133,7 @@ impl BackgroundShellStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, IndexMap<String, ShellEntry>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock_ignore_poison()
     }
 
     /// Register a freshly-started shell in `Running` state. Evicts the
