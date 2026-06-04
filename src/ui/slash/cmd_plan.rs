@@ -144,8 +144,14 @@ async fn run_phases_task(
         }
     };
 
-    // Phase 2: Plan (read-only fork; the ONLY thing carried over is the findings
-    // report — a true context reset between phases).
+    // Phase 2: Plan (read-only fork). dirge-hth2: a TRUE context reset
+    // between phases — the plan fork is given an EMPTY session transcript,
+    // so the only thing carried over is the findings report (embedded in
+    // `plan_prompt`) plus the original request. Previously the full session
+    // transcript was passed here too, which contradicted this very comment
+    // and leaked the prior conversation (and explore's context) into the
+    // plan phase. The explore fork (phase 1) keeps the transcript as its
+    // entry context; the reset is at the explore→plan boundary.
     if !progress(
         &tx,
         "Phase: Plan — turning findings into an implementation plan…",
@@ -157,7 +163,8 @@ async fn run_phases_task(
     }
     let plan_runner = agent.spawn_phase_runner(
         plan_prompt(&request, &findings),
-        transcript,
+        // Empty transcript — see the phase-2 note above (dirge-hth2).
+        String::new(),
         READONLY_PHASE_TOOLS,
     );
     let plan = match collect_runner_text(plan_runner).await {
