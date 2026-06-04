@@ -308,6 +308,13 @@ mod merge_tests {
         let main = root.join("repo");
         std::fs::create_dir_all(&main).unwrap();
         git(&main, &["init"]);
+        // Persist a repo-LOCAL identity into .git/config (shared across
+        // worktrees). merge_worktree's internal git calls don't pass `-c`,
+        // and CI runners have no global git identity, so without this the
+        // `--no-ff` merge commit fails with "Committer identity unknown".
+        git(&main, &["config", "user.email", "test@dirge.local"]);
+        git(&main, &["config", "user.name", "dirge-test"]);
+        git(&main, &["config", "commit.gpgsign", "false"]);
         write(&main.join("file.txt"), "base\n");
         git(&main, &["add", "."]);
         git(&main, &["commit", "-m", "base"]);
