@@ -141,6 +141,10 @@ impl BackgroundShellStore {
     /// and only evicting a still-running one as a last resort (aborting it
     /// first so we never silently detach a live process group; dropping a
     /// `JoinHandle` would otherwise leak it).
+    /// Uncapped register — test-only helper for setting up stores past the
+    /// concurrent cap. Production code uses [`try_register`], which enforces
+    /// `MAX_CONCURRENT_SHELLS` atomically (dirge-jyng).
+    #[cfg(test)]
     pub fn register(&self, id: String, command: String) {
         let mut map = self.lock();
         Self::insert_locked(&mut map, id, command);

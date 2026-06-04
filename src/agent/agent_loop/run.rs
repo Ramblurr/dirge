@@ -1049,7 +1049,11 @@ pub async fn run_loop(
                     // then append the running list so the model sees every
                     // dead end it has hit this run, not just this repeat.
                     for call in &tool_calls {
-                        let args = serde_json::to_string(&call.arguments).unwrap_or_default();
+                        // dirge-r78m: key on canonical (key-sorted) JSON, the
+                        // same normalization storm + scavenge dedup use, so two
+                        // logically-identical calls with different key order
+                        // don't show up twice in the abandoned-approaches list.
+                        let args = super::message::canonical_json(&call.arguments);
                         let sig = super::reflexion::approach_signature(&call.name, &args);
                         reflections.record(sig);
                     }
