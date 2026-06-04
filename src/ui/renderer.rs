@@ -105,7 +105,15 @@ pub const CHAT_FRAME_ROWS: u16 = 2;
 /// Minimum terminal width at which `PanelMode::Auto` decides to show
 /// the side panels. Below this the chat is too narrow to spare any
 /// margin for the AGENT STATUS / SYSTEM gutters.
-const PANEL_AUTO_MIN_COLS: u16 = 100;
+///
+/// dirge-8855: this is the REAL threshold, derived from the gutter math.
+/// A side panel needs ≥15 cols of centered-layout margin
+/// (`content_indent() >= 15`); since `content_width` caps at 120, a
+/// non-trivial gutter only appears once `line_width (= cols - 2)` exceeds
+/// 120, and `content_indent >= 15` ⇒ `line_width - 120 >= 30` ⇒
+/// `cols >= 152`. The old value of 100 was dead — the `content_indent`
+/// gate always bound first — and the README's "≥100 cols" was wrong.
+const PANEL_AUTO_MIN_COLS: u16 = 152;
 
 #[cfg(feature = "experimental-ui-terminal-tab")]
 fn format_terminal_title(state: crate::ui::avatar::AvatarState, tool_name: Option<&str>) -> String {
