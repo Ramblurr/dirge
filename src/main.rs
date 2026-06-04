@@ -424,9 +424,9 @@ async fn main() -> anyhow::Result<()> {
         .as_deref()
         .unwrap_or(cfg.default_prompt.as_deref().unwrap_or("code"));
     if let Some(p) = context.prompts.get(default_prompt) {
-        context.current_prompt = Some(p.body.clone());
-        context.current_prompt_name = Some(default_prompt.to_string());
-        context.current_prompt_deny_tools = p.deny_tools.clone();
+        let body = p.body.clone();
+        let deny = p.deny_tools.clone();
+        context.set_prompt_layer(Some(default_prompt.to_string()), Some(body), deny);
     }
 
     let provider = cli.resolve_provider(&cfg);
@@ -537,9 +537,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(name) = session.current_prompt_name.clone() {
         match context.prompts.get(&name) {
             Some(p) => {
-                context.current_prompt = Some(p.body.clone());
-                context.current_prompt_name = Some(name);
-                context.current_prompt_deny_tools = p.deny_tools.clone();
+                let body = p.body.clone();
+                let deny = p.deny_tools.clone();
+                context.set_prompt_layer(Some(name), Some(body), deny);
             }
             None => {
                 eprintln!(

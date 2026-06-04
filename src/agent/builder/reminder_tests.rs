@@ -444,6 +444,9 @@ async fn build_agent_inner_emits_assembled_preamble() {
         current_prompt: None,
         current_prompt_name: None,
         current_prompt_deny_tools: Vec::new(),
+        prompt_layer: None,
+        agent_layer: None,
+        model_before_agent: None,
     };
     // Real openai client/model — never called (no network until
     // first request). The builder only inspects type bounds and

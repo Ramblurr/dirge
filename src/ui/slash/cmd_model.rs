@@ -261,13 +261,13 @@ pub(super) async fn cmd_prompt(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow
                 .write_line("usage: /prompt <name>  |  /prompt default", c_result())?;
         }
     } else if parts[1] == "default" && !ctx.context.prompts.contains_key("default") {
-        if ctx.context.current_prompt.is_none() {
+        if ctx.context.prompt_layer.is_none() {
             ctx.renderer
                 .write_line("no active prompt to clear", c_agent())?;
         } else {
-            ctx.context.current_prompt = None;
-            ctx.context.current_prompt_name = None;
-            ctx.context.current_prompt_deny_tools.clear();
+            // Drop only the prompt LAYER; any active agent layer (and its
+            // body/denies) survives the refold.
+            ctx.context.clear_prompt_layer();
             crate::permission::apply_prompt_deny(
                 ctx.permission,
                 &ctx.context.current_prompt_deny_tools,
@@ -298,9 +298,13 @@ pub(super) async fn cmd_prompt(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow
     } else {
         let name = parts[1].trim().to_string();
         if let Some(p) = ctx.context.prompts.get(&name).cloned() {
-            ctx.context.current_prompt = Some(p.body.clone());
-            ctx.context.current_prompt_name = Some(name.clone());
-            ctx.context.current_prompt_deny_tools = p.deny_tools.clone();
+            // Set the prompt LAYER and refold — composes with any active
+            // agent layer (denies union) instead of clobbering it.
+            ctx.context.set_prompt_layer(
+                Some(name.clone()),
+                Some(p.body.clone()),
+                p.deny_tools.clone(),
+            );
             crate::permission::apply_prompt_deny(
                 ctx.permission,
                 &ctx.context.current_prompt_deny_tools,
@@ -387,24 +391,31 @@ pub(super) async fn cmd_agent(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow:
 
     let arg = parts[1].trim();
     if matches!(arg, "off" | "none" | "default") {
-        if ctx.context.current_agent.is_none() {
+        if ctx.context.agent_layer.is_none() {
             ctx.renderer
                 .write_line("no active agent to clear", c_agent())?;
             return Ok(());
         }
-        ctx.context.current_agent = None;
-        ctx.context.current_prompt = None;
-        ctx.context.current_prompt_name = None;
-        ctx.context.current_prompt_deny_tools.clear();
+        // Pop ONLY the agent layer and refold — restores the prompt
+        // layer's prompt + denies (instead of clearing everything).
+        ctx.context.clear_agent_layer();
         crate::permission::apply_prompt_deny(
             ctx.permission,
             &ctx.context.current_prompt_deny_tools,
         );
+        // Restore the model captured at activation (dirge-anhw).
+        let restored_model = ctx.context.model_before_agent.take();
+        if let Some(model) = &restored_model {
+            ctx.session.model = CompactString::new(model.as_str());
+            ctx.session.provider = ctx.cli.resolve_provider(ctx.cfg);
+            ctx.session.context_window = ctx.cfg.resolve_context_window(ctx.session.model.as_str());
+        }
         rebuild_agent(ctx).await;
-        ctx.renderer.write_line(
-            "agent deactivated (model unchanged — use /model to switch back)",
-            c_agent(),
-        )?;
+        let msg = match &restored_model {
+            Some(m) => format!("agent deactivated · model restored to {m}"),
+            None => "agent deactivated".to_string(),
+        };
+        ctx.renderer.write_line(&msg, c_agent())?;
         return Ok(());
     }
 
@@ -421,16 +432,17 @@ pub(super) async fn cmd_agent(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow:
         return Ok(());
     };
 
-    // Prompt: only override when the profile defines one (otherwise keep the
-    // user's active prompt — the profile may only change model/tools).
-    if let Some(body) = &def.prompt {
-        ctx.context.current_prompt = Some(body.clone());
-        ctx.context.current_prompt_name = Some(def.name.clone());
+    // Capture the pre-agent model ONCE (only when transitioning from the
+    // no-agent state) so `/agent off` can restore it (dirge-anhw). An
+    // agent→agent switch keeps the original pre-agent model.
+    if ctx.context.agent_layer.is_none() {
+        ctx.context.model_before_agent = Some(ctx.session.model.to_string());
     }
-    // Tool policy → deny-list at the permission layer.
-    ctx.context.current_prompt_deny_tools = def
-        .tools
-        .to_deny_list(crate::agent::tools::BUILTIN_TOOL_NAMES);
+    // Install the agent LAYER and refold. The prompt layer (mode + its
+    // denies) is preserved; the agent's body overrides the prompt body and
+    // its denies UNION with the prompt's (compose, never weaken) — fixes
+    // the deny_tools clobber (dirge-x7c8).
+    ctx.context.set_agent_layer(def.clone());
     crate::permission::apply_prompt_deny(ctx.permission, &ctx.context.current_prompt_deny_tools);
     // Model: same-client swap (see resolve_agent_model).
     let resolved_model = resolve_agent_model(ctx.cfg, def.model.as_deref());
@@ -439,7 +451,6 @@ pub(super) async fn cmd_agent(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow:
         ctx.session.provider = ctx.cli.resolve_provider(ctx.cfg);
         ctx.session.context_window = ctx.cfg.resolve_context_window(ctx.session.model.as_str());
     }
-    ctx.context.current_agent = Some(def.name.clone());
     rebuild_agent(ctx).await;
 
     // Report what changed.
@@ -464,11 +475,20 @@ pub(super) async fn cmd_regen_prompts(ctx: &mut SlashCtx<'_>) -> anyhow::Result<
     match crate::context::prompts::regen() {
         Ok(()) => {
             ctx.context.prompts = crate::context::prompts::load();
-            if let Some(name) = ctx.context.current_prompt_name.clone()
+            // Refresh the prompt LAYER's body/denies from the regenerated
+            // definition, then refold (composes with any active agent).
+            if let Some(name) = ctx
+                .context
+                .prompt_layer
+                .as_ref()
+                .and_then(|p| p.name.clone())
                 && let Some(p) = ctx.context.prompts.get(&name).cloned()
             {
-                ctx.context.current_prompt = Some(p.body.clone());
-                ctx.context.current_prompt_deny_tools = p.deny_tools.clone();
+                ctx.context.set_prompt_layer(
+                    Some(name),
+                    Some(p.body.clone()),
+                    p.deny_tools.clone(),
+                );
                 crate::permission::apply_prompt_deny(
                     ctx.permission,
                     &ctx.context.current_prompt_deny_tools,

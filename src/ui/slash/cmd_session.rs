@@ -122,9 +122,11 @@ pub(super) async fn cmd_sessions(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyh
                 if let Some(name) = restored.as_deref()
                     && let Some(p) = ctx.context.prompts.get(name).cloned()
                 {
-                    ctx.context.current_prompt = Some(p.body.clone());
-                    ctx.context.current_prompt_name = Some(name.to_string());
-                    ctx.context.current_prompt_deny_tools = p.deny_tools.clone();
+                    ctx.context.set_prompt_layer(
+                        Some(name.to_string()),
+                        Some(p.body.clone()),
+                        p.deny_tools.clone(),
+                    );
                     crate::permission::apply_prompt_deny(
                         ctx.permission,
                         &ctx.context.current_prompt_deny_tools,

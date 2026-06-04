@@ -84,16 +84,25 @@ The same shape as a JSON object, for profiles you'd rather keep in config:
 |---|---|
 | `/agents` (or `/agent`) | List defined profiles (active one marked `*`) **and** the built-in role routing. |
 | `/agent <name>` | Activate a profile: apply its system prompt, tool policy (at the permission layer), and model (rebuilds the agent). |
-| `/agent off` | Deactivate — clear the profile's prompt + tool deny. The model is left as-is (use `/model` to switch back). |
+| `/agent off` | Deactivate the profile and restore the underlying state: the active `/prompt`'s prompt + denies come back, and the model is restored to whatever it was **before** the profile was activated. |
 
-Activating a profile:
+The `/prompt` and `/agent` selections are **independent composing layers**, not
+one shared slot. Activating a profile no longer wipes the active prompt's
+restrictions, and deactivating it no longer wipes the prompt:
 
-- **Prompt** — if the profile defines a body, it becomes the active system
-  prompt (like `/prompt`). If it doesn't, your current prompt is left alone.
+- **Prompt** — if the profile defines a body, it overrides the active system
+  prompt while the profile is on; otherwise your `/prompt` body is kept. The
+  "mode" (which drives plan/review reminders) stays owned by `/prompt`.
 - **Tools** — the profile's `deny_tools` / `allow_tools` are enforced at the
   **permission layer** (the same path that backs per-prompt restrictions), not
-  just as prose. `allow_tools` is best-effort over built-in tools; for a hard
-  cap prefer `deny_tools`.
+  just as prose. They **compose** with the active prompt's `deny_tools` as a
+  union: a profile can only **add** restrictions to a prompt's, never weaken
+  them (so `/prompt review` + a permissive profile keeps `review`'s denies). To
+  drop a prompt's restrictions, switch the prompt (`/prompt default`), not the
+  agent. `allow_tools` is best-effort over built-in tools; for a hard cap prefer
+  `deny_tools`.
+- **Revert** — `/agent off` pops only the profile layer: the `/prompt` layer's
+  body + denies and the pre-profile model are restored in one step.
 - **Model** — see below.
 
 ## Model routing

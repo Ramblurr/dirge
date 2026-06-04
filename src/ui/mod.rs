@@ -3630,9 +3630,9 @@ pub async fn run_interactive(
                     // deny-list to the perm checker so any prompt-
                     // level tool restrictions kick in immediately.
                     if let Some(p) = context.prompts.get(prompt_name) {
-                        context.current_prompt = Some(p.body.clone());
-                        context.current_prompt_name = Some(prompt_name.to_string());
-                        context.current_prompt_deny_tools = p.deny_tools.clone();
+                        let body = p.body.clone();
+                        let deny = p.deny_tools.clone();
+                        context.set_prompt_layer(Some(prompt_name.to_string()), Some(body), deny);
                         crate::permission::apply_prompt_deny(
                             &permission,
                             &context.current_prompt_deny_tools,
