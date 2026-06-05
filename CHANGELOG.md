@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-05
+
+### Changed
+- **The TUI now renders as a single model-driven paint per event.** A
+  `UiState` model is the single source of truth, and the screen (status
+  line, input area, avatar, panels, scrollback) is painted as one effect
+  when the model changes — with dirty-flag coalescing — replacing ~85
+  scattered inline paint sites. No change in normal use; this is the
+  groundwork for the input fix below.
+
+### Fixed
+- **Modal prompts no longer block the UI.** Permission prompts, the
+  `question` questionnaire (including custom free-text answers), the
+  `/plan` switch confirmation, and plugin confirm/select dialogs each ran
+  in their own nested blocking read loop, which could freeze the interface
+  while a prompt was up. They now route through a unified input state
+  machine driven by the main event loop, so chat scroll, text
+  selection/copy, and terminal resize stay live during a prompt, and user
+  keystrokes take priority over the agent's output stream. Concurrent
+  permission requests from a parallel tool batch queue safely instead of
+  clobbering the active prompt.
+
 ## [0.3.0] - 2026-06-04
 
 ### Security
@@ -191,5 +213,6 @@ agent in Rust with:
   LSP integration, and a Janet plugin system.
 - Session save/load/resume with LLM-summarization compaction.
 
-[Unreleased]: https://github.com/dirge-code/dirge/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dirge-code/dirge/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/dirge-code/dirge/compare/v0.3.0...v0.3.1
 [1.0.0]: https://github.com/dirge-code/dirge/releases/tag/v1.0.0
