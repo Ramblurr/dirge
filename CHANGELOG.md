@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-10
+
+### Fixed
+- **`sandbox-microvm` builds on macOS without OpenSSL.** The feature pulled
+  `ssh2 → libssh2-sys → openssl-sys`, so `cargo build --features
+  sandbox-microvm` (and `--all-features`) failed on machines without a
+  system OpenSSL. The microVM SSH client is now `russh` (pure Rust, `ring`
+  crypto backend) — no OpenSSL, no libssh2, no cmake. Host-key pinning and
+  command execution behave as before.
+
+### Added
+- **Homebrew install.** `brew install dirge-code/dirge/dirge` installs a
+  prebuilt binary (macOS + Linux); on macOS it avoids the Gatekeeper
+  quarantine prompt of a downloaded tarball. The release workflow
+  auto-bumps the tap formula on each tag.
+
 ## [0.5.0] - 2026-06-10
 
 ### Added
