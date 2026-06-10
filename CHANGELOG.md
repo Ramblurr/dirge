@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-10
+
+### Added
+- **SQLite-backed project memory.** Memory moved off the flat `MEMORY.md` /
+  `PITFALLS.md` files into a `memories` table in the per-project session DB
+  (`.dirge/sessions/state.db`). Two-tier storage: hot entries inline in the
+  prompt verbatim, and once the inline budget fills the least-salient entries
+  demote to a searchable breadcrumb index (id + preview) the agent expands
+  with `memory(action='expand')` or queries with `memory(action='search')`
+  (FTS5). Removal tombstones rather than deletes (`restore` brings entries
+  back). Legacy `MEMORY.md` / `PITFALLS.md` files are imported automatically
+  on first load and parked as `*.imported`.
+- **Cross-turn failure recovery checkpoint.** The repeat-loop guard only
+  catches a model repeating the *same* call; a separate tracker counts
+  consecutive errored tool results across turns (reset by any success) and,
+  at a streak of three distinct failures, injects one structured recovery
+  checkpoint asking the model to name the shared root cause and take a
+  different next step. When one tool dominates the streak it's named so the
+  model re-reads that tool's contract.
+- **"Did you mean?" feedback.** An unknown tool name now gets a nearest-match
+  suggestion (`ehco` → `echo`), an invalid enum argument lists the valid
+  values plus the closest one, and `read` on a mistyped path suggests the
+  near-miss neighbour in the same directory (`parserr.rs` → `parser.rs`).
+- **Janet compression plugin + `/plugins` command.** Plugins can supply a
+  custom compaction summary via an `on-compact` hook, and `/plugins` lists
+  the loaded plugins.
+- **Interactive DAP REPL** (`/dap-repl`) and a shared JSON-RPC framing layer
+  for the debug-adapter client.
+
+### Changed
+- **Slash-command tab completion is on by default.** It was gated behind an
+  experimental feature that never shipped in the default set; it's now a
+  first-class `slash-completion` feature, default-on.
+- **Memory guidance explains the frozen snapshot.** The agent is told its
+  saved memory is injected as a session-start snapshot, so a fact saved
+  mid-session becomes active next session — it no longer re-saves facts it
+  doesn't see reappear.
+- Oversized `bash` / `webfetch` output now truncates head + tail (was a
+  buggier middle-out heuristic).
+
+### Removed
+- **Cross-session memory extractor** and the unused memory `confidence`
+  field. The post-session orchestrator is now three stages (background
+  review → skills curator → memory curator); the extractor re-derived what
+  the per-session review already captures.
+
+### Fixed
+- A `read` cache hit returns the file content instead of a terse "unchanged"
+  message, so a re-read after compaction isn't left empty.
+- Compression: git-diff off-by-one and the truncation heuristics.
+- Fresh-state panics, an FTS index issue, tool-status lifecycle bugs, and
+  duplicate-result handling (DAP review round).
+- Fail-closed permissions for the debug-adapter tools.
+
 ## [0.4.1] - 2026-06-08
 
 ### Fixed
