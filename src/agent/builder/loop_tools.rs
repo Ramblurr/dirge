@@ -108,6 +108,34 @@ pub struct DynamicToolSearch {
 /// dispatches through the `LoopTool` registry returned here. `build_agent_inner`
 /// builds only the rig Agent's preamble + model (it no longer constructs tools
 /// as of dirge-tfip).
+/// Register the `memory` tool when its store loaded. A load failure
+/// (fresh-state I/O problems, unreadable DB — the PR #392 class) is
+/// survivable: the session runs without the memory tool and a warning
+/// says why, instead of panicking agent construction (dirge-yof4).
+pub(crate) async fn register_memory_tool(
+    tools: &mut Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>>,
+    memory_store: Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
+    permission: Option<PermCheck>,
+    ask_tx: Option<AskSender>,
+) {
+    use crate::agent::agent_loop::{RigToolAdapter, types::ToolExecutionMode};
+    match memory_store {
+        Some(store) => {
+            let adapter =
+                RigToolAdapter::new(Box::new(tools::MemoryTool::new(store, permission, ask_tx)))
+                    .await
+                    .with_execution_mode(ToolExecutionMode::Sequential);
+            tools.push(std::sync::Arc::new(adapter));
+        }
+        None => {
+            tracing::warn!(
+                target: "dirge::memory",
+                "memory store unavailable — running this session without the memory tool",
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn build_loop_tools(
     cache: ToolCache,
@@ -357,20 +385,16 @@ pub async fn build_loop_tools(
         .await,
     );
 
-    // Writes to memory file — Sequential.
-    tools.push(
-        wrap(
-            tools::MemoryTool::new(
-                memory_store
-                    .clone()
-                    .expect("memory_store not loaded in loop tools"),
-                permission.clone(),
-                ask_tx.clone(),
-            ),
-            Some(ToolExecutionMode::Sequential),
-        )
-        .await,
-    );
+    // Writes to the memory store — Sequential. dirge-yof4: a load
+    // failure degrades to a session without the memory tool instead
+    // of panicking agent construction.
+    register_memory_tool(
+        &mut tools,
+        memory_store.clone(),
+        permission.clone(),
+        ask_tx.clone(),
+    )
+    .await;
 
     // Mutates fs — Sequential.
     tools.push(

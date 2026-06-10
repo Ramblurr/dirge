@@ -182,6 +182,40 @@ async fn build_loop_tools_produces_core_registry() {
     }
 }
 
+/// dirge-yof4: a memory-store load failure (fresh-state I/O problems,
+/// unreadable DB — the PR #392 class) must DEGRADE the session to one
+/// without the memory tool, never panic agent construction.
+#[tokio::test]
+async fn memory_tool_registration_degrades_when_store_unavailable() {
+    use crate::agent::builder::loop_tools::register_memory_tool;
+
+    // Load failed → no tool, no panic.
+    let mut tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>> = Vec::new();
+    register_memory_tool(&mut tools, None, None, None).await;
+    assert!(
+        tools.is_empty(),
+        "unavailable store must not register a memory tool"
+    );
+
+    // Load succeeded → the memory tool registers as usual.
+    let dir = std::env::temp_dir().join(format!(
+        "dirge-memtool-degrade-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    let paths = crate::extras::dirge_paths::ProjectPaths::new(&dir);
+    let store: std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider> =
+        std::sync::Arc::new(crate::extras::memory_db::SqliteMemoryStore::load(&paths).unwrap());
+    register_memory_tool(&mut tools, Some(store), None, None).await;
+    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    assert_eq!(names, vec!["memory"], "available store registers the tool");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// dirge-88p9: tool descriptions must be substantive but within the LLM-API
 /// constraint. Adopts Forge's enforced standard (docs/tool-guidelines.md):
 /// every tool carries a non-trivial description, capped at 1024 chars so it

@@ -139,6 +139,12 @@ enum FollowUpSource {
 /// input [dirge-i75f].
 pub(crate) const TODO_NUDGE_TAG: &str = "[todo]";
 
+/// Stable prefix of the max-agent-turns truncation notice. The
+/// headless result path (`provider::run`) matches on this to mark the
+/// run truncated in its JSON envelope (dirge-18v2) — sharing the
+/// constant keeps emitter and detector from drifting.
+pub(crate) const MAX_TURNS_NOTICE_PREFIX: &str = "[dirge] Max agent turns";
+
 /// The unfinished-todo nudge message. Pure (no globals) so the singular/plural
 /// wording is unit-testable independent of the todo store.
 fn todo_nudge_message(unfinished: usize) -> LoopMessage {
@@ -1350,7 +1356,7 @@ pub async fn run_loop(
                     "max_turns reached — terminating run"
                 );
                 let notice = format!(
-                    "[dirge] Max agent turns ({cap}) reached. Stopping the run. Increase --max-agent-turns or `max_agent_turns` in config.json to allow more."
+                    "{MAX_TURNS_NOTICE_PREFIX} ({cap}) reached. Stopping the run. Increase --max-agent-turns or `max_agent_turns` in config.json to allow more."
                 );
                 // Surface to the user as a `<system>` log line (warning
                 // color) rather than a `MessageStart { User }` — the

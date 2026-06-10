@@ -19,8 +19,8 @@
 //! `CURATOR_REVIEW_PROMPT` + `_render_candidate_list` block) and
 //! `curator.py:1369-1555` (the `run_curator_review` loop).
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
 
 use crate::extras::dirge_paths::ProjectPaths;
 
@@ -39,57 +39,15 @@ const INTERVAL_HOURS: u64 = 168; // 7 days
 #[allow(dead_code)]
 const IDLE_HOURS: u64 = 2;
 
-// ── Curator state ─────────────────────────────────────
-
-/// Persistent scheduler state written to `.dirge/skills/.curator_state`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct CuratorState {
-    /// Unix timestamp (seconds) of the last curator run.
-    /// `None` means never run (different from epoch-0 which
-    /// is a valid timestamp on some systems).
-    last_run: Option<u64>,
-    /// Timestamp when the state was first seeded.
-    first_check: u64,
-}
-
-impl CuratorState {
-    fn new() -> Self {
-        let now = now_secs();
-        CuratorState {
-            last_run: None,
-            first_check: now,
-        }
-    }
-
-    fn load(path: &PathBuf) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(CuratorState::new());
-        }
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read curator state: {e}"))?;
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse curator state: {e}"))
-    }
-
-    fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create curator state directory: {e}"))?;
-        }
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize curator state: {e}"))?;
-        crate::fs_atomic::atomic_write_sync(path, content.as_bytes())
-            .map_err(|e| format!("Failed to write curator state: {e}"))
-    }
-}
-
 // ── Curator ───────────────────────────────────────────
 
 /// Skill lifecycle manager. Runs periodic maintenance on
 /// agent-created skills in `.dirge/skills/`.
 pub struct Curator {
     paths: ProjectPaths,
-    state: CuratorState,
-    state_path: PathBuf,
+    /// Shared scheduler clock (dirge-rwrg): session-count first-run
+    /// gate + 7-day interval, state at `.dirge/skills/.curator_state`.
+    clock: crate::extras::curator_clock::CuratorClock,
 }
 
 /// The lifecycle state of a skill, as tracked by the curator.
@@ -103,46 +61,23 @@ pub enum SkillLifecycle {
 
 impl Curator {
     pub fn new(paths: &ProjectPaths) -> Result<Self, String> {
-        let state_path = paths.skills_dir().join(".curator_state");
-        let state = CuratorState::load(&state_path)?;
+        let clock = crate::extras::curator_clock::CuratorClock::new(
+            paths,
+            paths.skills_dir().join(".curator_state"),
+            INTERVAL_HOURS,
+            crate::extras::curator_clock::DEFAULT_MIN_SESSIONS_FIRST_RUN,
+        )?;
         Ok(Curator {
             paths: paths.clone(),
-            state,
-            state_path,
+            clock,
         })
     }
 
-    /// Check whether the curator should run now.
-    /// 1. First-run deferral — on the first-ever check, SEED the
-    ///    clock (persist `last_run = now`) and return false, so the
-    ///    pass first runs one interval after install.
-    /// 2. Interval gate — afterwards, run when the last run was
-    ///    >= INTERVAL_HOURS ago.
-    ///
-    /// dirge-6js7 fix: this previously returned false on the first
-    /// check WITHOUT persisting anything. Since the only code that
-    /// sets `last_run` lives inside the gated `apply_automatic_transitions`,
-    /// `last_run` stayed `None` forever and the curator DEADLOCKED —
-    /// it never ran in production. Seeding here breaks the deadlock.
-    /// Takes `&mut self` because seeding is a persisted side effect.
+    /// Should the curator run now? See [`CuratorClock::should_run_now`]
+    /// (dirge-rwrg) — session-count gate before the first run
+    /// (replacing the old seed-and-defer), 7-day interval after.
     pub fn should_run_now(&mut self) -> bool {
-        match self.state.last_run {
-            None => {
-                self.state.last_run = Some(now_secs());
-                if let Err(e) = self.state.save(&self.state_path) {
-                    tracing::debug!(
-                        target: "dirge::curator",
-                        error = %e,
-                        "failed to seed curator state on first check",
-                    );
-                }
-                false
-            }
-            Some(last) => {
-                let elapsed = Duration::from_secs(now_secs().saturating_sub(last));
-                elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
-            }
-        }
+        self.clock.should_run_now()
     }
 
     /// Run automatic lifecycle transitions on all skills.
@@ -156,8 +91,7 @@ impl Curator {
         let skills_dir = self.paths.skills_dir();
 
         if !skills_dir.is_dir() {
-            self.state.last_run = Some(now);
-            self.state.save(&self.state_path)?;
+            self.clock.mark_ran()?;
             return Ok(Vec::new());
         }
 
@@ -251,8 +185,7 @@ impl Curator {
             );
         }
 
-        self.state.last_run = Some(now);
-        self.state.save(&self.state_path)?;
+        self.clock.mark_ran()?;
 
         Ok(stale_names)
     }
@@ -286,8 +219,7 @@ impl Curator {
     /// state after a manual run).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn record_run(&mut self) -> Result<(), String> {
-        self.state.last_run = Some(now_secs());
-        self.state.save(&self.state_path)
+        self.clock.mark_ran()
     }
 }
 
@@ -613,64 +545,55 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), "---\nname: test\n---\n\nbody\n").unwrap();
     }
 
-    // ── CuratorState persistence ───────────────────────
+    // ── should_run_now (shared CuratorClock — dirge-rwrg) ──
 
-    #[test]
-    fn curator_state_round_trips() {
-        let (paths, _dir) = temp_project();
-        let state_path = paths.skills_dir().join(".curator_state");
-
-        let mut state = CuratorState::new();
-        state.last_run = Some(1234567890);
-        state.save(&state_path).unwrap();
-
-        let loaded = CuratorState::load(&state_path).unwrap();
-        assert_eq!(loaded.last_run, Some(1234567890));
-        assert!(loaded.first_check > 0);
+    /// Write a state file with a given last_run (legacy shape).
+    fn write_state(paths: &ProjectPaths, last_run: u64) {
+        std::fs::create_dir_all(paths.skills_dir()).unwrap();
+        std::fs::write(
+            paths.skills_dir().join(".curator_state"),
+            format!(r#"{{"last_run": {last_run}, "first_check": {last_run}}}"#),
+        )
+        .unwrap();
     }
 
+    /// dirge-rwrg: before the first run the gate is session count —
+    /// a young project with few sessions defers; enough sessions fire
+    /// the first pass without a 7-day wait.
     #[test]
-    fn missing_state_file_defaults_to_new() {
+    fn first_run_gated_on_session_count() {
         let (paths, _dir) = temp_project();
-        let state_path = paths.skills_dir().join(".curator_state");
-        let state = CuratorState::load(&state_path).unwrap();
-        assert_eq!(state.last_run, None);
-        assert!(state.first_check > 0);
-    }
-
-    // ── should_run_now ─────────────────────────────────
-
-    #[test]
-    fn first_run_seeds_and_defers() {
-        let (paths, _dir) = temp_project();
-        let state_path = paths.skills_dir().join(".curator_state");
+        std::fs::create_dir_all(paths.sessions_dir()).unwrap();
+        let db = crate::extras::session_db::SessionDb::open(&paths.session_db_path()).unwrap();
+        db.insert_session("s1", "cli", "gpt-5", "openai", "2026-05-01T10:00:00Z")
+            .unwrap();
+        drop(db);
         let mut curator = Curator::new(&paths).unwrap();
-        assert!(!curator.should_run_now(), "first check should defer");
-        // dirge-6js7 deadlock fix: the first check must persist the
-        // seeded clock. Previously it returned false without saving,
-        // so last_run stayed None forever and the curator never ran.
+        assert!(!curator.should_run_now(), "1 session — deferred");
+
+        let db = crate::extras::session_db::SessionDb::open(&paths.session_db_path()).unwrap();
+        for i in 2..=12 {
+            db.insert_session(
+                &format!("s{i}"),
+                "cli",
+                "gpt-5",
+                "openai",
+                "2026-05-01T10:00:00Z",
+            )
+            .unwrap();
+        }
+        drop(db);
+        let mut curator = Curator::new(&paths).unwrap();
         assert!(
-            state_path.exists(),
-            "first check must persist seeded state (deadlock fix)",
-        );
-        let seeded = CuratorState::load(&state_path).unwrap();
-        assert!(
-            seeded.last_run.is_some(),
-            "first check must seed last_run so the interval clock starts",
+            curator.should_run_now(),
+            "enough sessions — first run fires without a 7-day wait"
         );
     }
 
     #[test]
     fn runs_after_interval_elapses() {
         let (paths, _dir) = temp_project();
-        let state_path = paths.skills_dir().join(".curator_state");
-
-        // Set state as if last run was 8 days ago.
-        let past = now_secs() - INTERVAL_HOURS * 3600 - 1;
-        let mut state = CuratorState::new();
-        state.last_run = Some(past);
-        state.save(&state_path).unwrap();
-
+        write_state(&paths, now_secs() - INTERVAL_HOURS * 3600 - 1);
         let mut curator = Curator::new(&paths).unwrap();
         assert!(curator.should_run_now());
     }
@@ -678,14 +601,7 @@ mod tests {
     #[test]
     fn does_not_run_within_interval() {
         let (paths, _dir) = temp_project();
-        let state_path = paths.skills_dir().join(".curator_state");
-
-        // Set state as if last run was 1 hour ago.
-        let recent = now_secs() - 3600;
-        let mut state = CuratorState::new();
-        state.last_run = Some(recent);
-        state.save(&state_path).unwrap();
-
+        write_state(&paths, now_secs() - 3600);
         let mut curator = Curator::new(&paths).unwrap();
         assert!(!curator.should_run_now());
     }
@@ -736,13 +652,13 @@ mod tests {
     fn record_run_updates_timestamp() {
         let (paths, _dir) = temp_project();
         let mut curator = Curator::new(&paths).unwrap();
-        let before = curator.state.last_run;
+        let before = curator.clock.last_run();
         curator.record_run().unwrap();
 
         // Reload and verify.
         let curator2 = Curator::new(&paths).unwrap();
         assert!(
-            curator2.state.last_run > before,
+            curator2.clock.last_run() > before,
             "recording a run should update last_run"
         );
     }

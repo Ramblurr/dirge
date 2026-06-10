@@ -67,6 +67,20 @@ pub(crate) fn ellipsize(s: &str, max_bytes: usize) -> String {
     format!("{}…", head(s, max_bytes.saturating_sub('…'.len_utf8())))
 }
 
+/// First line of `content`, capped at 80 chars (77 + `...`). The
+/// preview shape shared by memory breadcrumb indexes and curator
+/// audit reports (dirge-rwrg — was duplicated byte-for-byte in
+/// memory_db and memory_curator). Char-based, UTF-8 safe.
+pub(crate) fn first_line_preview(content: &str) -> String {
+    let first = content.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= 80 {
+        first.to_string()
+    } else {
+        let cut: String = first.chars().take(77).collect();
+        format!("{cut}...")
+    }
+}
+
 /// Short display prefix of an id — its first 8 characters. Used across the UI
 /// to compact session / subagent / notification / plugin ids for display.
 /// Char-based (UTF-8 safe) and consistent everywhere, replacing the ~9

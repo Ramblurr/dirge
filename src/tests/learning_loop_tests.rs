@@ -526,15 +526,17 @@ fn curator_empty_skills_dir_is_no_op() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-fn session_db_schema_version_reaches_v7() {
-    // dirge-18ks bumped to v7: long-term memory moves into the
-    // session DB (`memories` + `memories_fts`).
+fn session_db_schema_version_reaches_current() {
     let (db, _dir) = temp_session_db();
     let ver: u32 = db
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(ver, 7, "fresh DB should be at schema version 7");
+    assert_eq!(
+        ver,
+        crate::extras::session_db::SCHEMA_VERSION,
+        "fresh DB should be at the current schema version"
+    );
 
     let memories_exists: i64 = db
         .conn

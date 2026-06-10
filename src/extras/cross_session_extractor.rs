@@ -27,9 +27,6 @@
 //! stage (after the curators), so the current session's facts are
 //! already captured + consolidated before this runs.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
 use crate::extras::dirge_paths::ProjectPaths;
 
 /// Interval between extraction runs. 14 days — strictly longer than
@@ -120,57 +117,14 @@ Cap yourself at 1-2 adds. Most runs should add NOTHING — 'Nothing to add' is t
 outcome when the recurring themes are already captured or are too weak to be durable. Quality over \
 volume: a noisy MEMORY.md is worse than a sparse one (the budget is ~2200 chars).";
 
-// ── State ─────────────────────────────────────────────
-
-/// Scheduler + watermark state at `.dirge/memory/.cross_session_state`.
-/// Mirrors `MemoryCuratorState` plus a watermark of the newest
-/// session `last_active` already scanned, so re-runs don't reprocess
-/// the same history.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CrossSessionState {
-    pub last_run: Option<u64>,
-    pub first_check: u64,
-    /// RFC3339 `last_active` of the newest session scanned so far.
-    /// Empty = nothing scanned yet (everything is "new").
-    #[serde(default)]
-    pub last_scanned_watermark: String,
-}
-
-impl CrossSessionState {
-    fn new(now: u64) -> Self {
-        Self {
-            last_run: None,
-            first_check: now,
-            last_scanned_watermark: String::new(),
-        }
-    }
-
-    fn load(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::new(now_secs()));
-        }
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("read cross-session state: {e}"))?;
-        serde_json::from_str(&content).map_err(|e| format!("parse cross-session state: {e}"))
-    }
-
-    fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create state dir: {e}"))?;
-        }
-        let content =
-            serde_json::to_string_pretty(self).map_err(|e| format!("serialize state: {e}"))?;
-        crate::fs_atomic::atomic_write_sync(path, content.as_bytes())
-            .map_err(|e| format!("write state: {e}"))
-    }
-}
-
 // ── Extractor ─────────────────────────────────────────
 
 pub struct CrossSessionExtractor {
     paths: ProjectPaths,
-    state: CrossSessionState,
-    state_path: PathBuf,
+    /// Shared scheduler clock (dirge-rwrg): session-count first-run
+    /// gate + 14-day interval + scan watermark, state at
+    /// `.dirge/memory/.cross_session_state`.
+    clock: crate::extras::curator_clock::CuratorClock,
 }
 
 /// A recurring theme that cleared the ≥2-distinct-session bar and is
@@ -192,43 +146,24 @@ pub struct CrossSessionBundle {
 
 impl CrossSessionExtractor {
     pub fn new(paths: &ProjectPaths) -> Result<Self, String> {
-        let state_path = paths.memory_dir().join(".cross_session_state");
-        let state = CrossSessionState::load(&state_path)?;
+        let clock = crate::extras::curator_clock::CuratorClock::new(
+            paths,
+            paths.memory_dir().join(".cross_session_state"),
+            INTERVAL_HOURS,
+            crate::extras::curator_clock::DEFAULT_MIN_SESSIONS_FIRST_RUN,
+        )?;
         Ok(Self {
             paths: paths.clone(),
-            state,
-            state_path,
+            clock,
         })
     }
 
-    /// Interval gate (cheap, no DB). On the first-ever check, SEED
-    /// the clock (persist `last_run = now`) and return false, so the
-    /// pass first runs one interval after install; afterwards, run
-    /// when the last run was >= 14 days ago.
-    ///
-    /// dirge-6js7: seeding here is what breaks the deadlock the
-    /// sibling curators also had — returning false on first check
-    /// without persisting left `last_run` `None` forever (the only
-    /// seeder, `run_mechanical_scan`, is gated behind this check).
-    /// Takes `&mut self` because seeding is a persisted side effect.
+    /// Should the extractor run now? See
+    /// [`CuratorClock::should_run_now`] — session-count gate before
+    /// the first run (dirge-rwrg, replacing the old seed-and-defer),
+    /// 14-day interval after.
     pub fn should_run_now(&mut self) -> bool {
-        match self.state.last_run {
-            None => {
-                self.state.last_run = Some(now_secs());
-                if let Err(e) = self.state.save(&self.state_path) {
-                    tracing::debug!(
-                        target: "dirge::cross_session",
-                        error = %e,
-                        "failed to seed cross-session state on first check",
-                    );
-                }
-                false
-            }
-            Some(last) => {
-                let elapsed = Duration::from_secs(now_secs().saturating_sub(last));
-                elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
-            }
-        }
+        self.clock.should_run_now()
     }
 
     /// Mechanical scan. Caller must have checked `should_run_now()`.
@@ -254,7 +189,7 @@ impl CrossSessionExtractor {
         // Always advance last_run once we attempt a scan, so the
         // 14-day interval is honored between scans regardless of
         // outcome.
-        self.state.last_run = Some(now_secs());
+        self.clock.mark_ran()?;
 
         let db = match crate::extras::session_db::SessionDb::open(&self.paths.session_db_path()) {
             Ok(db) => db,
@@ -264,7 +199,6 @@ impl CrossSessionExtractor {
                     error = %e,
                     "Cannot open session DB — skipping cross-session scan",
                 );
-                self.state.save(&self.state_path)?;
                 return Ok(None);
             }
         };
@@ -288,7 +222,7 @@ impl CrossSessionExtractor {
         let new_sessions: Vec<&crate::extras::session_db::SessionSummary> = sessions
             .iter()
             .filter(|s| s.id != current_session_id)
-            .filter(|s| s.last_active.as_str() > self.state.last_scanned_watermark.as_str())
+            .filter(|s| s.last_active.as_str() > self.clock.watermark())
             .collect();
 
         if new_sessions.len() < MIN_NEW_SESSIONS {
@@ -298,8 +232,8 @@ impl CrossSessionExtractor {
                 min = %MIN_NEW_SESSIONS,
                 "Not enough new sessions for cross-session extraction — skipping",
             );
-            // Don't advance the watermark — wait for more material.
-            self.state.save(&self.state_path)?;
+            // Don't advance the watermark — wait for more material
+            // (mark_ran above already persisted last_run).
             return Ok(None);
         }
 
@@ -318,7 +252,7 @@ impl CrossSessionExtractor {
         let mut themes: Vec<RecurringTheme> = Vec::new();
         let mut bundle = String::new();
         for (label, terms) in SEED_THEMES {
-            let query = build_fts_or_query(terms);
+            let query = crate::extras::fts::or_query(terms);
             if query.is_empty() {
                 continue;
             }
@@ -361,8 +295,8 @@ impl CrossSessionExtractor {
         }
 
         // Scan done — advance the watermark so we don't reprocess.
-        self.state.last_scanned_watermark = newest_watermark;
-        self.state.save(&self.state_path)?;
+        self.clock.set_watermark(newest_watermark);
+        self.clock.save()?;
 
         // Write the mechanical audit report.
         self.write_report(&started_iso, &started_filename, new_sessions.len(), &themes)?;
@@ -426,20 +360,6 @@ impl CrossSessionExtractor {
     }
 }
 
-/// Build a sanitized FTS5 OR-query from plain seed terms. Each term
-/// is kept only if it is purely alphanumeric (no FTS5 special chars
-/// — apostrophes, quotes, parens, etc.), so the query can never be a
-/// syntax error. Returns "" when no term survives (caller skips the
-/// theme). dirge-6js7 review HIGH fix.
-fn build_fts_or_query(terms: &[&str]) -> String {
-    let safe: Vec<&str> = terms
-        .iter()
-        .copied()
-        .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric()))
-        .collect();
-    safe.join(" OR ")
-}
-
 /// True when every seed term already appears in existing memory.
 /// Coarse — the LLM does the semantic dedup; this just avoids
 /// bundling the obviously-covered.
@@ -492,13 +412,13 @@ fn cap_snippet(s: &str) -> String {
     }
 }
 
-fn now_secs() -> u64 {
-    crate::time_util::now_unix_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn now_secs() -> u64 {
+        crate::time_util::now_unix_secs()
+    }
     use crate::extras::session_db::SessionDb;
 
     fn temp_project() -> (ProjectPaths, std::path::PathBuf) {
@@ -535,36 +455,45 @@ mod tests {
             .unwrap();
     }
 
+    /// Write a state file with a given last_run (legacy shape).
+    fn write_state(paths: &ProjectPaths, last_run: u64) {
+        std::fs::create_dir_all(paths.memory_dir()).unwrap();
+        std::fs::write(
+            paths.memory_dir().join(".cross_session_state"),
+            format!(r#"{{"last_run": {last_run}, "first_check": {last_run}}}"#),
+        )
+        .unwrap();
+    }
+
+    /// dirge-rwrg: before the first run, the gate is session count
+    /// (shared CuratorClock policy) — a young project with few
+    /// sessions defers; enough sessions fire it without a 14-day wait.
     #[test]
-    fn should_run_now_seeds_and_defers_on_first_check() {
+    fn first_run_gated_on_session_count() {
         let (paths, _t) = temp_project();
-        let state_path = paths.memory_dir().join(".cross_session_state");
+        let db = seed_db(&paths);
+        add_session(&db, "s1", "2026-05-01T10:00:00Z", "hello");
+        drop(db);
         let mut ext = CrossSessionExtractor::new(&paths).unwrap();
-        assert!(!ext.should_run_now(), "first check defers (returns false)");
-        // dirge-6js7 deadlock fix: the first check must SEED the
-        // clock (persist last_run) — otherwise last_run stays None
-        // forever and the pass never runs.
-        assert!(state_path.exists(), "first check must persist seeded state");
-        let seeded = CrossSessionState::load(&state_path).unwrap();
+        assert!(!ext.should_run_now(), "1 session — deferred");
+
+        let db = seed_db(&paths);
+        for i in 2..=12 {
+            add_session(&db, &format!("s{i}"), "2026-05-01T10:00:00Z", "hello");
+        }
+        drop(db);
+        let mut ext = CrossSessionExtractor::new(&paths).unwrap();
         assert!(
-            seeded.last_run.is_some(),
-            "first check must seed last_run so the interval clock starts",
+            ext.should_run_now(),
+            "enough sessions — first run fires without a 14-day wait"
         );
     }
 
     #[test]
     fn should_run_now_respects_14_day_interval() {
         let (paths, _t) = temp_project();
-        let state_path = paths.memory_dir().join(".cross_session_state");
         // Ran 10 days ago — still inside the 14-day gate.
-        let ten_days = now_secs().saturating_sub(10 * 24 * 3600);
-        CrossSessionState {
-            last_run: Some(ten_days),
-            first_check: ten_days,
-            last_scanned_watermark: String::new(),
-        }
-        .save(&state_path)
-        .unwrap();
+        write_state(&paths, now_secs().saturating_sub(10 * 24 * 3600));
         let mut ext = CrossSessionExtractor::new(&paths).unwrap();
         assert!(!ext.should_run_now(), "10 days < 14-day gate");
     }
@@ -572,15 +501,7 @@ mod tests {
     #[test]
     fn should_run_now_true_after_15_days() {
         let (paths, _t) = temp_project();
-        let state_path = paths.memory_dir().join(".cross_session_state");
-        let fifteen_days = now_secs().saturating_sub(15 * 24 * 3600);
-        CrossSessionState {
-            last_run: Some(fifteen_days),
-            first_check: fifteen_days,
-            last_scanned_watermark: String::new(),
-        }
-        .save(&state_path)
-        .unwrap();
+        write_state(&paths, now_secs().saturating_sub(15 * 24 * 3600));
         let mut ext = CrossSessionExtractor::new(&paths).unwrap();
         assert!(ext.should_run_now(), "15 days > 14-day gate");
     }
@@ -694,7 +615,7 @@ mod tests {
         let mut ext = CrossSessionExtractor::new(&paths).unwrap();
         let _ = ext.run_mechanical_scan("current").unwrap();
         // Watermark advanced to the newest session's last_active.
-        assert_eq!(ext.state.last_scanned_watermark, "2026-05-03T10:00:00Z");
+        assert_eq!(ext.clock.watermark(), "2026-05-03T10:00:00Z");
         // A second scan now sees 0 new sessions → no bundle.
         let out2 = ext.run_mechanical_scan("current").unwrap();
         assert!(out2.is_none(), "no new sessions after watermark → skip");
@@ -736,36 +657,11 @@ mod tests {
     }
 
     #[test]
-    fn build_fts_or_query_sanitizes_and_joins() {
-        // Plain terms → OR-joined.
-        assert_eq!(build_fts_or_query(&["build", "cargo"]), "build OR cargo");
-        // Non-alphanumeric terms (apostrophe, paren) are dropped so
-        // the query can never be an FTS5 syntax error.
-        assert_eq!(build_fts_or_query(&["don't", "prefer", "(stop)"]), "prefer",);
-        // All-unsafe → empty (caller skips the theme).
-        assert_eq!(build_fts_or_query(&["don't", "a-b"]), "");
-    }
-
-    #[test]
     fn cap_snippet_truncates_long_content() {
         let long = "word ".repeat(200);
         let capped = cap_snippet(&long);
         assert!(capped.chars().count() <= SNIPPET_CHAR_CAP + 1);
         assert!(capped.ends_with('…'));
         assert_eq!(cap_snippet("short text"), "short text");
-    }
-
-    #[test]
-    fn state_round_trips_through_disk() {
-        let (paths, _t) = temp_project();
-        let path = paths.memory_dir().join(".cross_session_state");
-        let s = CrossSessionState {
-            last_run: Some(123),
-            first_check: 100,
-            last_scanned_watermark: "2026-05-03T10:00:00Z".to_string(),
-        };
-        s.save(&path).unwrap();
-        let loaded = CrossSessionState::load(&path).unwrap();
-        assert_eq!(loaded, s);
     }
 }

@@ -57,8 +57,121 @@ fn concurrent_first_opens_all_succeed() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(ver, 7);
+    assert_eq!(ver, SCHEMA_VERSION);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// dirge-slj2: post-v6 the messages_fts index holds a REDACTED,
+/// CONCATENATED projection, but the v1/v2 messages_ad trigger issued
+/// the external-content FTS5 'delete' command with raw old.content —
+/// mismatched values corrupt the index. v8 must drop the trigger.
+/// The trigram delete trigger targets a STANDALONE fts table with
+/// plain DML and is correct — it must survive.
+#[test]
+fn schema_v8_drops_the_stale_fts_delete_trigger() {
+    let (db, _dir) = temp_db();
+    let ad: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='messages_ad'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ad, 0, "messages_ad must be dropped by v8");
+    let trigram: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='messages_fts_trigram_delete'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigram, 1, "the correct trigram delete trigger stays");
+}
+
+/// dirge-slj2: the safe delete path. delete_session_messages must
+/// recompute each row's exact indexed projection (redacted +
+/// concatenated, same as insert_message) for the FTS5 'delete'
+/// command, leaving zero ghosts in either index and other sessions
+/// untouched.
+#[test]
+fn delete_session_messages_cleans_both_fts_indexes() {
+    let (db, _dir) = temp_db();
+    db.insert_session("s1", "cli", "gpt-5", "openai", "2026-01-01T10:00:00Z")
+        .unwrap();
+    // Projection differs from raw content two ways: the bearer token
+    // is redacted at index time, and tool_name is concatenated in.
+    db.insert_message(
+        "s1",
+        "assistant",
+        "Authorization: Bearer supersecret123 zebraword",
+        Some("uniquetool"),
+        None,
+        None,
+        "2026-01-01T10:01:00Z",
+    )
+    .unwrap();
+    db.insert_session("s2", "cli", "gpt-5", "openai", "2026-01-01T11:00:00Z")
+        .unwrap();
+    db.insert_message(
+        "s2",
+        "user",
+        "zebraword survives in the other session",
+        None,
+        None,
+        None,
+        "2026-01-01T11:01:00Z",
+    )
+    .unwrap();
+
+    let deleted = db.delete_session_messages("s1").unwrap();
+    assert_eq!(deleted, 1);
+
+    // No ghosts in either index for the deleted session's tokens.
+    let fts_ghosts: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'uniquetool'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts_ghosts, 0, "unicode61 index must be clean");
+    let trigram_ghosts: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages_fts_trigram WHERE messages_fts_trigram MATCH 'uniquetool'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigram_ghosts, 0, "trigram index must be clean");
+
+    // The other session's content still searches fine.
+    let results = db.search_messages("zebraword", None).unwrap();
+    assert_eq!(results.len(), 1, "other session must stay searchable");
+    assert_eq!(results[0].session_id, "s2");
+
+    // Rows gone, count reset.
+    let remaining: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = 's1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT message_count FROM sessions WHERE id = 's1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "session message_count must reset");
 }
 
 #[test]
@@ -698,7 +811,10 @@ fn migration_from_v2_to_v5_adds_trigram_and_columns() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(ver, 7, "should be at schema version 7 after migration");
+    assert_eq!(
+        ver, SCHEMA_VERSION,
+        "should be at the current schema version after migration"
+    );
 
     // Trigram table should exist.
     let trigram_exists: i64 = db

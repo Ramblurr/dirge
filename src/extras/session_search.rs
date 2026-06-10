@@ -141,7 +141,7 @@ impl SessionSearch {
     /// an anchored window. Results are deduplicated by lineage
     /// root.
     pub fn discover(&self, query: &str) -> Result<Vec<DiscoveryHit>, String> {
-        let sanitized = sanitize_fts5_query(query);
+        let sanitized = crate::extras::fts::sanitize_query(query);
         if sanitized.is_empty() {
             return Ok(Vec::new());
         }
@@ -453,88 +453,6 @@ fn truncate_content(content: &str, max_len: usize) -> String {
     )
 }
 
-/// Sanitize a user-provided query string for safe use with FTS5 MATCH.
-/// Port of Hermes's _sanitize_fts5_query (hermes_state.py:2036-2086).
-///
-/// FTS5 query syntax has special characters: `+`, `*`, `"`, `(`, `)`, `{`,
-/// `}`, `^`, and bare boolean operators (AND, OR, NOT). Passing raw user
-/// input directly to MATCH can cause `sqlite3.OperationalError`.
-///
-/// Strategy (6-step pipeline from Hermes):
-/// 1. Extract balanced double-quoted phrases, protect with placeholders
-/// 2. Strip remaining FTS5-special chars: `+{}()"^`
-/// 3. Collapse repeated `*` into single `*`, remove leading `*`
-/// 4. Remove dangling boolean operators at start/end
-/// 5. Wrap hyphenated and dotted terms in quotes (FTS5 splits on `-` and `.`)
-/// 6. Restore preserved quoted phrases
-fn sanitize_fts5_query(query: &str) -> String {
-    use regex::Regex;
-    use std::sync::LazyLock;
-
-    if query.trim().is_empty() {
-        return String::new();
-    }
-
-    // Step 1: Extract balanced double-quoted phrases and protect them.
-    static QUOTED_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""[^"]*""#).unwrap());
-    let mut quoted_parts: Vec<String> = Vec::new();
-    let mut sanitized = QUOTED_RE
-        .replace_all(query, |caps: &regex::Captures| {
-            let s = caps[0].to_string();
-            let idx = quoted_parts.len();
-            quoted_parts.push(s);
-            format!("\x00Q{idx}\x00")
-        })
-        .to_string();
-
-    // Step 2: Strip remaining FTS5-special characters: + { } ( ) " ^
-    static SPECIAL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[+{}()"^]"#).unwrap());
-    sanitized = SPECIAL_RE.replace_all(&sanitized, " ").to_string();
-
-    // Step 3: Collapse repeated * into single *, remove leading *
-    static STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*+").unwrap());
-    sanitized = STAR_RE.replace_all(&sanitized, "*").to_string();
-    static LEADING_STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\s)\*").unwrap());
-    sanitized = LEADING_STAR_RE.replace_all(&sanitized, "$1").to_string();
-
-    // Step 4: Remove dangling boolean operators at start/end.
-    // SESS-7: loop until stable so chained operators like
-    // `AND OR foo` or `foo AND OR` are fully stripped. The single
-    // `replace` (not `replace_all`) only consumed one match per
-    // side and left FTS5-invalid residue that the engine then
-    // rejected.
-    static DANGLING_START_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)^(AND|OR|NOT)\b\s*").unwrap());
-    static DANGLING_END_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)\s+(AND|OR|NOT)\s*$").unwrap());
-    loop {
-        let before = sanitized.clone();
-        sanitized = DANGLING_START_RE.replace(sanitized.trim(), "").to_string();
-        sanitized = DANGLING_END_RE.replace(sanitized.trim(), "").to_string();
-        if sanitized == before {
-            break;
-        }
-    }
-
-    // Step 5: Wrap hyphenated and dotted terms in quotes.
-    // FTS5 tokenizer splits on `-` and `.`, so `chat-send` becomes
-    // `chat AND send`. Quoting preserves phrase semantics.
-    static DOT_DASH_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\b(\w+(?:[._-]\w+)+\w*)\b").unwrap());
-    sanitized = DOT_DASH_RE.replace_all(&sanitized, r#""$1""#).to_string();
-
-    // Step 6: Restore preserved quoted phrases
-    for (i, quoted) in quoted_parts.iter().enumerate() {
-        sanitized = sanitized.replace(&format!("\x00Q{i}\x00"), quoted);
-    }
-
-    let trimmed = sanitized.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    trimmed.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,59 +708,5 @@ mod tests {
         // Message doesn't exist, but we trust the caller.
         let session = search.find_message_session("sess-1", 999).unwrap();
         assert_eq!(session, "sess-1");
-    }
-
-    // ── sanitize_fts5_query ─────────────────────────────
-
-    #[test]
-    fn sanitize_preserves_normal_query() {
-        let result = sanitize_fts5_query("database migrations");
-        assert_eq!(result, "database migrations");
-    }
-
-    #[test]
-    fn sanitize_protects_balanced_quotes() {
-        // Balanced quotes protect their content from stripping.
-        let result = sanitize_fts5_query("\"exact phrase\"");
-        assert_eq!(result, "\"exact phrase\"");
-    }
-
-    #[test]
-    fn sanitize_strips_fts5_special_chars() {
-        // +, {, }, (, ), ^ stripped; balanced quotes protect content.
-        let result = sanitize_fts5_query("+hello");
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn sanitize_collapses_multiple_stars() {
-        // *** collapses to * but leading * still stripped
-        let result = sanitize_fts5_query("a***test");
-        assert_eq!(result, "a*test");
-    }
-
-    #[test]
-    fn sanitize_strips_dangling_boolean() {
-        let result = sanitize_fts5_query("hello AND");
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn sanitize_wraps_hyphenated_and_dotted_terms() {
-        // FTS5 splits on - and ., quoting preserves phrase semantics.
-        let result = sanitize_fts5_query("my-app.config.ts");
-        assert_eq!(result, "\"my-app.config.ts\"");
-    }
-
-    #[test]
-    fn sanitize_empty_after_cleaning() {
-        let result = sanitize_fts5_query("*\"()");
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn sanitize_trims_whitespace() {
-        let result = sanitize_fts5_query("  hello world  ");
-        assert_eq!(result, "hello world");
     }
 }

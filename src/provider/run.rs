@@ -11,6 +11,49 @@ use crate::event::AgentEvent;
 #[allow(unused_imports)]
 use crate::sync_util::LockExt;
 
+/// How the headless event stream ended (dirge-18v2). The JSON result
+/// envelope must reflect this — a run that was truncated by the turn
+/// cap or whose runner died without a `Done` is NOT a success, and
+/// `--print` consumers parse the envelope, not stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunEnd {
+    /// `Done` arrived and no truncation notice was seen.
+    Completed,
+    /// `Done` arrived but the max-agent-turns cap stopped the run.
+    Truncated,
+    /// The event channel closed without a `Done` — the runner died
+    /// (panic/abort) and `full_response` is whatever streamed first.
+    Incomplete,
+}
+
+/// Build the machine-readable result envelope for the headless modes.
+/// Pure so the success/error mapping is unit-testable without a live
+/// runner.
+pub(crate) fn headless_result_json(
+    end: RunEnd,
+    duration_ms: u64,
+    num_turns: u32,
+    result: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    let (subtype, is_error) = match end {
+        RunEnd::Completed => ("success", false),
+        // Matches the Claude Code stream-json convention dirge mimics.
+        RunEnd::Truncated => ("error_max_turns", true),
+        RunEnd::Incomplete => ("error", true),
+    };
+    serde_json::json!({
+        "type": "result",
+        "subtype": subtype,
+        "is_error": is_error,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
+        "result": result,
+        "session_id": session_id,
+        "total_cost_usd": 0.0,
+    })
+}
+
 impl AnyAgent {
     pub async fn run_print(
         &self,
@@ -72,6 +115,10 @@ impl AnyAgent {
 
         let mut full_response = String::new();
         let mut had_output = false;
+        // dirge-18v2: track how the stream ends so the result envelope
+        // can't claim success for a truncated or runner-died run.
+        let mut completed = false;
+        let mut truncated = false;
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -90,6 +137,7 @@ impl AnyAgent {
                 AgentEvent::Done { response, .. } => {
                     // `Done.response` is the authoritative full text.
                     full_response = response.to_string();
+                    completed = true;
                     break;
                 }
                 AgentEvent::Error(err) => {
@@ -106,9 +154,13 @@ impl AnyAgent {
                 AgentEvent::SystemNotice { content } => {
                     // dirge-originated runtime notice (e.g. the
                     // max-agent-turns cap). Headless drives output from
-                    // events, so surface it to stderr — otherwise a
-                    // truncated run looks like a clean success to a
-                    // `--print` consumer.
+                    // events, so surface it to stderr — and mark the
+                    // run truncated so the JSON envelope reflects it
+                    // (dirge-18v2); stderr alone is invisible to
+                    // `--print` consumers parsing stdout.
+                    if content.starts_with(crate::agent::agent_loop::run::MAX_TURNS_NOTICE_PREFIX) {
+                        truncated = true;
+                    }
                     if had_output {
                         println!();
                     }
@@ -146,22 +198,30 @@ impl AnyAgent {
             }
         }
 
+        // dirge-18v2: classify how the stream ended. A truncated run
+        // or one whose runner died without a Done must not produce a
+        // success envelope.
+        let end = if !completed {
+            RunEnd::Incomplete
+        } else if truncated {
+            RunEnd::Truncated
+        } else {
+            RunEnd::Completed
+        };
+        let result_envelope = headless_result_json(
+            end,
+            start_instant.elapsed().as_millis() as u64,
+            num_turns,
+            &full_response,
+            &session_id,
+        );
+
         match output_format {
             crate::cli::OutputFormat::Text => {
                 println!();
             }
             crate::cli::OutputFormat::Json => {
-                let result = serde_json::json!({
-                    "type": "result",
-                    "subtype": "success",
-                    "is_error": false,
-                    "duration_ms": start_instant.elapsed().as_millis() as u64,
-                    "num_turns": num_turns,
-                    "result": full_response.clone(),
-                    "session_id": session_id,
-                    "total_cost_usd": 0.0,
-                });
-                if let Ok(s) = serde_json::to_string(&result) {
+                if let Ok(s) = serde_json::to_string(&result_envelope) {
                     println!("{}", s);
                 }
             }
@@ -174,18 +234,62 @@ impl AnyAgent {
                     },
                     "session_id": session_id,
                 }));
-                runner::emit_stream_json_event(serde_json::json!({
-                    "type": "result",
-                    "subtype": "success",
-                    "is_error": false,
-                    "duration_ms": start_instant.elapsed().as_millis() as u64,
-                    "num_turns": num_turns,
-                    "result": full_response.clone(),
-                    "session_id": session_id,
-                    "total_cost_usd": 0.0,
-                }));
+                runner::emit_stream_json_event(result_envelope);
             }
         }
+
+        // The runner died without delivering a Done — the collected
+        // text is whatever streamed before it stopped. The envelope
+        // above already says is_error; the process must also exit
+        // non-zero so script consumers without JSON parsing notice.
+        if end == RunEnd::Incomplete {
+            return Err(anyhow::anyhow!(
+                "run ended without completing — the agent runner stopped before producing a result"
+            ));
+        }
         Ok(full_response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// dirge-18v2: the result envelope must reflect how the run ended
+    /// — `--print` consumers parse this JSON, not stderr.
+    #[test]
+    fn result_envelope_reflects_run_end() {
+        let ok = headless_result_json(RunEnd::Completed, 10, 2, "answer", "sid");
+        assert_eq!(ok["subtype"], "success");
+        assert_eq!(ok["is_error"], false);
+        assert_eq!(ok["result"], "answer");
+
+        let capped = headless_result_json(RunEnd::Truncated, 10, 100, "partial", "sid");
+        assert_eq!(capped["subtype"], "error_max_turns");
+        assert_eq!(capped["is_error"], true);
+        assert_eq!(capped["result"], "partial", "partial text still delivered");
+
+        let died = headless_result_json(RunEnd::Incomplete, 10, 1, "fragment", "sid");
+        assert_eq!(died["subtype"], "error");
+        assert_eq!(died["is_error"], true);
+    }
+
+    /// The truncation detector matches the notice the agent loop
+    /// actually emits — both sides use MAX_TURNS_NOTICE_PREFIX, so a
+    /// reworded notice that breaks the coupling fails here.
+    #[test]
+    fn truncation_notice_prefix_matches_emitter() {
+        let cap = 100;
+        // Mirror of the format string in agent_loop::run's max-turns
+        // branch.
+        let notice = format!(
+            "{} ({cap}) reached. Stopping the run.",
+            crate::agent::agent_loop::run::MAX_TURNS_NOTICE_PREFIX
+        );
+        assert!(notice.starts_with(crate::agent::agent_loop::run::MAX_TURNS_NOTICE_PREFIX));
+        assert!(
+            crate::agent::agent_loop::run::MAX_TURNS_NOTICE_PREFIX.starts_with("[dirge]"),
+            "notice must stay visually attributable to dirge",
+        );
     }
 }

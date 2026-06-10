@@ -27,9 +27,6 @@
 //! - LLM pass uses a memory-only allow-list — model literally
 //!   cannot reach skill-write tools even if its prompt slips.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
 use crate::extras::dirge_paths::ProjectPaths;
 
 /// dirge-mo0w PR-2: prompt for the memory curator's LLM
@@ -85,11 +82,6 @@ Operate on these only.";
 /// Days since `first_seen_at` before an entry counts as stale.
 const STALE_AFTER_DAYS: u64 = 30;
 
-/// dirge-jyks: a young project should get its first curation pass
-/// once it has accumulated this many sessions, instead of waiting a
-/// full calendar interval — memory churn is highest at the start.
-const MIN_SESSIONS_FOR_FIRST_RUN: i64 = 10;
-
 /// dirge-jyks: hot-tier utilization (%) at or above which the LLM
 /// pass is told consolidation of YOUNGER overlapping entries is also
 /// in scope for that target.
@@ -103,99 +95,34 @@ const ARCHIVE_AFTER_STALE_DAYS: u64 = 90;
 /// Minimum hours between curator runs.
 const INTERVAL_HOURS: u64 = 168; // 7 days
 
-// ── State ─────────────────────────────────────────────
-
-/// Persistent scheduler state at `.dirge/memory/.curator_state`.
-/// Mirrors the skills curator's state shape so future code that
-/// wants to coordinate the two runners has the same field
-/// vocabulary to work with.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MemoryCuratorState {
-    /// Unix timestamp (seconds) of the last curator run. `None`
-    /// = never run; different from epoch-0 which is a valid
-    /// timestamp on some systems.
-    pub last_run: Option<u64>,
-    /// Timestamp when the state was first seeded.
-    pub first_check: u64,
-}
-
-impl MemoryCuratorState {
-    fn new(now: u64) -> Self {
-        Self {
-            last_run: None,
-            first_check: now,
-        }
-    }
-
-    fn load(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::new(now_secs()));
-        }
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("read curator state: {e}"))?;
-        serde_json::from_str(&content).map_err(|e| format!("parse curator state: {e}"))
-    }
-
-    fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create state dir: {e}"))?;
-        }
-        let content =
-            serde_json::to_string_pretty(self).map_err(|e| format!("serialize state: {e}"))?;
-        crate::fs_atomic::atomic_write_sync(path, content.as_bytes())
-            .map_err(|e| format!("write state: {e}"))
-    }
-}
-
 // ── Curator ───────────────────────────────────────────
 
 /// Memory lifecycle manager. Constructed once per run.
 pub struct MemoryCurator {
     paths: ProjectPaths,
-    state: MemoryCuratorState,
-    state_path: PathBuf,
+    /// Shared scheduler clock (dirge-rwrg): session-count first-run
+    /// gate + 7-day interval, state at `.dirge/memory/.curator_state`.
+    clock: crate::extras::curator_clock::CuratorClock,
 }
 
 impl MemoryCurator {
     pub fn new(paths: &ProjectPaths) -> Result<Self, String> {
-        let state_path = paths.memory_dir().join(".curator_state");
-        let state = MemoryCuratorState::load(&state_path)?;
+        let clock = crate::extras::curator_clock::CuratorClock::new(
+            paths,
+            paths.memory_dir().join(".curator_state"),
+            INTERVAL_HOURS,
+            crate::extras::curator_clock::DEFAULT_MIN_SESSIONS_FIRST_RUN,
+        )?;
         Ok(Self {
             paths: paths.clone(),
-            state,
-            state_path,
+            clock,
         })
     }
 
-    /// Should the curator run now? dirge-jyks: before the first run,
-    /// the gate is SESSION COUNT, not the calendar — once the project
-    /// has accumulated [`MIN_SESSIONS_FOR_FIRST_RUN`] sessions the
-    /// first pass fires on the next check, however young the project
-    /// is. Afterwards, run when the last run was >= 7 days ago.
-    ///
-    /// No deadlock (dirge-6js7's failure mode): the `None` branch
-    /// returns `true` as soon as sessions accumulate, and
-    /// `run_mechanical_pass` is the seeder that sets `last_run`.
+    /// Should the curator run now? See [`CuratorClock::should_run_now`]
+    /// — session-count gate before the first run, interval after.
     pub fn should_run_now(&mut self) -> bool {
-        match self.state.last_run {
-            None => self.session_count() >= MIN_SESSIONS_FOR_FIRST_RUN,
-            Some(last) => {
-                let elapsed = Duration::from_secs(now_secs().saturating_sub(last));
-                elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
-            }
-        }
-    }
-
-    /// Best-effort session count from the project DB. 0 when the DB
-    /// can't be opened (no sessions yet → first run stays deferred).
-    fn session_count(&self) -> i64 {
-        let Ok(db) = crate::extras::session_db::SessionDb::open(&self.paths.session_db_path())
-        else {
-            return 0;
-        };
-        db.conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .unwrap_or(0)
+        self.clock.should_run_now()
     }
 
     /// Run the mechanical pass: scan the memories table, identify
@@ -211,7 +138,6 @@ impl MemoryCurator {
         let started_at = chrono::Utc::now();
         let started_at_iso = started_at.to_rfc3339();
         let started_at_filename = started_at.format("%Y%m%d-%H%M%S").to_string();
-        let now = now_secs();
 
         // 1. Apply disuse decay BEFORE scanning, so this run's report
         //    reflects post-decay salience (dirge-jyks).
@@ -253,7 +179,7 @@ impl MemoryCurator {
                 stale_candidates.push(StaleCandidate {
                     target: entry.target.clone(),
                     entry_id: entry.uid.clone(),
-                    preview: preview(&entry.content),
+                    preview: crate::text::first_line_preview(&entry.content),
                     age_days,
                     use_count: entry.use_count,
                 });
@@ -270,9 +196,8 @@ impl MemoryCurator {
             .map(|t| t.to_string())
             .collect();
 
-        // 5. Update state.
-        self.state.last_run = Some(now);
-        self.state.save(&self.state_path)?;
+        // 5. Update the scheduler clock.
+        self.clock.mark_ran()?;
 
         let report = MechanicalReport {
             started_at_iso: started_at_iso.clone(),
@@ -521,24 +446,6 @@ pub fn render_curator_input(
 
 // ── Helpers ───────────────────────────────────────────
 
-fn now_secs() -> u64 {
-    crate::time_util::now_unix_secs()
-}
-
-/// First-line snippet of an entry, capped at 80 chars. Used in
-/// the audit report so the operator can identify which entry is
-/// stale without rendering the full content.
-fn preview(content: &str) -> String {
-    let first = content.lines().next().unwrap_or("");
-    let trimmed = first.trim();
-    if trimmed.chars().count() <= 80 {
-        trimmed.to_string()
-    } else {
-        let cut: String = trimmed.chars().take(77).collect();
-        format!("{cut}...")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,8 +527,18 @@ mod tests {
         // The pass itself seeds last_run, closing the dirge-6js7
         // deadlock the old defer-and-seed dance worked around.
         curator.run_mechanical_pass().unwrap();
-        assert!(curator.state.last_run.is_some());
+        assert!(curator.clock.last_run().is_some());
         assert!(!curator.should_run_now(), "interval gate applies after");
+    }
+
+    /// Write a legacy-shaped state file with a given last_run.
+    fn write_state(paths: &ProjectPaths, last_run: u64) {
+        std::fs::create_dir_all(paths.memory_dir()).unwrap();
+        std::fs::write(
+            paths.memory_dir().join(".curator_state"),
+            format!(r#"{{"last_run": {last_run}, "first_check": {last_run}}}"#),
+        )
+        .unwrap();
     }
 
     /// After a run, the 7-day interval gate keeps subsequent
@@ -629,13 +546,7 @@ mod tests {
     #[test]
     fn should_run_now_respects_interval_gate() {
         let (paths, _tmp) = temp_project();
-        let state_path = paths.memory_dir().join(".curator_state");
-        let just_ran = MemoryCuratorState {
-            last_run: Some(now_secs()),
-            first_check: now_secs() - 86400,
-        };
-        std::fs::create_dir_all(paths.memory_dir()).unwrap();
-        just_ran.save(&state_path).unwrap();
+        write_state(&paths, crate::time_util::now_unix_secs());
         let mut curator = MemoryCurator::new(&paths).unwrap();
         assert!(
             !curator.should_run_now(),
@@ -647,14 +558,10 @@ mod tests {
     #[test]
     fn should_run_now_returns_true_after_interval_elapsed() {
         let (paths, _tmp) = temp_project();
-        let state_path = paths.memory_dir().join(".curator_state");
-        let eight_days_ago = now_secs().saturating_sub(8 * 24 * 3600);
-        let stale = MemoryCuratorState {
-            last_run: Some(eight_days_ago),
-            first_check: eight_days_ago,
-        };
-        std::fs::create_dir_all(paths.memory_dir()).unwrap();
-        stale.save(&state_path).unwrap();
+        write_state(
+            &paths,
+            crate::time_util::now_unix_secs().saturating_sub(8 * 24 * 3600),
+        );
         let mut curator = MemoryCurator::new(&paths).unwrap();
         assert!(curator.should_run_now(), "after 8 days the gate must open");
     }
@@ -669,7 +576,7 @@ mod tests {
         assert_eq!(report.total_entries, 0);
         assert_eq!(report.stale_candidates.len(), 0);
         // State advanced.
-        assert!(curator.state.last_run.is_some());
+        assert!(curator.clock.last_run().is_some());
     }
 
     /// Fresh entries appear in the report total but DON'T appear as
@@ -851,10 +758,11 @@ mod tests {
         seed_memory(&paths, "memory", &["whatever"]);
         let mut curator = MemoryCurator::new(&paths).unwrap();
         curator.run_mechanical_pass().unwrap();
-        let last_run = curator.state.last_run;
+        let last_run = curator.clock.last_run();
         let curator2 = MemoryCurator::new(&paths).unwrap();
         assert_eq!(
-            curator2.state.last_run, last_run,
+            curator2.clock.last_run(),
+            last_run,
             "state must round-trip through disk",
         );
     }
@@ -998,9 +906,9 @@ mod tests {
     /// long entries get truncated with an ellipsis marker.
     #[test]
     fn preview_truncates_long_lines_with_ellipsis() {
-        let short = preview("short and sweet");
+        let short = crate::text::first_line_preview("short and sweet");
         assert_eq!(short, "short and sweet");
-        let long = preview(&"x".repeat(120));
+        let long = crate::text::first_line_preview(&"x".repeat(120));
         assert!(
             long.ends_with("..."),
             "long preview must end with '...': {long:?}",

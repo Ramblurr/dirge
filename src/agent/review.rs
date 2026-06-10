@@ -118,6 +118,61 @@ Target shape of the library: CLASS-LEVEL skills with a rich SKILL.md. Not a long
 // orphaned and writing MEMORY.md / .usage.json / skills CONCURRENTLY with the
 // next stage — the exact cross-pass races the orchestrator exists to prevent.
 
+/// What a forked review/curator run produced (dirge-zact).
+pub(crate) struct ForkedRunOutcome {
+    /// Tool-call names in dispatch order.
+    pub tool_actions: Vec<String>,
+    /// First error the runner reported, if any. Every error is also
+    /// warn-logged as it streams.
+    pub error: Option<String>,
+}
+
+/// Shared drain for the forked review/curator runners (dirge-zact).
+/// The four post-session LLM passes used to copy-paste this loop with
+/// drifting error handling. Holds the abort-on-drop guard for the
+/// drain's duration — a cancelled caller (orchestrator stage timeout)
+/// aborts the runner instead of orphaning it — collects tool-call
+/// names, captures the first error, and returns at `Done` or when the
+/// channel closes (runner died).
+pub(crate) async fn drain_forked_runner(
+    runner: crate::agent::runner::AgentRunner,
+    pass: &'static str,
+) -> ForkedRunOutcome {
+    let crate::agent::runner::AgentRunner {
+        event_rx,
+        task,
+        cancel_tx,
+        ..
+    } = runner;
+    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
+    let mut rx = event_rx;
+    let mut tool_actions: Vec<String> = Vec::new();
+    let mut error: Option<String> = None;
+    while let Some(event) = rx.recv().await {
+        use crate::event::AgentEvent;
+        match event {
+            AgentEvent::Error(msg) => {
+                tracing::warn!(
+                    target: "dirge::review",
+                    pass,
+                    error = %msg,
+                    "forked runner reported an error",
+                );
+                error.get_or_insert_with(|| msg.to_string());
+            }
+            AgentEvent::ToolCall { name, .. } => {
+                tool_actions.push(name.to_string());
+            }
+            AgentEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    ForkedRunOutcome {
+        tool_actions,
+        error,
+    }
+}
+
 /// dirge-ba0m: awaitable core of the background review pass.
 /// Runs to completion — claims the rate-limit slot, drains the
 /// forked review runner's event stream inline, logs the action
@@ -155,44 +210,12 @@ pub(crate) async fn run_background_review(
     // Build a review runner with only memory + skill tools.
     let review_runner = agent.spawn_review_runner(prompt, transcript);
 
-    // Drain events. Track tool calls so we can summarize what
-    // the review actually did (Hermes's action summary pattern).
-    // dirge-ba0m: keep the runner's task + cancel handle in an
-    // abort-on-drop guard so a cancelled future (orchestrator
-    // timeout) actually stops the runner instead of orphaning it.
-    let crate::agent::runner::AgentRunner {
-        event_rx,
-        task,
-        cancel_tx,
-        ..
-    } = review_runner;
-    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
-    let mut rx = event_rx;
-    let mut had_error = false;
-    let mut tool_actions: Vec<String> = Vec::new();
-
-    while let Some(event) = rx.recv().await {
-        use crate::event::AgentEvent;
-        match event {
-            AgentEvent::Error(msg) => {
-                tracing::warn!(
-                    target: "dirge::review",
-                    error = %msg,
-                    "Background review encountered an error"
-                );
-                had_error = true;
-            }
-            AgentEvent::ToolCall { name, .. } => {
-                tool_actions.push(name.to_string());
-            }
-            AgentEvent::Done { .. } => {
-                break;
-            }
-            _ => {
-                // Tokens, tool calls, etc. — consumed silently.
-            }
-        }
-    }
+    // dirge-zact: shared drain — collects tool calls (Hermes's action
+    // summary pattern) and holds the abort-on-drop guard so a
+    // cancelled future (orchestrator timeout) stops the runner.
+    let outcome = drain_forked_runner(review_runner, "background-review").await;
+    let had_error = outcome.error.is_some();
+    let tool_actions = outcome.tool_actions;
 
     if !had_error && !tool_actions.is_empty() {
         // Surface action summary so the user knows what was learned.
@@ -261,34 +284,10 @@ pub(crate) async fn run_curator_review(
     // memory entries even if it tried.
     // dirge-ba0m: abort-on-drop guard (see run_background_review).
     let runner = agent.spawn_curator_runner(prompt, String::new());
-    let crate::agent::runner::AgentRunner {
-        event_rx,
-        task,
-        cancel_tx,
-        ..
-    } = runner;
-    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
-    let mut rx = event_rx;
-    let mut tool_actions: Vec<String> = Vec::new();
-    let mut error_msg: Option<String> = None;
-    while let Some(event) = rx.recv().await {
-        use crate::event::AgentEvent;
-        match event {
-            AgentEvent::Error(msg) => {
-                tracing::warn!(
-                    target: "dirge::curator",
-                    error = %msg,
-                    "Curator LLM pass encountered an error"
-                );
-                error_msg.get_or_insert_with(|| msg.to_string());
-            }
-            AgentEvent::ToolCall { name, .. } => {
-                tool_actions.push(name.to_string());
-            }
-            AgentEvent::Done { .. } => break,
-            _ => {}
-        }
-    }
+    // dirge-zact: shared drain (abort-on-drop guard included).
+    let outcome = drain_forked_runner(runner, "skills-curator").await;
+    let tool_actions = outcome.tool_actions;
+    let error_msg = outcome.error;
 
     if error_msg.is_none() && !tool_actions.is_empty() {
         let summary = summarize_actions(&tool_actions);
@@ -396,34 +395,10 @@ pub(crate) async fn run_memory_curator_review(
     // `spawn_curator_runner` but inverse allow-list.
     // dirge-ba0m: abort-on-drop guard (see run_background_review).
     let runner = agent.spawn_memory_curator_runner(prompt, String::new());
-    let crate::agent::runner::AgentRunner {
-        event_rx,
-        task,
-        cancel_tx,
-        ..
-    } = runner;
-    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
-    let mut rx = event_rx;
-    let mut tool_actions: Vec<String> = Vec::new();
-    let mut error_msg: Option<String> = None;
-    while let Some(event) = rx.recv().await {
-        use crate::event::AgentEvent;
-        match event {
-            AgentEvent::Error(msg) => {
-                tracing::warn!(
-                    target: "dirge::memory_curator",
-                    error = %msg,
-                    "Memory curator LLM pass encountered an error",
-                );
-                error_msg.get_or_insert_with(|| msg.to_string());
-            }
-            AgentEvent::ToolCall { name, .. } => {
-                tool_actions.push(name.to_string());
-            }
-            AgentEvent::Done { .. } => break,
-            _ => {}
-        }
-    }
+    // dirge-zact: shared drain (abort-on-drop guard included).
+    let outcome = drain_forked_runner(runner, "memory-curator").await;
+    let tool_actions = outcome.tool_actions;
+    let error_msg = outcome.error;
 
     let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
     if error_msg.is_none() {
@@ -516,34 +491,10 @@ pub(crate) async fn run_cross_session_extraction(
     // Memory-only runner + abort-on-drop guard (see
     // run_background_review).
     let runner = agent.spawn_memory_curator_runner(prompt, String::new());
-    let crate::agent::runner::AgentRunner {
-        event_rx,
-        task,
-        cancel_tx,
-        ..
-    } = runner;
-    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
-    let mut rx = event_rx;
-    let mut tool_actions: Vec<String> = Vec::new();
-    let mut error_msg: Option<String> = None;
-    while let Some(event) = rx.recv().await {
-        use crate::event::AgentEvent;
-        match event {
-            AgentEvent::Error(msg) => {
-                tracing::warn!(
-                    target: "dirge::cross_session",
-                    error = %msg,
-                    "Cross-session extraction encountered an error",
-                );
-                error_msg.get_or_insert_with(|| msg.to_string());
-            }
-            AgentEvent::ToolCall { name, .. } => {
-                tool_actions.push(name.to_string());
-            }
-            AgentEvent::Done { .. } => break,
-            _ => {}
-        }
-    }
+    // dirge-zact: shared drain (abort-on-drop guard included).
+    let outcome = drain_forked_runner(runner, "cross-session").await;
+    let tool_actions = outcome.tool_actions;
+    let error_msg = outcome.error;
 
     let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
     if error_msg.is_none() {
@@ -767,6 +718,100 @@ fn truncate_tool_result(result: &str) -> String {
 mod tests {
     use super::*;
     use crate::session::{MessageRole, Session, ToolCallEntry, ToolCallState};
+
+    // ── dirge-zact — shared forked-runner drain ──
+
+    fn fake_runner() -> (
+        tokio::sync::mpsc::Sender<crate::event::AgentEvent>,
+        crate::agent::runner::AgentRunner,
+    ) {
+        let (tx, event_rx) = tokio::sync::mpsc::channel(16);
+        let (cancel_tx, _cancel_rx) = tokio::sync::mpsc::channel(1);
+        let (interject_tx, _interject_rx) = tokio::sync::mpsc::channel(1);
+        let task = tokio::spawn(async {});
+        (
+            tx,
+            crate::agent::runner::AgentRunner {
+                event_rx,
+                task,
+                interject_tx,
+                cancel_tx,
+            },
+        )
+    }
+
+    /// The shared drain collects tool-call names in order, captures
+    /// the FIRST error (later ones are logged only), and stops at
+    /// Done — events after Done are never consumed.
+    #[tokio::test]
+    async fn drain_forked_runner_collects_actions_and_first_error() {
+        use crate::event::AgentEvent;
+        let (tx, runner) = fake_runner();
+
+        tx.send(AgentEvent::ToolCall {
+            id: "1".into(),
+            name: "memory".into(),
+            args: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        tx.send(AgentEvent::Error("first failure".into()))
+            .await
+            .unwrap();
+        tx.send(AgentEvent::Error("second failure".into()))
+            .await
+            .unwrap();
+        tx.send(AgentEvent::ToolCall {
+            id: "2".into(),
+            name: "skill".into(),
+            args: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        tx.send(AgentEvent::Done {
+            response: "done".into(),
+            tokens: 0,
+            cost: 0.0,
+        })
+        .await
+        .unwrap();
+        tx.send(AgentEvent::ToolCall {
+            id: "3".into(),
+            name: "ghost".into(),
+            args: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+        let outcome = drain_forked_runner(runner, "test-pass").await;
+        assert_eq!(
+            outcome.tool_actions,
+            vec!["memory".to_string(), "skill".to_string()],
+            "actions in order, nothing after Done",
+        );
+        assert_eq!(outcome.error.as_deref(), Some("first failure"));
+    }
+
+    /// A channel that closes without a Done (runner died) ends the
+    /// drain with whatever was collected, error-free — callers decide
+    /// what an empty/no-error outcome means.
+    #[tokio::test]
+    async fn drain_forked_runner_ends_on_channel_close() {
+        use crate::event::AgentEvent;
+        let (tx, runner) = fake_runner();
+        tx.send(AgentEvent::ToolCall {
+            id: "1".into(),
+            name: "memory".into(),
+            args: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let outcome = drain_forked_runner(runner, "test-pass").await;
+        assert_eq!(outcome.tool_actions, vec!["memory".to_string()]);
+        assert!(outcome.error.is_none());
+    }
 
     fn make_session() -> Session {
         Session::new("test-provider", "test-model", 128_000)
