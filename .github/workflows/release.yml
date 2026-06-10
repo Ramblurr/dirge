@@ -82,3 +82,69 @@ jobs:
           file_glob: true
           tag: ${{ github.ref }}
           overwrite: true
+
+  # Bump the Homebrew tap (dirge-code/homebrew-dirge) to the just-released
+  # version + checksums. Runs after every target has uploaded its assets, so
+  # the .sha256 files exist to read back. Needs a HOMEBREW_TAP_TOKEN secret —
+  # a PAT (or fine-grained token) with contents:write on the tap repo, since
+  # the default GITHUB_TOKEN can't push to another repository. If the secret
+  # is absent the checkout step fails loudly but the binary release above is
+  # already complete and unaffected.
+  homebrew:
+    name: Bump Homebrew formula
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version + checksums from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          mkdir -p shas
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" -p '*.tar.gz.sha256' -D shas
+          {
+            echo "VERSION=${tag#v}"
+            echo "ARM_MAC=$(awk '{print $1}' shas/dirge-aarch64-apple-darwin.tar.gz.sha256)"
+            echo "X86_MAC=$(awk '{print $1}' shas/dirge-x86_64-apple-darwin.tar.gz.sha256)"
+            echo "X86_LINUX=$(awk '{print $1}' shas/dirge-x86_64-unknown-linux-gnu.tar.gz.sha256)"
+          } >> "$GITHUB_ENV"
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: dirge-code/homebrew-dirge
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update the formula in place
+        run: |
+          f=tap/Formula/dirge.rb
+          # version line + the version segment in every release URL
+          sed -i \
+            -e "s|version \"[^\"]*\"|version \"$VERSION\"|" \
+            -e "s|/releases/download/v[0-9][^/]*/|/releases/download/v$VERSION/|g" \
+            "$f"
+          # rewrite each sha256 by the URL that immediately precedes it
+          awk -v arm="$ARM_MAC" -v xmac="$X86_MAC" -v xlin="$X86_LINUX" '
+            /aarch64-apple-darwin\.tar\.gz"/     { want="arm" }
+            /x86_64-apple-darwin\.tar\.gz"/      { want="xmac" }
+            /x86_64-unknown-linux-gnu\.tar\.gz"/ { want="xlin" }
+            /sha256 "/ {
+              v = (want=="arm" ? arm : (want=="xmac" ? xmac : xlin))
+              sub(/sha256 "[^"]*"/, "sha256 \"" v "\"")
+              want=""
+            }
+            { print }
+          ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+
+      - name: Commit and push
+        run: |
+          cd tap
+          if git diff --quiet; then
+            echo "Formula already at $VERSION — nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "dirge $VERSION"
+          git push
