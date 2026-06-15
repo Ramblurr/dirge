@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-15
+
+### Fixed
+- **Resumed sessions restore the TODOS and MODIFIED panels past a
+  compaction.** 0.7.0 rebuilt these panels by replaying the tool calls in the
+  message history, but a destructive compaction drains those messages out of
+  the session — so a resumed `compacted-*` session came back with empty TODOS
+  and a near-empty MODIFIED list. The panel state is now snapshotted into the
+  session file on every save (independent of message history), so resume
+  restores it even after a fold. Sessions saved by an older binary have no
+  snapshot and can't be recovered; only sessions saved going forward carry it.
+
+### Changed
+- **Faster `dirge --session <id>` resume.** Resolving a session id to its fold
+  chain tip no longer fully deserializes every session file in the directory —
+  it scans with a lightweight partial parse and fully loads only the winning
+  tip. Resume startup no longer degrades as old session files accumulate.
+
 ## [0.7.0] - 2026-06-15
 
 ### Added
