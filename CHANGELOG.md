@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-17
+
+### Fixed
+- **In-loop critic no longer judges a truncated, stale view of the run.** The
+  transcript handed to the F6 critic (and the goal gate) rendered the whole run
+  and then kept only the first ~8000 chars — so in a substantial run it saw the
+  planning/scaffolding at the start and never the implementation and
+  verification at the end, producing confidently wrong critiques ("no code
+  created", "no demo run") about work that was actually complete. It now keeps
+  the original request plus the most recent activity (head + tail, eliding the
+  middle), since completion is decided by the latest work.
+
 ## [0.7.3] - 2026-06-17
 
 ### Added
