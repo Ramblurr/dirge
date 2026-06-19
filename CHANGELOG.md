@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`show_reasoning` config flag.** Set it to `true` to make the model's
+  thinking visible by default instead of pressing `Ctrl+O` each turn. Defaults
+  to `false` (unchanged behavior); `Ctrl+O` still toggles per session. (#461)
+
 ## [0.8.1] - 2026-06-18
 
 ### Fixed

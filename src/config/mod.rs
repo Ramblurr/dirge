@@ -492,6 +492,10 @@ pub struct Config {
     pub default_permission_mode: Option<String>,
     pub show_tool_details: Option<bool>,
     pub show_edit_diff: Option<bool>,
+    /// Make the model's thinking/reasoning burst visible by default,
+    /// without having to press Ctrl+O each turn (GH #461). Absent or
+    /// `false` keeps today's behavior (reasoning hidden until toggled).
+    pub show_reasoning: Option<bool>,
     /// Preferred default pane layout for the TUI: a `|`/`,`/space-
     /// separated subset of `left`, `main`, `right` (e.g.
     /// `"left|main|right"`, `"main"`, `"main|right"`). The main pane is
@@ -824,6 +828,12 @@ impl Config {
 
     pub fn resolve_show_edit_diff(&self) -> bool {
         self.show_edit_diff.unwrap_or(true)
+    }
+
+    /// Whether the thinking/reasoning burst is visible by default (GH #461).
+    /// Defaults to false — reasoning stays hidden until toggled with Ctrl+O.
+    pub fn resolve_show_reasoning(&self) -> bool {
+        self.show_reasoning.unwrap_or(false)
     }
 
     /// Resolve the sandbox mode, preferring the nested `sandbox.mode`.
@@ -1172,6 +1182,21 @@ mod tests {
         );
         assert_eq!(m.embed_api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(m.verbatim_pre_recall, Some(true));
+    }
+
+    /// dirge-j0s2 (GH #461): `show_reasoning` controls whether the thinking
+    /// burst is visible by default. Absent → false (current behavior).
+    #[test]
+    fn show_reasoning_defaults_off_and_parses() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.show_reasoning, None);
+        assert!(!cfg.resolve_show_reasoning(), "off by default");
+
+        let cfg: Config = serde_json::from_str(r#"{"show_reasoning": true}"#).unwrap();
+        assert!(cfg.resolve_show_reasoning());
+
+        let cfg: Config = serde_json::from_str(r#"{"show_reasoning": false}"#).unwrap();
+        assert!(!cfg.resolve_show_reasoning());
     }
 
     /// dirge-4xgd: `[timeouts]` overrides merge onto Timeouts::DEFAULT;

@@ -235,6 +235,9 @@ pub async fn run_interactive(
     // `shells:N` count reflects the same shells the model spawned.
     let shell_store = Some(crate::agent::tools::bg_shell::global());
     let mut ui = state::UiState::new();
+    // GH #461: start with reasoning visible if the user opted in via config.
+    // Ctrl+O still toggles it per-session from this starting point.
+    ui.show_reasoning = cfg.resolve_show_reasoning();
     // Plain-text messages typed while the agent is running are pushed here
     // instead of being rejected. The loop polls this queue at turn boundaries
     // and injects messages as mid-turn steering guidance (wrapped with
