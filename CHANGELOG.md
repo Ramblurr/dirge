@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-06-19
+
+### Added
+- **Anthropic Claude Code OAuth.** `dirge auth anthropic` runs a PKCE
+  loopback login against a Claude Pro/Max subscription and stores the token at
+  `~/.claude/.credentials.json` (Claude Code-compatible), refreshed on expiry.
+  Set the Anthropic provider's `auth` to `anthropic` / `claude-code` to use it.
+  (#452, #454)
+- **OpenAI / ChatGPT OAuth.** `dirge auth openai` (alias `dirge auth chatgpt`)
+  runs OpenAI's device-code login for a ChatGPT subscription and stores the
+  token in dirge's own credential file; the `auth: chatgpt` mode also still
+  reads an existing `~/.codex/auth.json`. Requires enabling device-code auth in
+  ChatGPT Codex security settings. (#455)
+- **`/memory reload`** refreshes the frozen memory snapshot mid-session without
+  restarting. (#435)
+
+### Fixed
+- **Long lines in fenced code blocks wrap instead of clipping.** The chat
+  painter draws one row per buffer line and clips to width; code rows weren't
+  pre-wrapped, so a long line inside a ``` block was cut off at the window
+  edge. They now wrap like prose. (#453)
+- **Anthropic OAuth credentials are written atomically.** The persist path used
+  a non-atomic truncating write with a brief world-readable window before
+  permissions were tightened; it now uses the same atomic 0600 write as the
+  OpenAI store. (#457)
+- **Manifest version restored to match the release tag.** #454 branched from a
+  pre-0.7.8 base and regressed `Cargo.toml`/`Cargo.lock` to 0.7.7; bumped back
+  so the tree matches the `v0.7.8` tag. (#456)
+
+### Changed
+- **Shared OAuth credential I/O across the Anthropic and OpenAI paths** (atomic
+  0600 write, expiry check, account-id alias extraction) and unified the
+  `dirge auth` dispatch through one config-free path. The two login *flows*
+  (loopback vs device-code) stay provider-specific. (#457)
+
 ## [0.7.8] - 2026-06-18
 
 ### Added
