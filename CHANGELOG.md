@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Pasting while answering a question no longer leaks into the main prompt.**
+  When typing a free-form custom answer in the `question` modal, a paste went
+  to the compose editor instead of the answer field — the modal dispatcher only
+  routed key events, so pastes fell through. Pastes now land in the active
+  answer (newlines flattened to spaces) and are swallowed for single-key
+  modals. (dirge-7543)
+
 ## [0.9.0] - 2026-06-19
 
 ### Added

@@ -305,6 +305,24 @@ pub(crate) struct CustomEntry {
     pub(crate) input_anchor: usize,
 }
 
+impl CustomEntry {
+    /// Append pasted text to the single-line answer buffer. The typed path
+    /// only ever pushes printable `Char`s (Enter submits), so a paste must
+    /// match that shape: whitespace controls (`\n`/`\r`/`\t`) flatten to a
+    /// space and other control bytes are dropped. Without this, a paste
+    /// while answering leaks into the main compose input (dirge-7543).
+    pub(crate) fn paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        for c in normalized.chars() {
+            match c {
+                '\n' | '\t' => self.buf.push(' '),
+                c if c.is_control() => {}
+                c => self.buf.push(c),
+            }
+        }
+    }
+}
+
 /// Copy discriminant of [`InputMode`]. The dispatcher routes on this so it
 /// can read the active mode without holding a borrow on `input_mode` (which
 /// would block the `mem::replace` used to take ownership of the reply
@@ -406,6 +424,29 @@ mod tests {
     #[test]
     fn toggle_expands_when_collapsed_with_a_source() {
         assert_eq!(expand_toggle(None, true), ExpandToggle::Expand);
+    }
+
+    /// dirge-7543: pasting into a Q&A custom answer appends to the entry
+    /// buffer (single line) rather than leaking into the main compose input.
+    #[test]
+    fn custom_entry_paste_appends_and_flattens_whitespace() {
+        let mut e = CustomEntry {
+            buf: "ab".to_string(),
+            input_anchor: 0,
+        };
+        e.paste("cd\r\nef\tgh");
+        assert_eq!(e.buf, "abcd ef gh");
+    }
+
+    #[test]
+    fn custom_entry_paste_drops_non_whitespace_control_bytes() {
+        let mut e = CustomEntry {
+            buf: String::new(),
+            input_anchor: 0,
+        };
+        // \u{1} (PASTE_MARK-class), \u{7} bell — dropped; printable kept.
+        e.paste("x\u{1}y\u{7}z");
+        assert_eq!(e.buf, "xyz");
     }
 
     #[test]

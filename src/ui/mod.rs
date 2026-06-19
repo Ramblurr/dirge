@@ -548,6 +548,20 @@ pub async fn run_interactive(
     // former arms did.
     macro_rules! dispatch_modal {
         ($ev:expr) => {
+            // dirge-7543: a paste while a modal owns the input must NOT fall
+            // through to the compose editor below. The Question custom-answer
+            // field is the only modal that takes free text, so deliver the
+            // paste there; every other modal is single-key, so swallow it.
+            if let UserEvent::Paste(text) = &$ev {
+                if let state::InputMode::Question(q) = &mut ui.input_mode
+                    && let Some(entry) = &mut q.entry
+                {
+                    entry.paste(text);
+                    render_custom_entry(&mut renderer, &entry.buf, entry.input_anchor);
+                    renderer.request_repaint();
+                }
+                continue;
+            }
             if let UserEvent::Key(key) = &$ev {
                 let key = *key;
                 match ui.input_mode.kind() {
