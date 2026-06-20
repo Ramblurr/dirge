@@ -269,20 +269,30 @@ fn copy_embedded(dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pick the next prompt name in a cycle. `sorted` is the caller-sorted list of
-/// available prompt names; `current` is the active prompt name, or `None` for
-/// the base layer. Wraps past the end; an unknown or missing `current` starts
-/// from the head. Returns `None` only when there are no prompts to cycle.
-pub fn next_prompt<'a>(current: Option<&str>, sorted: &'a [&'a String]) -> Option<&'a str> {
+/// Pick the next step in the prompt cycle. The cycle is
+/// `[base, sorted[0], sorted[1], …]`, so advancing past the last named
+/// prompt returns to the base (no-prompt) layer — the same key always gets
+/// you back to "no prompt". `sorted` is the caller-sorted list of available
+/// prompt names; `current` is the active prompt name, or `None` for base.
+///
+/// Returns:
+/// - `None` — no named prompts exist, nothing to cycle (no-op).
+/// - `Some(None)` — switch to the base (no-prompt) layer.
+/// - `Some(Some(name))` — switch to that named prompt.
+///
+/// An unknown/stale `current` restarts the cycle at the head.
+pub fn next_prompt<'a>(current: Option<&str>, sorted: &'a [&'a String]) -> Option<Option<&'a str>> {
     if sorted.is_empty() {
         return None;
     }
-    let len = sorted.len();
-    let i = current
-        .and_then(|c| sorted.iter().position(|n| n.as_str() == c))
-        .map(|found| (found + 1) % len)
-        .unwrap_or(0);
-    Some(sorted[i].as_str())
+    match current.and_then(|c| sorted.iter().position(|n| n.as_str() == c)) {
+        // On a named prompt: advance to the next, or fall back to the base
+        // layer once we step off the last one.
+        Some(i) if i + 1 < sorted.len() => Some(Some(sorted[i + 1].as_str())),
+        Some(_) => Some(None),
+        // Base layer, or an unknown/stale current → start at the head.
+        None => Some(Some(sorted[0].as_str())),
+    }
 }
 
 #[cfg(test)]
@@ -418,23 +428,33 @@ body
     fn next_prompt_starts_at_head_from_base() {
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let names: Vec<&String> = names.iter().collect();
-        assert_eq!(next_prompt(None, &names), Some("a"));
+        assert_eq!(next_prompt(None, &names), Some(Some("a")));
     }
 
     #[test]
-    fn next_prompt_advances_then_wraps() {
+    fn next_prompt_advances_then_returns_to_base() {
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let names: Vec<&String> = names.iter().collect();
-        assert_eq!(next_prompt(Some("a"), &names), Some("b"));
-        assert_eq!(next_prompt(Some("b"), &names), Some("c"));
-        assert_eq!(next_prompt(Some("c"), &names), Some("a"));
+        assert_eq!(next_prompt(Some("a"), &names), Some(Some("b")));
+        assert_eq!(next_prompt(Some("b"), &names), Some(Some("c")));
+        // Past the last named prompt → back to the base (no-prompt) layer,
+        // not straight to the head — so the cycle can reach "no prompt".
+        assert_eq!(next_prompt(Some("c"), &names), Some(None));
+    }
+
+    #[test]
+    fn next_prompt_single_prompt_alternates_with_base() {
+        let names = vec!["only".to_string()];
+        let names: Vec<&String> = names.iter().collect();
+        assert_eq!(next_prompt(None, &names), Some(Some("only")));
+        assert_eq!(next_prompt(Some("only"), &names), Some(None));
     }
 
     #[test]
     fn next_prompt_unknown_current_starts_at_head() {
         let names = vec!["a".to_string(), "b".to_string()];
         let names: Vec<&String> = names.iter().collect();
-        assert_eq!(next_prompt(Some("zzz"), &names), Some("a"));
+        assert_eq!(next_prompt(Some("zzz"), &names), Some(Some("a")));
     }
 
     #[test]
