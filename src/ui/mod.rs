@@ -1783,31 +1783,42 @@ pub async fn run_interactive(
                                 v.sort();
                                 v
                             };
-                            let Some(name) = crate::context::prompts::next_prompt(
+                            let Some(target) = crate::context::prompts::next_prompt(
                                 context.current_prompt_name.as_deref(),
                                 &names,
                             ) else {
-                                continue;
+                                continue; // no named prompts to cycle through
                             };
-                            // No-op when cycling lands on the active prompt
-                            // (e.g. only one prompt configured): skip the wasted
-                            // agent rebuild.
-                            if context.current_prompt_name.as_deref() == Some(name) {
+                            // target: None = base (no-prompt) layer, Some(name) =
+                            // a named prompt. Skip the rebuild if we'd land on the
+                            // layer that's already active.
+                            if target == context.current_prompt_name.as_deref() {
                                 continue;
                             }
-                            let p = context
-                                .prompts
-                                .get(name)
-                                .expect("name drawn from prompts.keys()");
-                            let body = p.body.clone();
-                            let deny = p.deny_tools.clone();
-                            let name = name.to_string();
-                            context.set_prompt_layer(Some(name.clone()), Some(body), deny);
+                            // Resolve the switch into owned data BEFORE mutating
+                            // `context` (the immutable `names`/`target` borrows it).
+                            let named = target.map(|name| {
+                                let p = context
+                                    .prompts
+                                    .get(name)
+                                    .expect("name drawn from prompts.keys()");
+                                (name.to_string(), p.body.clone(), p.deny_tools.clone())
+                            });
+                            match named {
+                                Some((name, body, deny)) => {
+                                    context.set_prompt_layer(Some(name.clone()), Some(body), deny);
+                                    session.current_prompt_name = Some(name);
+                                }
+                                None => {
+                                    // Cycled past the last prompt → back to base.
+                                    context.clear_prompt_layer();
+                                    session.current_prompt_name = None;
+                                }
+                            }
                             crate::permission::apply_prompt_deny(
                                 &permission,
                                 &context.current_prompt_deny_tools,
                             );
-                            session.current_prompt_name = Some(name);
                             let model = client.completion_model(session.model.to_string());
                             agent = crate::provider::build_agent(
                                 model,
