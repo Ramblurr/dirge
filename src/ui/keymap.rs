@@ -593,11 +593,12 @@ pub fn parse_chord_sequence(spec: &str) -> Option<ChordSeq> {
     }
 }
 
-/// Parse a chord string like `ctrl-r`, `pageup`, `ctrl-shift-x`,
-/// `home`, `f5` into a `(KeyCode, KeyModifiers)`. Case-insensitive,
-/// `-`-separated, modifiers before the key. Returns `None` on a
-/// malformed spec. (A standalone copy of the plugin chord grammar so
-/// this module stays available without the `plugin` feature.)
+/// Parse a chord string like `ctrl-r`, `pageup`, `ctrl-shift-x`, `home`,
+/// `f5` into a `(KeyCode, KeyModifiers)`. Case-insensitive, `-`/`+`
+/// separated, modifiers before the key. Returns `None` on a malformed
+/// spec. This is the single chord grammar for the whole app — the plugin
+/// layer's `parse_key_spec` delegates here (dirge-5kkx.2). It lives in this
+/// always-compiled module so it's available without the `plugin` feature.
 pub fn parse_chord(spec: &str) -> Option<(KeyCode, KeyModifiers)> {
     let spec = spec.trim().to_ascii_lowercase();
     if spec.is_empty() {
@@ -618,7 +619,7 @@ pub fn parse_chord(spec: &str) -> Option<(KeyCode, KeyModifiers)> {
         "enter" | "return" => KeyCode::Enter,
         "esc" | "escape" => KeyCode::Esc,
         "tab" => KeyCode::Tab,
-        "backspace" => KeyCode::Backspace,
+        "backspace" | "bs" => KeyCode::Backspace,
         "delete" | "del" => KeyCode::Delete,
         "insert" | "ins" => KeyCode::Insert,
         "space" => KeyCode::Char(' '),
@@ -631,7 +632,13 @@ pub fn parse_chord(spec: &str) -> Option<(KeyCode, KeyModifiers)> {
         "pageup" | "pgup" => KeyCode::PageUp,
         "pagedown" | "pgdn" | "pagedn" => KeyCode::PageDown,
         f if f.starts_with('f') && f.len() >= 2 && f[1..].chars().all(|c| c.is_ascii_digit()) => {
-            let n: u8 = f[1..].parse().ok()?;
+            // Strict: reject a leading zero (`f01`) so it doesn't silently
+            // parse to F(1) via lenient u8::from_str.
+            let suffix = &f[1..];
+            if suffix.len() > 1 && suffix.starts_with('0') {
+                return None;
+            }
+            let n: u8 = suffix.parse().ok()?;
             if (1..=12).contains(&n) {
                 KeyCode::F(n)
             } else {
@@ -745,6 +752,27 @@ mod tests {
         assert_eq!(parse_chord("boguskey"), None);
         assert_eq!(parse_chord("ctrl-"), None);
         assert_eq!(parse_chord("f99"), None);
+    }
+
+    #[test]
+    fn parse_chord_is_the_one_grammar() {
+        // dirge-5kkx.2: parse_key_spec (plugin) now delegates here, so the
+        // formerly-divergent cases resolve consistently.
+        assert_eq!(parse_chord("f01"), None, "strict f-keys reject leading zero");
+        assert_eq!(
+            parse_chord("bs"),
+            Some((KeyCode::Backspace, KeyModifiers::NONE)),
+            "the `bs` alias is accepted"
+        );
+        // `+` separator and `option` modifier both work (config-doc grammar).
+        assert_eq!(
+            parse_chord("ctrl+x"),
+            Some((KeyCode::Char('x'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_chord("option-f"),
+            Some((KeyCode::Char('f'), KeyModifiers::ALT))
+        );
     }
 
     #[test]
