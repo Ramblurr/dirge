@@ -53,8 +53,17 @@ pub(crate) async fn cmd_sessions_delete(
             }
         }
     } else {
+        // Show each id at the shortest length that makes it unique among the
+        // matches, so the user can retype a distinguishing prefix. (Compacted
+        // sessions all share the `compacted-` head, so a fixed 8 chars was
+        // identical for every one — dirge.)
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        let idlen = super::distinct_id_len(&ids);
         ctx.renderer.write_line(
-            &format!("multiple sessions match '{}', be more specific", prefix),
+            &format!(
+                "multiple sessions match '{}', be more specific — try one of these ids:",
+                prefix
+            ),
             c_agent(),
         )?;
         for s in &sessions {
@@ -63,7 +72,7 @@ pub(crate) async fn cmd_sessions_delete(
             ctx.renderer.write_line(
                 &format!(
                     "  {}  {}  {}msgs  {}  {}",
-                    crate::text::head(&s.id, 8),
+                    crate::text::head(&s.id, idlen),
                     time,
                     s.messages.len(),
                     s.model,

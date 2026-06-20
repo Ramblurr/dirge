@@ -34,6 +34,10 @@ pub(crate) async fn cmd_sessions_switch(
             )?;
         }
     } else {
+        // Distinguishing-length ids so the user can retype a unique prefix
+        // (compacted sessions share the `compacted-` head — dirge).
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        let idlen = super::distinct_id_len(&ids);
         ctx.renderer
             .write_line(&format!("multiple sessions match '{}':", prefix), c_agent())?;
         for s in &sessions {
@@ -42,7 +46,7 @@ pub(crate) async fn cmd_sessions_switch(
             ctx.renderer.write_line(
                 &format!(
                     "  {}  {}  {}msgs  {}  {}",
-                    crate::text::head(&s.id, 8),
+                    crate::text::head(&s.id, idlen),
                     time,
                     s.messages.len(),
                     s.model,

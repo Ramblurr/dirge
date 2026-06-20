@@ -38,6 +38,53 @@ pub(crate) fn parse_sessions_command<'a>(parts: &[&'a str]) -> SessionAction<'a>
     }
 }
 
+/// Smallest id-prefix length (floored at 8) at which every id in `ids` is
+/// unique, capped at the longest id. The list and ambiguity views truncate
+/// ids to this so the handles shown are actually distinguishable — and thus
+/// retypeable. `compacted-<uuid>` sessions share the first 10 chars, so the
+/// old fixed 8-char head ("compacte") was identical for every one and
+/// "be more specific" was impossible (dirge).
+pub(crate) fn distinct_id_len(ids: &[&str]) -> usize {
+    const FLOOR: usize = 8;
+    let max = ids.iter().map(|s| s.len()).max().unwrap_or(FLOOR);
+    for n in FLOOR..=max {
+        let mut seen = std::collections::HashSet::new();
+        if ids.iter().all(|s| seen.insert(crate::text::head(s, n))) {
+            return n;
+        }
+    }
+    max.max(FLOOR)
+}
+
+#[cfg(test)]
+mod distinct_id_len_tests {
+    use super::distinct_id_len;
+
+    #[test]
+    fn floors_at_8_for_short_distinct_ids() {
+        // Plain UUID heads differ within 8 chars → stays at the floor.
+        let ids = ["550e8400-x", "a1b2c3d4-y", "deadbeef-z"];
+        assert_eq!(distinct_id_len(&ids), 8);
+    }
+
+    #[test]
+    fn grows_past_a_shared_prefix() {
+        // `compacted-` is 10 chars; the distinguishing byte is at index 10,
+        // so we need length 11 to tell them apart.
+        let ids = ["compacted-aaaa", "compacted-bbbb", "compacted-cccc"];
+        let n = distinct_id_len(&ids);
+        assert_eq!(n, 11, "must extend past the shared `compacted-` prefix");
+        // And the resulting handles are all distinct.
+        let heads: Vec<&str> = ids.iter().map(|s| crate::text::head(s, n)).collect();
+        assert_eq!(heads, ["compacted-a", "compacted-b", "compacted-c"]);
+    }
+
+    #[test]
+    fn single_id_uses_floor() {
+        assert_eq!(distinct_id_len(&["compacted-whatever"]), 8);
+    }
+}
+
 /// Dispatch `/sessions`. Verbs are first-class so a bare positional is only
 /// ever a session id — previously `parts[1]` did double duty as both the
 /// `delete` sentinel and a session id, so no session could be addressed as
