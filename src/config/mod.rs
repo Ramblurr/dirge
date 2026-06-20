@@ -580,6 +580,11 @@ pub struct Config {
     /// Each entry binds a chord to a command (see `KeybindingConfig`);
     /// applied over the built-in defaults by `ui::keymap`.
     pub keybindings: Option<Vec<KeybindingConfig>>,
+    /// dirge-5kkx.1: auto-cancel an in-progress emacs-style chord sequence
+    /// (e.g. after `ctrl-x` of `ctrl-x ctrl-s`) when no continuing key
+    /// arrives within this many milliseconds. Absent = wait indefinitely
+    /// (emacs default); Esc/Ctrl+G always cancels regardless.
+    pub chord_timeout_ms: Option<u64>,
     pub tools: Option<ToolsConfig>,
     /// dirge-4hld: long-term memory retrieval tuning (hybrid dense+BM25).
     pub memory: Option<MemoryConfig>,
@@ -1162,6 +1167,15 @@ mod tests {
 
     /// dirge-4hld: the `memory` block is absent by default and parses its
     /// fields when present.
+    #[test]
+    fn chord_timeout_ms_absent_and_parses() {
+        // dirge-5kkx.1: off by default; parses from the documented key.
+        let cfg: Config = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(cfg.chord_timeout_ms.is_none());
+        let cfg: Config = serde_json::from_str(r#"{ "chord_timeout_ms": 1500 }"#).unwrap();
+        assert_eq!(cfg.chord_timeout_ms, Some(1500));
+    }
+
     #[test]
     fn memory_config_defaults_absent_and_parses() {
         let cfg: Config = serde_json::from_str(r#"{}"#).unwrap();

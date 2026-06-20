@@ -676,10 +676,13 @@ editor handler gets the key the rest of the time.
 A `key` may be a sequence like `ctrl-x ctrl-s`. After the first chord the
 footer shows the pending prefix (`ctrl-x-`) and waits; the next chord
 completes (or aborts) the sequence. **Esc** or **Ctrl+G** cancels a
-pending prefix. Sequences fire for **global commands only**; a sequence
-bound to an input command is rejected with a startup warning. Binding a
-sequence whose first chord is also a single-key command disables that
-single-key binding (the sequence wins) — you'll see a warning.
+pending prefix. By default a pending prefix waits indefinitely (emacs
+style); set `"chord_timeout_ms": <n>` at the top level of the config to
+auto-cancel it after `n` milliseconds of inactivity. Sequences fire for
+**global commands only**; a sequence bound to an input command is rejected
+with a startup warning. Binding a sequence whose first chord is also a
+single-key command disables that single-key binding (the sequence wins) —
+you'll see a warning.
 
 Notes:
 - **Always fixed** (never rebindable): the cancel/interrupt gesture

@@ -233,6 +233,13 @@ pub async fn run_interactive(
     // global binding (e.g. `ctrl-x` of `ctrl-x ctrl-s`); shown in the
     // footer and cleared on completion, abort, or Esc/Ctrl+G.
     let mut chord_pending: Vec<crate::ui::keymap::Chord> = Vec::new();
+    // dirge-5kkx.1: optional inactivity timeout for a pending chord prefix.
+    // `chord_deadline` is (re)armed each time the prefix grows and cleared
+    // when it resolves/aborts; a `select!` arm fires at the deadline. When
+    // `chord_timeout` is None the feature is off and the deadline stays None.
+    let chord_timeout: Option<std::time::Duration> =
+        cfg.chord_timeout_ms.map(std::time::Duration::from_millis);
+    let mut chord_deadline: Option<tokio::time::Instant> = None;
     const TOOL_ACTIVITY_CAP: usize = 8;
     // Seed the editor's history from the session so Up/Down arrow
     // navigation and Ctrl+F search work across restarts.
@@ -1379,6 +1386,7 @@ pub async fn run_interactive(
                                     && key.modifiers.contains(KeyModifiers::CONTROL)))
                         {
                             chord_pending.clear();
+                            chord_deadline = None;
                             renderer.request_repaint();
                             continue;
                         }
@@ -1390,11 +1398,16 @@ pub async fn run_interactive(
                             match keymap.classify_seq(&candidate) {
                                 SeqClass::Prefix => {
                                     chord_pending = candidate;
+                                    // (Re)arm the inactivity timeout on each
+                                    // captured prefix key.
+                                    chord_deadline =
+                                        chord_timeout.map(|d| tokio::time::Instant::now() + d);
                                     renderer.request_repaint();
                                     continue;
                                 }
                                 SeqClass::Exact(a) => {
                                     chord_pending.clear();
+                                    chord_deadline = None;
                                     // Clear the footer's pending-prefix echo
                                     // even if the resolved action doesn't paint.
                                     renderer.request_repaint();
@@ -1407,12 +1420,15 @@ pub async fn run_interactive(
                                         // footer echo), then let the key possibly
                                         // start a fresh one.
                                         chord_pending.clear();
+                                        chord_deadline = None;
                                         renderer.request_repaint();
                                         if matches!(
                                             keymap.classify_seq(&[chord]),
                                             SeqClass::Prefix
                                         ) {
                                             chord_pending.push(chord);
+                                            chord_deadline =
+                                                chord_timeout.map(|d| tokio::time::Instant::now() + d);
                                             continue;
                                         }
                                     }
@@ -2482,6 +2498,20 @@ pub async fn run_interactive(
                         renderer.request_repaint();
                     }
                 }
+            }
+            // dirge-5kkx.1: a pending chord prefix timed out (no continuing
+            // key within `chord_timeout_ms`). Disabled unless armed; `biased`
+            // keeps real keystrokes ahead of it, so a key landing right at the
+            // deadline is still handled as a key.
+            () = async {
+                match chord_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if chord_deadline.is_some() => {
+                chord_pending.clear();
+                chord_deadline = None;
+                renderer.request_repaint();
             }
             Some(event) = async {
                 if let Some(rx) = &mut ui.agent_rx {
