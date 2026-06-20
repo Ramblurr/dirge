@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-20
+
+### Added
+- **Undo in the input editor.** `Ctrl+Z` reverts the last edit — a paste, a
+  kill, or a run of typing (grouped by word). State resets on submit and
+  `/fork`. Rebindable as the `undo` command.
+- **Verification-aware finalization.** The in-loop critic now sees whether the
+  run actually built/tested its code changes and nudges on an unverified or red
+  change — with an explicit "nothing to run / not testable → fine" escape so it
+  never forces a test that can't run. The goal gate gets the same signal as a
+  soft advisory that can't trap the bounded loop. Active only when a critic
+  provider is configured. (#484)
+- **Experimental computer-use plugin.** Off by default behind the
+  `experimental-ui-computer-use` build feature; intercepts `bash` commands
+  prefixed `computer:` to drive a desktop (screenshot, type, click, navigate)
+  via ydotool/xdotool plus a local vision backend. Gated by a confirm dialog,
+  an explicit host-control opt-in, and a sandboxed-desktop image. (#415)
+
+### Fixed
+- **Copy wrapped prose as one line.** Selecting chat text the renderer
+  soft-wrapped across rows no longer pastes a newline at every wrap point;
+  real line breaks, paragraph breaks, and blank lines are preserved.
+- **macOS (Apple Silicon) build.** The computer-use plugin used x86_64-only
+  Janet FFI (`janet_wrap_integer`, raw union `.pointer` access), which broke the
+  default plugin build on aarch64 — invisible to the Linux-only CI. Now uses
+  portable janetrs access. (#483)
+- **Shell injection in computer-use `focus`.** The model-controlled app name is
+  validated against a safe character set before reaching `pgrep` / the vision
+  call. (#482)
+
 ## [0.10.0] - 2026-06-20
 
 ### Added
