@@ -3088,6 +3088,15 @@ pub async fn run_interactive(
                         _ => format!("args: {}", safe_input),
                     };
                     overlay.push((arg_label, theme::perm()));
+                    // dirge-r16x: when this prompt is an escalated
+                    // approval_provider denial, show WHY the evaluator
+                    // flagged it so the user can judge before deciding.
+                    if let Some(reason) = &ask_req.reason {
+                        overlay.push((
+                            format!("flagged by approval check: {}", sanitize_output(reason)),
+                            theme::perm(),
+                        ));
+                    }
                     overlay.push((String::new(), theme::perm()));
                     overlay.push((
                         "[y] allow once  [a] allow always  [n] deny  [ESC] abort"

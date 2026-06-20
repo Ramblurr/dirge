@@ -564,6 +564,7 @@ mod tests {
             .send(crate::permission::ask::AskRequest {
                 tool: "bash".to_string(),
                 input: "rm -rf /".to_string(),
+                reason: None,
                 reply: reply_tx,
             })
             .await
@@ -649,6 +650,7 @@ mod tests {
                 .send(crate::permission::ask::AskRequest {
                     tool: format!("bash-{i}"),
                     input: format!("cmd-{i}"),
+                    reason: None,
                     reply: reply_tx,
                 })
                 .await

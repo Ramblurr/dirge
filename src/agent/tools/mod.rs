@@ -400,12 +400,14 @@ async fn handle_ask_inner(
     permission: &PermCheck,
     tool: &str,
     input: &str,
+    reason: Option<&str>,
 ) -> Result<(), ToolError> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     ask_tx
         .send(AskRequest {
             tool: tool.to_string(),
             input: input.to_string(),
+            reason: reason.map(str::to_string),
             reply: reply_tx,
         })
         .await
@@ -496,16 +498,20 @@ async fn resolve_auto_verdict(
     input: &str,
 ) -> Result<bool, ToolError> {
     // Deny and Abstain share one path: prompt the human, terminal only when
-    // there's nobody to ask. They differ only in that no-human message.
-    let no_human_msg = match verdict {
+    // there's nobody to ask. They differ in the no-human message and in
+    // whether there's an evaluator reason to surface in the prompt (r16x).
+    let (reason, no_human_msg) = match verdict {
         AutoVerdict::Allow => return Ok(true),
-        AutoVerdict::Deny(reason) => format!("{AUTO_DENIAL_PREFIX}: {reason}"),
-        AutoVerdict::Abstain => format!("{DENIAL_PREFIX} (non-interactive mode)"),
+        AutoVerdict::Deny(reason) => {
+            let msg = format!("{AUTO_DENIAL_PREFIX}: {reason}");
+            (Some(reason), msg)
+        }
+        AutoVerdict::Abstain => (None, format!("{DENIAL_PREFIX} (non-interactive mode)")),
     };
     let Some(tx) = ask_tx else {
         return Err(ToolError::Msg(no_human_msg));
     };
-    handle_ask_inner(tx, perm, tool, input).await?;
+    handle_ask_inner(tx, perm, tool, input, reason.as_deref()).await?;
     Ok(false)
 }
 
@@ -799,8 +805,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AskRequest>(1);
 
         // Stand in for the UI: the human approves despite the evaluator's deny.
+        // The prompt carries the evaluator's reason so the UI can show it
+        // (dirge-r16x).
         let human = tokio::spawn(async move {
             let req = rx.recv().await.expect("a prompt must reach the human");
+            assert_eq!(
+                req.reason.as_deref(),
+                Some("writes outside project"),
+                "escalated deny prompt must carry the evaluator's reason"
+            );
             let _ = req.reply.send(UserDecision::AllowOnce);
         });
 
