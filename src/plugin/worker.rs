@@ -537,6 +537,23 @@ const HARNESS_INIT: &str = r#"
                    (harness/-escape handler) "\t"
                    (harness/-escape desc) "\n")))))
 
+# Plugin keybinding overrides (dirge-rj3k / #476). Plugins call
+#   (harness/bind-key keys command)
+# to bind a key chord — or an emacs-style sequence like "ctrl-x ctrl-s" —
+# to a BUILT-IN command name (the same vocabulary the user's `keybindings`
+# config uses: the global KeyAction commands and the input-editor
+# InputAction commands), or "none" to unbind a default. The host merges
+# these OVER the built-in defaults and UNDER the user's config, so user
+# config always wins. This REMAPS built-ins; to bind a key to plugin CODE,
+# use register-shortcut instead.
+(var harness-keybindings-list "")
+(defn harness/bind-key [keys command]
+  (when (and (string? keys) (string? command))
+    (set harness-keybindings-list
+         (string harness-keybindings-list
+                 (harness/-escape keys) "\t"
+                 (harness/-escape command) "\n"))))
+
 # Per-invocation context slot set by the host before each plugin
 # tool handler runs (H2). Reads return the tool-call id the LLM
 # assigned to the current call — useful for correlating progress
@@ -1562,6 +1579,25 @@ mod tests {
         // `undefined-fn` is genuinely unknown.
         let r = worker.eval("(undefined-fn 1)");
         assert!(r.is_err(), "expected Err, got {r:?}");
+    }
+
+    /// dirge-rj3k / #476: harness/bind-key accumulates tab-separated
+    /// (key, command) lines the host reads back as keybinding overrides.
+    #[test]
+    fn bind_key_accumulates_keybinding_overrides() {
+        let (mut worker, _dialog_rx, _lsp_rx) = Worker::try_spawn().unwrap();
+        worker
+            .eval(r#"(harness/bind-key "ctrl-t" "toggle_reasoning")"#)
+            .unwrap();
+        worker
+            .eval(r#"(harness/bind-key "ctrl-x ctrl-s" "scroll_to_top")"#)
+            .unwrap();
+        // Non-strings are ignored (no crash, no entry).
+        worker.eval("(harness/bind-key 5 6)").unwrap();
+        let list = worker.eval("harness-keybindings-list").unwrap();
+        assert!(list.contains("ctrl-t\ttoggle_reasoning"), "{list}");
+        assert!(list.contains("ctrl-x ctrl-s\tscroll_to_top"), "{list}");
+        assert_eq!(list.lines().count(), 2, "non-string call added nothing: {list}");
     }
 
     /// dirge-l6bf: a plugin must NOT be able to terminate the host process.

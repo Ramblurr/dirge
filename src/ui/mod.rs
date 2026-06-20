@@ -208,8 +208,21 @@ pub async fn run_interactive(
     let gitstat = crate::ui::gitstatus::spawn_poller(std::time::Duration::from_secs(3));
     // Configurable key bindings (VSCode-style): defaults layered with the
     // user's `keybindings` config, covering BOTH the global command keys
-    // and the input-editor keys (dirge-xv9l). Surface any parse warnings.
-    let (keymaps, keymap_warnings) = Keymaps::from_config(cfg.keybindings.as_deref());
+    // and the input-editor keys (dirge-xv9l). Plugin keybindings (#476,
+    // dirge-rj3k) layer between the two: defaults < plugins < user config,
+    // so the user's config always wins. A plugin binds via
+    // `harness/bind-key`. Surface any parse warnings.
+    let mut merged_keybindings: Vec<crate::config::KeybindingConfig> = Vec::new();
+    #[cfg(feature = "plugin")]
+    if let Some(pm) = crate::plugin::hook::global() {
+        for (key, command) in pm.lock_ignore_poison().list_keybindings() {
+            merged_keybindings.push(crate::config::KeybindingConfig { key, command });
+        }
+    }
+    if let Some(user) = cfg.keybindings.as_deref() {
+        merged_keybindings.extend(user.iter().cloned());
+    }
+    let (keymaps, keymap_warnings) = Keymaps::from_config(Some(&merged_keybindings));
     for w in &keymap_warnings {
         eprintln!("warning: {w}");
     }

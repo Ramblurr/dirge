@@ -822,6 +822,54 @@ mod tests {
     }
 
     #[test]
+    fn plugin_then_user_precedence_user_wins() {
+        // dirge-rj3k / #476: the host concatenates plugin bind-key entries
+        // BEFORE the user's config and feeds the lot to from_config, which
+        // applies in order (last wins). So on a conflicting chord the user
+        // overrides the plugin, while a plugin-only binding still takes.
+        let plugin = [
+            cfg("ctrl-t", "toggle_reasoning"), // plugin-only → takes effect
+            cfg("ctrl-r", "next_chat"),        // conflicts with the user below
+        ];
+        let user = [cfg("ctrl-r", "scroll_to_top")];
+        let merged: Vec<KeybindingConfig> = plugin.iter().chain(user.iter()).cloned().collect();
+        let (kms, warns) = Keymaps::from_config(Some(&merged));
+        assert!(warns.is_empty(), "{warns:?}");
+        // Plugin-only binding present.
+        assert_eq!(
+            kms.global.resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Some(KeyAction::ToggleReasoning)
+        );
+        // User wins the Ctrl+R conflict over the plugin.
+        assert_eq!(
+            kms.global.resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Some(KeyAction::ScrollToTop)
+        );
+    }
+
+    #[test]
+    fn plugin_can_rebind_an_input_command_and_unbind() {
+        // A plugin remapping the editor: bind Ctrl+T to kill-to-line-end and
+        // disable the default Ctrl+K.
+        let plugin = [
+            cfg("ctrl-t", "kill_to_line_end"),
+            cfg("ctrl-k", "none"),
+        ];
+        let (kms, warns) = Keymaps::from_config(Some(&plugin));
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            kms.input.resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Some(InputAction::KillToLineEnd)
+        );
+        // Ctrl+K cleared from the input map (and the global kill_subagent
+        // default too, since `none` clears both contexts).
+        assert_eq!(
+            kms.input.resolve(&ev(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            None
+        );
+    }
+
+    #[test]
     fn config_stores_a_multi_key_sequence() {
         // Sequence-native storage (the #234 runtime activates it in phase 4):
         // a 2-chord binding lands in the map keyed on the full sequence, and

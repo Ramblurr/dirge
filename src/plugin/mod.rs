@@ -686,6 +686,34 @@ impl PluginManager {
         dedup_last_wins(parsed, "slash command", |(c, _)| c.clone())
     }
 
+    /// Plugin-registered keybinding overrides (dirge-rj3k / #476): the
+    /// `(key, command)` pairs a plugin bound via `harness/bind-key`. The
+    /// host merges these over the built-in defaults and under the user's
+    /// config (`ui::keymap::Keymaps::from_config`). Order is preserved; the
+    /// keymap layering resolves same-key collisions last-wins. Wire format
+    /// matches the other phase-9 registries (tab-separated, escape-encoded).
+    pub fn list_keybindings(&mut self) -> Vec<(String, String)> {
+        let raw = match self.worker.eval("harness-keybindings-list") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        raw.lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\t');
+                let key = unescape_harness_field(parts.next()?);
+                let command = unescape_harness_field(parts.next()?);
+                if key.is_empty() || command.is_empty() {
+                    None
+                } else {
+                    Some((key, command))
+                }
+            })
+            .collect()
+    }
+
     /// Invoke a registered handler fn by name with the user-provided args
     /// string (everything after the command name). Returns `Ok(Some(text))`
     /// when the handler produced a non-nil string, `Ok(None)` when it
