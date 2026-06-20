@@ -1105,7 +1105,7 @@ impl InputEditor {
         // history) resolve through the input keymap (dirge-8fkp). Intrinsic
         // keys — char insertion, Enter, Backspace, Delete, Tab — are NOT
         // rebindable and fall through to the match below.
-        if let Some(action) = self.keymap.resolve(&key) {
+        if let Some(action) = self.keymap.resolve_lenient(&key) {
             return self.apply_input_action(action);
         }
 

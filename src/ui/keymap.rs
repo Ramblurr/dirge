@@ -29,6 +29,35 @@ pub type Chord = (KeyCode, KeyModifiers);
 /// single-key binding, which is all the built-in defaults use.
 pub type ChordSeq = Vec<Chord>;
 
+/// A rebindable command namespace (dirge-5kkx.3): the global [`KeyAction`]
+/// keys and the input-editor [`InputAction`] keys both implement this, so
+/// one generic [`Bindings`] keymap and the name-lookup helpers are written
+/// once. The `ALL` table — `(action, config-command-name, default chords)`
+/// — is the single source of truth each namespace provides.
+pub trait Command: Copy + 'static {
+    #[allow(clippy::type_complexity)]
+    const ALL: &'static [(Self, &'static str, &'static [Chord])];
+
+    /// Resolve a config command name (case-insensitive, `-`/`_` agnostic)
+    /// to an action. `None` for unknown commands.
+    fn from_command(name: &str) -> Option<Self> {
+        let norm = name.trim().to_ascii_lowercase().replace('-', "_");
+        Self::ALL
+            .iter()
+            .find(|(_, cmd, _)| *cmd == norm)
+            .map(|(a, _, _)| *a)
+    }
+
+    /// Comma-separated list of every valid command name (help / warnings).
+    fn command_list() -> String {
+        Self::ALL
+            .iter()
+            .map(|(_, c, _)| *c)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// A rebindable global command. Each maps to a stable `command` string
 /// used in the config and to a set of default chords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +80,8 @@ pub enum KeyAction {
     DropQueue,
 }
 
-impl KeyAction {
-    /// All actions, with their config command name and default chords.
-    /// Single source of truth for both the default keymap and the
-    /// command-name lookup / docs.
-    #[allow(clippy::type_complexity)]
-    pub const ALL: &'static [(KeyAction, &'static str, &'static [(KeyCode, KeyModifiers)])] = &[
+impl Command for KeyAction {
+    const ALL: &'static [(KeyAction, &'static str, &'static [Chord])] = &[
         (
             KeyAction::ToggleReasoning,
             "toggle_reasoning",
@@ -118,42 +143,32 @@ impl KeyAction {
             &[(KeyCode::Char('x'), KeyModifiers::ALT)],
         ),
     ];
+}
 
-    /// Resolve a config command name (case-insensitive, `-`/`_` agnostic)
-    /// to an action. `None` for unknown commands.
-    pub fn from_command(name: &str) -> Option<KeyAction> {
-        let norm = name.trim().to_ascii_lowercase().replace('-', "_");
-        Self::ALL
-            .iter()
-            .find(|(_, cmd, _)| *cmd == norm)
-            .map(|(a, _, _)| *a)
-    }
+/// Resolves key chords to a [`Command`] namespace `A`: built-in defaults
+/// plus the user's per-chord overrides. Keyed on a [`ChordSeq`] so
+/// multi-key bindings can be stored. One generic backs both the global
+/// [`Keymap`] (over [`KeyAction`]) and the input-editor [`InputKeymap`]
+/// (over [`InputAction`]); they differ only in which `resolve` they call
+/// and that sequence matching ([`classify_seq`]) is global-only.
+#[derive(Debug, Clone)]
+pub struct Bindings<A: Command> {
+    map: HashMap<ChordSeq, A>,
+}
 
-    /// Comma-separated list of every valid command name (for help /
-    /// warning text).
-    pub fn command_list() -> String {
-        Self::ALL
-            .iter()
-            .map(|(_, c, _)| *c)
-            .collect::<Vec<_>>()
-            .join(", ")
+impl<A: Command> Default for Bindings<A> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
     }
 }
 
-/// Resolves key chords to [`KeyAction`]s: built-in defaults plus the
-/// user's per-chord overrides. Keyed on a [`ChordSeq`] so multi-key
-/// bindings can be stored; single-key resolution is the only runtime so
-/// far (phase 4 adds the pending-prefix matcher).
-#[derive(Debug, Clone, Default)]
-pub struct Keymap {
-    map: HashMap<ChordSeq, KeyAction>,
-}
-
-impl Keymap {
+impl<A: Command> Bindings<A> {
     /// The built-in keymap (no config applied).
     pub fn defaults() -> Self {
         let mut map = HashMap::new();
-        for (action, _, chords) in KeyAction::ALL {
+        for (action, _, chords) in A::ALL {
             for chord in *chords {
                 map.insert(vec![*chord], *action);
             }
@@ -161,10 +176,27 @@ impl Keymap {
         Self { map }
     }
 
-    /// The action bound to `key` (as a single-key chord), if any. Matches
-    /// modifiers exactly.
-    pub fn resolve(&self, key: &KeyEvent) -> Option<KeyAction> {
+    /// The action bound to `key` (as a single-key chord), matching modifiers
+    /// exactly. Used by the global keymap.
+    pub fn resolve(&self, key: &KeyEvent) -> Option<A> {
         self.map.get(&[(key.code, key.modifiers)][..]).copied()
+    }
+
+    /// Like [`resolve`], but on a miss retries with Shift dropped. The input
+    /// editor uses this: the hardcoded arms it replaced used
+    /// `modifiers.contains(..)` guards / a bare nav arm, so e.g. `Shift+Left`
+    /// moved the cursor and `Ctrl+Shift+A` jumped to line start. No editing
+    /// chord binds Shift distinctly, so dropping it on a miss restores that
+    /// tolerance without shadowing an explicit binding (the exact pass wins).
+    pub fn resolve_lenient(&self, key: &KeyEvent) -> Option<A> {
+        if let Some(action) = self.resolve(key) {
+            return Some(action);
+        }
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            let without_shift = key.modifiers - KeyModifiers::SHIFT;
+            return self.map.get(&[(key.code, without_shift)][..]).copied();
+        }
+        None
     }
 
     /// True when `seq` is a *proper* prefix of some longer bound sequence —
@@ -176,10 +208,20 @@ impl Keymap {
             .any(|k| k.len() > seq.len() && k.starts_with(seq))
     }
 
-    /// Classify an accumulated chord sequence for the #234 runtime.
-    /// Single-key bindings are deliberately NOT reported as `Exact` here —
-    /// they flow through [`Keymap::resolve`] with its full dispatch
-    /// precedence; only genuine multi-key sequences fire from the matcher.
+    /// Bind a single chord to an action, replacing any existing binding.
+    /// Test-only; production overrides flow through [`Keymaps::from_config`].
+    #[cfg(test)]
+    pub fn insert(&mut self, chord: Chord, action: A) {
+        self.map.insert(vec![chord], action);
+    }
+}
+
+impl Bindings<KeyAction> {
+    /// Classify an accumulated chord sequence for the #234 runtime
+    /// (global commands only). Single-key bindings are deliberately NOT
+    /// reported as `Exact` here — they flow through [`Keymap::resolve`] with
+    /// its full dispatch precedence; only genuine multi-key sequences fire
+    /// from the matcher.
     pub fn classify_seq(&self, seq: &[Chord]) -> SeqClass {
         if seq.len() >= 2
             && let Some(action) = self.map.get(seq).copied()
@@ -193,6 +235,11 @@ impl Keymap {
         }
     }
 }
+
+/// The global "command" keymap (toggle reasoning, scroll, chat nav, …).
+pub type Keymap = Bindings<KeyAction>;
+/// The input-editor keymap (cursor/word motion, kill-ring, history, …).
+pub type InputKeymap = Bindings<InputAction>;
 
 /// Outcome of matching an accumulated chord sequence against the keymap
 /// (#234). See [`Keymap::classify_seq`].
@@ -387,16 +434,8 @@ pub enum InputAction {
     LineDown,
 }
 
-impl InputAction {
-    /// All input actions, each with its config command name and default
-    /// chords. Single source of truth for the default [`InputKeymap`], the
-    /// command-name lookup, and the docs — mirrors [`KeyAction::ALL`].
-    #[allow(clippy::type_complexity)]
-    pub const ALL: &'static [(
-        InputAction,
-        &'static str,
-        &'static [(KeyCode, KeyModifiers)],
-    )] = &[
+impl Command for InputAction {
+    const ALL: &'static [(InputAction, &'static str, &'static [Chord])] = &[
         (
             InputAction::CursorLineStart,
             "cursor_line_start",
@@ -508,74 +547,6 @@ impl InputAction {
             &[(KeyCode::Down, KeyModifiers::NONE)],
         ),
     ];
-
-    /// Resolve a config command name (case-insensitive, `-`/`_` agnostic)
-    /// to an input action. `None` for unknown commands.
-    pub fn from_command(name: &str) -> Option<InputAction> {
-        let norm = name.trim().to_ascii_lowercase().replace('-', "_");
-        Self::ALL
-            .iter()
-            .find(|(_, cmd, _)| *cmd == norm)
-            .map(|(a, _, _)| *a)
-    }
-
-    /// Comma-separated list of every valid input command name.
-    pub fn command_list() -> String {
-        Self::ALL
-            .iter()
-            .map(|(_, c, _)| *c)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-/// Resolves key chords to [`InputAction`]s: built-in defaults reproduce
-/// the historical hardcoded text-editing keys, with user overrides layered
-/// on via [`Keymaps::from_config`]. Keyed on a [`ChordSeq`] like
-/// [`Keymap`].
-#[derive(Debug, Clone, Default)]
-pub struct InputKeymap {
-    map: HashMap<ChordSeq, InputAction>,
-}
-
-impl InputKeymap {
-    /// The built-in input keymap (no config applied).
-    pub fn defaults() -> Self {
-        let mut map = HashMap::new();
-        for (action, _, chords) in InputAction::ALL {
-            for chord in *chords {
-                map.insert(vec![*chord], *action);
-            }
-        }
-        Self { map }
-    }
-
-    /// The input action bound to `key` (as a single-key chord), if any.
-    ///
-    /// An exact `(code, modifiers)` match wins. On a miss, Shift is retried
-    /// as insignificant: the historical hardcoded arms this replaced used
-    /// `modifiers.contains(..)` guards and a bare (unguarded) arm for the
-    /// nav keys, so e.g. `Shift+Left` moved the cursor and `Ctrl+Shift+A`
-    /// jumped to line start. No editing chord binds Shift distinctly, so
-    /// dropping it on a miss restores that tolerance without shadowing any
-    /// explicit binding (which the exact pass already caught).
-    pub fn resolve(&self, key: &KeyEvent) -> Option<InputAction> {
-        if let Some(action) = self.map.get(&[(key.code, key.modifiers)][..]).copied() {
-            return Some(action);
-        }
-        if key.modifiers.contains(KeyModifiers::SHIFT) {
-            let without_shift = key.modifiers - KeyModifiers::SHIFT;
-            return self.map.get(&[(key.code, without_shift)][..]).copied();
-        }
-        None
-    }
-
-    /// Bind a single chord to an action, replacing any existing binding.
-    /// Test-only; production overrides flow through [`Keymaps::from_config`].
-    #[cfg(test)]
-    pub fn insert(&mut self, chord: Chord, action: InputAction) {
-        self.map.insert(vec![chord], action);
-    }
 }
 
 /// Parse a chord SEQUENCE: one or more chords separated by whitespace,
@@ -925,16 +896,16 @@ mod tests {
         let km = InputKeymap::defaults();
         // Shift+nav still moves.
         assert_eq!(
-            km.resolve(&ev(KeyCode::Left, KeyModifiers::SHIFT)),
+            km.resolve_lenient(&ev(KeyCode::Left, KeyModifiers::SHIFT)),
             Some(InputAction::CursorLeft)
         );
         assert_eq!(
-            km.resolve(&ev(KeyCode::Home, KeyModifiers::SHIFT)),
+            km.resolve_lenient(&ev(KeyCode::Home, KeyModifiers::SHIFT)),
             Some(InputAction::CursorLineStart)
         );
         // Ctrl+Shift+A still jumps to line start (Shift dropped → Ctrl+A).
         assert_eq!(
-            km.resolve(&ev(
+            km.resolve_lenient(&ev(
                 KeyCode::Char('a'),
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT
             )),
@@ -944,7 +915,7 @@ mod tests {
         let mut km2 = InputKeymap::defaults();
         km2.insert((KeyCode::Left, KeyModifiers::SHIFT), InputAction::WordLeft);
         assert_eq!(
-            km2.resolve(&ev(KeyCode::Left, KeyModifiers::SHIFT)),
+            km2.resolve_lenient(&ev(KeyCode::Left, KeyModifiers::SHIFT)),
             Some(InputAction::WordLeft)
         );
     }
