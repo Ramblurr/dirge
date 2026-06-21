@@ -357,8 +357,19 @@ impl Keymaps {
                 continue;
             }
             if let Some(action) = KeyAction::from_command(&cmd) {
+                // dirge-z2p6: a user (or plugin) binding for a chord is
+                // authoritative — clear any default in EITHER context first so
+                // a leftover default in the other context can't shadow it.
+                // The global keymap resolves before the input editor, so an
+                // un-cleared global default would otherwise swallow a chord the
+                // user rebound to an input command (the ctrl-r → reverse_search
+                // case). Rebinding replaces; no explicit `unbind` needed.
+                global.map.remove(&seq);
+                input.map.remove(&seq);
                 global.map.insert(seq, action);
             } else if let Some(action) = InputAction::from_command(&cmd) {
+                global.map.remove(&seq);
+                input.map.remove(&seq);
                 input.map.insert(seq, action);
             } else {
                 warnings.push(format!(
@@ -889,6 +900,47 @@ mod tests {
         assert_eq!(
             km.resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             None
+        );
+    }
+
+    #[test]
+    fn rebind_across_contexts_overrides_without_explicit_unbind() {
+        // dirge-z2p6: Ctrl+R defaults to a GLOBAL action (ToggleReasoning).
+        // The user rebinds it to `reverse_search`, an INPUT command. Because
+        // the global keymap resolves before the input editor, an un-cleared
+        // global default would swallow the chord. The rebind must take effect
+        // with NO explicit `unbind` first.
+        let (kms, warns) = Keymaps::from_config(Some(&[cfg("ctrl-r", "reverse_search")]));
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            kms.input
+                .resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Some(InputAction::ReverseSearch),
+        );
+        assert_eq!(
+            kms.global
+                .resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            None,
+            "the shadowing global default must be cleared by the rebind",
+        );
+    }
+
+    #[test]
+    fn rebind_input_default_to_global_clears_the_input_default() {
+        // Symmetric: Ctrl+A defaults to an INPUT command (CursorLineStart).
+        // Rebinding it to a global command makes the chord global-only — the
+        // now-shadowed input default is cleared rather than left dead.
+        let (kms, warns) = Keymaps::from_config(Some(&[cfg("ctrl-a", "next_chat")]));
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            kms.global
+                .resolve(&ev(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Some(KeyAction::NextChat),
+        );
+        assert_eq!(
+            kms.input
+                .resolve(&ev(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            None,
         );
     }
 
