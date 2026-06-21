@@ -82,7 +82,7 @@ Classify every entry you save with the `kind` parameter — it drives how memory
   • `procedural` — a how-to rule or convention ("run `cargo fmt --all` before committing"). Default for AGENTS.md-style guidance.
   • `episodic` — a specific past event worth recalling ("the 0.3 cut broke because the lockfile wasn't regenerated").
   • `identity` — who the user/agent is ("operator prefers terse, no-preamble handoffs").
-  • `working` — short-lived task context. Rarely worth saving and the FIRST to be evicted under budget pressure — prefer not to persist it.
+  • `working` — short-lived task context. Rarely worth saving and the FIRST to be evicted under budget pressure — prefer not to persist it, EXCEPT for open-thread carry-over (see 1d).
 When unsure, use `semantic` for facts and `procedural` for rules.
 
 **1a. Keep the PROJECT OVERVIEW current.** Maintain exactly ONE `overview`-kind entry: a minimal (≤5 lines) high-level orientation of the project — what it is, its language/stack, the rough source layout, and how to build/test/run it. This is the gestalt a future session should read first. If no overview exists yet, create it with `memory(action='add', kind='overview', content='...')`; the deterministic session ground-truth above is a good starting point. If one exists and the big picture has changed (or it is missing something foundational), REPLACE it — adding an `overview` overwrites the existing one in place, so just `add` the refreshed version. Keep it stable and short: it is orientation, not a changelog. Do nothing here if the current overview is still accurate.
@@ -96,6 +96,8 @@ This ranks proven playbooks above ones that fail in practice and keeps effective
   • `harsh=false` (default) — a natural update: the user changed their mind or a fact simply changed. The new fact is written at normal confidence.
   • `harsh=true` — the user flatly DENIED the old fact ("no, that's wrong", "we never did that"). The new fact is held at reduced confidence because the area is contested.
 Supersession keeps the old entry as an audit record and removes it from active memory. Use `replace` only for rewording the SAME fact; use `supersede` when the fact itself changed.
+
+**1d. Carry over OPEN THREADS for the next session.** If the session ended with work genuinely unfinished — an in-progress todo, a half-applied change, an explicit "next I'll…", a known-but-unfixed issue — record each as a SHORT `working`-kind entry so the next session can resume where this one stopped. The deterministic session ground-truth above (open todos, uncommitted files, where we stopped) is your source; only carry threads that are actually still open. Conversely, when a prior session's `working` carry-over is now DONE (the todo completed, the change landed), `remove` it so stale resume notes don't accumulate. This is the one case where persisting `working` memory is wanted; everything else about `working` (transient, first-evicted) still holds — keep these few and specific, not a narrative of the session.
 
 **2. Update SKILLS (procedural improvements):**
 Be ACTIVE — most sessions produce at least one skill update. A pass that does nothing is a missed learning opportunity.
@@ -1026,6 +1028,10 @@ mod tests {
         assert!(COMBINED_REVIEW_PROMPT.contains("Environment-dependent"));
         assert!(COMBINED_REVIEW_PROMPT.contains("CLASS-LEVEL skills"));
         assert!(COMBINED_REVIEW_PROMPT.contains("Nothing to save"));
+        // dirge-pkqi / dirge-hcv8: overview maintenance + open-thread carry-over.
+        assert!(COMBINED_REVIEW_PROMPT.contains("PROJECT OVERVIEW"));
+        assert!(COMBINED_REVIEW_PROMPT.contains("kind='overview'"));
+        assert!(COMBINED_REVIEW_PROMPT.contains("OPEN THREADS"));
     }
 
     #[test]
