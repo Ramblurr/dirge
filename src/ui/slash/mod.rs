@@ -476,7 +476,7 @@ pub async fn handle_slash(
         "/prompt" => cmd::prompt::cmd_prompt(&mut ctx, &parts).await?,
         "/agent" | "/agents" => cmd::agent::cmd_agent(&mut ctx, &parts).await?,
         "/plan" => cmd::plan::cmd_plan(&mut ctx, &parts, text).await?,
-        "/plugins" => cmd::plugins::cmd_plugins(&mut ctx).await?,
+        "/plugins" => cmd::plugins::cmd_plugins(&mut ctx, &parts).await?,
         #[cfg(feature = "git-worktree")]
         "/worktree" => cmd::worktree::cmd_worktree(&mut ctx, &parts).await?,
         #[cfg(feature = "git-worktree")]
