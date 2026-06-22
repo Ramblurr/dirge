@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-22
+
+### Added
+- **Scrollback reflows on terminal resize.** The chat buffer became a derived
+  cache over a width-independent source log, so prose and markdown — tables
+  especially — re-wrap to the new width on resize instead of keeping the
+  column widths they were first rendered at. Streamed reasoning/response is
+  source-tracked too; tool-chamber borders are preserved verbatim (re-boxing is
+  a follow-up). (#504, dirge-qy3y)
+- **Memory: a pinned project overview.** A new `overview` memory kind holds a
+  single high-level orientation (stack, layout, how to build/test) that is
+  exempt from eviction and rendered first in the system prompt, refreshed by the
+  background review. (#504, dirge-pkqi)
+- **Memory: deterministic session ground-truth.** A model-free digest (goal,
+  files touched, commands run, todos, `git diff --stat`) is prepended to the
+  background-review transcript so it ranks known facts instead of rediscovering
+  them. (#504, dirge-a62g)
+- **Memory: open-thread carry-over.** The background review records genuinely
+  unfinished work as short `working` entries so a fresh session resumes where
+  the last one stopped, and clears them once the work lands. (#504, dirge-hcv8)
+
+### Changed
+- **Rebind a key across contexts without unbinding it first.** A user (or
+  plugin) keybinding now clears the chord from both the global and input keymaps
+  before inserting the resolved command, so e.g. `ctrl-r → reverse_search` takes
+  effect without a preceding `unbind`. (#504, dirge-z2p6)
+
+### Fixed
+- **Secrets in memory entries are redacted before storage**, not just in the
+  full-text index — closing a leak path into the system prompt and global-scope
+  memory. (#504, dirge-n3qf)
+
 ## [0.10.4] - 2026-06-21
 
 ### Added
