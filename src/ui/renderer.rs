@@ -1936,6 +1936,30 @@ impl Renderer {
         Ok(())
     }
 
+    /// dirge-qy3y: append PRE-FORMATTED rows that must NOT be re-wrapped on
+    /// resize — tool-chamber borders/rows already laid out to a fixed inner
+    /// width. Stored as a `Raw` block so `rebuild` reproduces them verbatim
+    /// (they don't re-box yet — future work — but they don't wrap-break on a
+    /// narrowing resize either). One buffer row per `\n`-split line, so the
+    /// chamber's `buffer_len()` index bookkeeping is unchanged vs `write_line`.
+    pub fn write_line_raw(&mut self, text: &str, color: Color) -> io::Result<()> {
+        self.commit_partial();
+        self.commit_stream();
+        let rows: Vec<LineEntry> = text
+            .split('\n')
+            .map(|l| LineEntry {
+                text: CompactString::from(l),
+                color,
+            })
+            .collect();
+        for row in &rows {
+            self.push_buffer_line(row.clone());
+        }
+        self.source.push(SourceBlock::Raw { rows });
+        self.enforce_cap();
+        Ok(())
+    }
+
     pub fn write(&mut self, text: &str, color: Color) -> io::Result<()> {
         if text.is_empty() {
             return Ok(());

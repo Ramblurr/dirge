@@ -1219,3 +1219,25 @@ fn rebuild_is_idempotent_at_same_width() {
         "rebuild at the same width must reproduce the buffer exactly",
     );
 }
+
+/// Pre-formatted chamber rows (recorded via `write_line_raw` as `Raw` blocks)
+/// must NOT re-wrap on a narrowing rebuild — they're preserved verbatim so the
+/// box borders don't fracture (a `Plain` block of the same text would wrap).
+#[test]
+fn raw_rows_do_not_rewrap_on_narrowing() {
+    let mut r = Renderer::new().expect("renderer");
+    r.set_test_cols(80);
+    let row = format!("│ {} │", "x".repeat(60));
+    r.write_line_raw(&row, Color::White).unwrap();
+    let before = r.buffer_len();
+    assert_eq!(before, 1, "one raw row");
+
+    r.set_test_cols(30);
+    r.rebuild();
+    assert_eq!(
+        r.buffer_len(),
+        1,
+        "raw row must stay a single row after narrowing (no border-fracturing re-wrap)",
+    );
+    assert_eq!(r.buffer_lines()[0], row, "raw row preserved verbatim");
+}

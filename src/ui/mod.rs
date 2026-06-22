@@ -1102,7 +1102,7 @@ pub async fn run_interactive(
                                     let (frame_w, _) = chamber_widths(&renderer);
                                     let header =
                                         fit_banner_header(&upper, &raw_value, frame_w);
-                                    renderer.write_line(&header, c_tool())?;
+                                    renderer.write_line_raw(&header, c_tool())?;
                                     ui.last_tool_name = Some(reopen_name);
                                     ui.tool_chamber_open = true;
                                 }
@@ -3118,7 +3118,7 @@ pub async fn run_interactive(
                         &chamber_row("awaiting permission…", inner),
                         theme::dim(),
                     )?;
-                    renderer.write_line(&chamber_bottom(frame_w), c_tool())?;
+                    renderer.write_line_raw(&chamber_bottom(frame_w), c_tool())?;
                     ui.tool_chamber_open = false;
                     ui.chamber_top_start = None;
                     ui.chamber_top_end = None;

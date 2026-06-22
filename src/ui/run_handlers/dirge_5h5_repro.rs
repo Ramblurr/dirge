@@ -72,7 +72,9 @@ fn simulate_tool_call(ctx: &mut RunCtx<'_>, id: &str, name: &str, args: serde_js
     let raw_value = sanitize_output(&raw_value).into_string();
     let (frame_w, _) = chamber_widths(ctx.renderer);
     let header = fit_banner_header(&upper, &raw_value, frame_w);
-    ctx.renderer.write_line(&header, c_tool()).expect("header");
+    ctx.renderer
+        .write_line_raw(&header, c_tool())
+        .expect("header");
     *ctx.chamber_top_end = Some(ctx.renderer.buffer_len());
     *ctx.tool_chamber_open = true;
 }

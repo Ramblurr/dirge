@@ -123,7 +123,7 @@ pub(crate) async fn handle_done(
         } else {
             let (frame_w, _) = chamber_widths(ctx.renderer);
             ctx.renderer
-                .write_line(&chamber_bottom(frame_w), theme::dim())?;
+                .write_line_raw(&chamber_bottom(frame_w), theme::dim())?;
         }
         *ctx.tool_chamber_open = false;
         *ctx.chamber_top_start = None;

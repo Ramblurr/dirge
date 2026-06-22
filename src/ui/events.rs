@@ -297,7 +297,7 @@ pub(crate) fn render_tool_calls_replay(
         let (frame_w, _) = chamber_widths(renderer);
         let header = fit_banner_header(&tc.name.to_ascii_uppercase(), &banner_value, frame_w);
         renderer.write_line("", Color::Reset)?;
-        renderer.write_line(&header, theme::tool())?;
+        renderer.write_line_raw(&header, theme::tool())?;
         // Body mirrors `convert_history`'s state→text mapping so the replayed
         // chamber matches what the model re-sees on resume.
         let body = match &tc.state {
