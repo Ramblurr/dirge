@@ -99,6 +99,18 @@ enum SourceBlock {
     Raw { rows: Vec<LineEntry> },
 }
 
+/// A source block plus its cached rendered-row count at the width the `buffer`
+/// currently reflects. The count lets `replace_from` / `enforce_cap` map a
+/// buffer offset to a block boundary WITHOUT re-rendering (markdown re-parse)
+/// every block — `replace_from` runs per keystroke in modal sub-loops, so an
+/// O(scrollback) re-render there would lag typing. Kept in sync on every
+/// append, on `stream`, and recomputed wholesale in `rebuild`.
+#[derive(Clone)]
+struct Block {
+    src: SourceBlock,
+    rows: usize,
+}
+
 /// Cap on how many logical input lines we'll show stacked at the bottom of
 /// the screen before the input box starts internally scrolling. Beyond this
 /// the chat-history viewport would be unreasonably squashed.
@@ -343,7 +355,7 @@ pub struct ChatSnapshot {
     buffer: Vec<LineEntry>,
     /// dirge-qy3y: per-chat source-of-truth, swapped with the active fields
     /// on chat switch so each chat reflows independently.
-    source: Vec<SourceBlock>,
+    source: Vec<Block>,
     streaming: bool,
     open_rows: usize,
     partial: CompactString,
@@ -394,7 +406,7 @@ pub struct Renderer {
     /// committed region appends a [`SourceBlock`]; `buffer` is the wrapped
     /// render cache derived from these. `rebuild` regenerates `buffer` from
     /// `source` at the current width so scrollback reflows on resize.
-    source: Vec<SourceBlock>,
+    source: Vec<Block>,
     /// True while the tail of `source`/`buffer` is an open (in-flight)
     /// streamed block being re-rendered per token (`stream`). Sealed by
     /// `commit_stream`.
@@ -1359,12 +1371,14 @@ impl Renderer {
         // callers — modal editors, pickers, collapsed chambers — re-render
         // their own content, so it needn't reflow). The streamed register uses
         // `stream`, not this, so it still reflows as markdown.
+        // Cached row counts only — NO re-render here. `replace_from` runs per
+        // keystroke in modal sub-loops, so an O(scrollback) markdown re-parse
+        // would lag typing.
         let mut acc = 0usize;
         let mut keep_blocks = 0usize;
         for b in &self.source {
-            let r = self.render_block(b).len();
-            if acc + r <= start {
-                acc += r;
+            if acc + b.rows <= start {
+                acc += b.rows;
                 keep_blocks += 1;
             } else {
                 break;
@@ -1373,11 +1387,18 @@ impl Renderer {
         let carry: Vec<LineEntry> = self.buffer[acc..start].to_vec();
         self.source.truncate(keep_blocks);
         if !carry.is_empty() {
-            self.source.push(SourceBlock::Raw { rows: carry });
+            let rows = carry.len();
+            self.source.push(Block {
+                src: SourceBlock::Raw { rows: carry },
+                rows,
+            });
         }
         if !lines.is_empty() {
-            self.source.push(SourceBlock::Raw {
-                rows: lines.clone(),
+            self.source.push(Block {
+                src: SourceBlock::Raw {
+                    rows: lines.clone(),
+                },
+                rows: lines.len(),
             });
         }
         // A tail replace ends any open streamed block (its rows are now part of
@@ -1632,7 +1653,9 @@ impl Renderer {
                 });
             }
             self.partial.clear();
-            self.source.push(SourceBlock::Plain { text, color: c });
+            let block = SourceBlock::Plain { text, color: c };
+            let rows = self.render_block(&block).len();
+            self.source.push(Block { src: block, rows });
             self.enforce_cap();
         }
     }
@@ -1680,10 +1703,12 @@ impl Renderer {
     /// order.
     fn append_source_block(&mut self, block: SourceBlock) {
         self.commit_stream();
-        for row in self.render_block(&block) {
+        let rendered = self.render_block(&block);
+        let rows = rendered.len();
+        for row in rendered {
             self.push_buffer_line(row);
         }
-        self.source.push(block);
+        self.source.push(Block { src: block, rows });
         self.enforce_cap();
     }
 
@@ -1709,15 +1734,19 @@ impl Renderer {
         let old_len = self.buffer.len();
         self.buffer.truncate(start);
         self.buffer.extend(rows.iter().cloned());
+        let entry = Block {
+            src: block,
+            rows: rows.len(),
+        };
         if self.streaming {
             // Update the open block in place.
             if let Some(last) = self.source.last_mut() {
-                *last = block;
+                *last = entry;
             } else {
-                self.source.push(block);
+                self.source.push(entry);
             }
         } else {
-            self.source.push(block);
+            self.source.push(entry);
             self.streaming = true;
         }
         self.open_rows = rows.len();
@@ -1775,9 +1804,8 @@ impl Renderer {
             if sealed == 0 {
                 break;
             }
-            let rows = self.render_block(&self.source[0]).len();
+            dropped_rows += self.source[0].rows;
             self.source.remove(0);
-            dropped_rows += rows;
         }
         if dropped_rows == 0 {
             return;
@@ -1806,12 +1834,13 @@ impl Renderer {
     /// scroll anchor (lines-from-bottom) is preserved across the rebuild.
     pub fn rebuild(&mut self) {
         let old_len = self.buffer.len();
-        let blocks = std::mem::take(&mut self.source);
+        let mut blocks = std::mem::take(&mut self.source);
         let mut buffer = Vec::new();
         let mut open_rows = 0usize;
         let last = blocks.len().saturating_sub(1);
-        for (i, block) in blocks.iter().enumerate() {
-            let rows = self.render_block(block);
+        for (i, block) in blocks.iter_mut().enumerate() {
+            let rows = self.render_block(&block.src);
+            block.rows = rows.len();
             if self.streaming && i == last {
                 open_rows = rows.len();
             }
@@ -1952,10 +1981,14 @@ impl Renderer {
                 color,
             })
             .collect();
+        let n = rows.len();
         for row in &rows {
             self.push_buffer_line(row.clone());
         }
-        self.source.push(SourceBlock::Raw { rows });
+        self.source.push(Block {
+            src: SourceBlock::Raw { rows },
+            rows: n,
+        });
         self.enforce_cap();
         Ok(())
     }
