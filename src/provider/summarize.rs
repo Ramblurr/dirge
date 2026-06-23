@@ -99,18 +99,63 @@ pub(crate) async fn oneshot_with_model(
     // dirge-wire: opt-in dump so a mystery side-LLM call (which prompt, which
     // purpose) is visible. No-op unless DIRGE_DUMP_REQUESTS is set.
     crate::provider::wire::dump_oneshot(label, preamble, &prompt);
+    // dirge-zt8p: disable extended reasoning for this one-shot (see
+    // `reasoning_disable_for_kind`). Computed before the consuming match.
+    let disable = reasoning_disable_for_kind(oneshot_provider_kind(&model));
     match model {
-        super::AnyModel::OpenRouter(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::OpenAI(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::ChatGptOpenAI(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::OpenAICodex(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::Anthropic(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::AnthropicOauth(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::Gemini(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::DeepSeek(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::Glm(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::Ollama(m) => run_oneshot(m, label, preamble, prompt).await,
-        super::AnyModel::Custom(m) => run_oneshot(m, label, preamble, prompt).await,
+        super::AnyModel::OpenRouter(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::OpenAI(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::ChatGptOpenAI(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::OpenAICodex(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::Anthropic(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::AnthropicOauth(m) => {
+            run_oneshot(m, label, preamble, prompt, disable).await
+        }
+        super::AnyModel::Gemini(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::DeepSeek(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::Glm(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::Ollama(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::Custom(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+    }
+}
+
+/// Canonical provider-kind string for an [`AnyModel`] variant — the three
+/// OpenAI client variants collapse to "openai", the two Anthropic ones to
+/// "anthropic". Used to pick the reasoning-disable shape for one-shots.
+fn oneshot_provider_kind(model: &super::AnyModel) -> &'static str {
+    use super::AnyModel as M;
+    match model {
+        M::OpenRouter(_) => "openrouter",
+        M::OpenAI(_) | M::ChatGptOpenAI(_) | M::OpenAICodex(_) => "openai",
+        M::Anthropic(_) | M::AnthropicOauth(_) => "anthropic",
+        M::Gemini(_) => "gemini",
+        M::DeepSeek(_) => "deepseek",
+        M::Glm(_) => "glm",
+        M::Ollama(_) => "ollama",
+        M::Custom(_) => "custom",
+    }
+}
+
+/// dirge-zt8p: provider-appropriate request params that turn OFF the model's
+/// extended-reasoning trace for the tool-less one-shots (summarizer / critic /
+/// approval). Those tasks don't benefit from a thinking trace, and on
+/// reasoning-by-default models (DeepSeek / Qwen / GLM hybrids behind an
+/// OpenAI-compatible API) it roughly doubles latency. Returns `None` when the
+/// provider has no disable knob, already defaults to no-thinking (Anthropic), or
+/// where forcing it risks rejecting a valid request (OpenAI o-series has no
+/// "off", and non-reasoning GPT models already don't think).
+fn reasoning_disable_for_kind(kind: &str) -> Option<serde_json::Value> {
+    match kind {
+        // vLLM / SGLang / DeepSeek-V3.1 convention for the hybrid models these
+        // OpenAI-compatible endpoints serve.
+        "deepseek" | "glm" | "custom" | "openrouter" => {
+            Some(serde_json::json!({ "chat_template_kwargs": { "thinking": false } }))
+        }
+        // Ollama's native per-request toggle.
+        "ollama" => Some(serde_json::json!({ "think": false })),
+        // Gemini 2.5: a zero thinking budget disables it.
+        "gemini" => Some(serde_json::json!({ "thinking_config": { "thinking_budget": 0 } })),
+        _ => None,
     }
 }
 
@@ -159,6 +204,7 @@ async fn run_oneshot<M>(
     label: &'static str,
     preamble: &'static str,
     prompt: String,
+    reasoning_disable: Option<serde_json::Value>,
 ) -> anyhow::Result<String>
 where
     M: rig::completion::CompletionModel + Clone + 'static,
@@ -175,10 +221,17 @@ where
     let response = run_with_retry(&policy, label, || {
         let model = model.clone();
         let prompt = prompt.clone();
+        let reasoning_disable = reasoning_disable.clone();
         async move {
-            let agent = rig::agent::AgentBuilder::new(model)
-                .preamble(preamble)
-                .build();
+            // dirge-zt8p: turn off the model's extended-reasoning trace for this
+            // one-shot — summarize/critic/approval don't benefit from it, and on
+            // reasoning-by-default models it ~doubles latency. rig forwards an
+            // agent's `additional_params` into the request.
+            let mut builder = rig::agent::AgentBuilder::new(model).preamble(preamble);
+            if let Some(params) = reasoning_disable {
+                builder = builder.additional_params(params);
+            }
+            let agent = builder.build();
 
             let mut stream = agent
                 .stream_chat(prompt, Vec::<rig::completion::Message>::new())
@@ -213,12 +266,37 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::head_tail_truncate;
+    use super::{head_tail_truncate, reasoning_disable_for_kind};
 
     #[test]
     fn head_tail_truncate_short_prompt_passes_through() {
         let s = "line 1\nline 2\nline 3";
         assert_eq!(head_tail_truncate(s, 1024), s);
+    }
+
+    #[test]
+    fn reasoning_disable_shapes_per_provider() {
+        // OpenAI-compatible hybrids (incl. ds4-style custom endpoints) get the
+        // chat_template_kwargs toggle.
+        for kind in ["deepseek", "glm", "custom", "openrouter"] {
+            assert_eq!(
+                reasoning_disable_for_kind(kind),
+                Some(serde_json::json!({ "chat_template_kwargs": { "thinking": false } })),
+                "{kind} should disable thinking via chat_template_kwargs",
+            );
+        }
+        assert_eq!(
+            reasoning_disable_for_kind("ollama"),
+            Some(serde_json::json!({ "think": false })),
+        );
+        assert_eq!(
+            reasoning_disable_for_kind("gemini"),
+            Some(serde_json::json!({ "thinking_config": { "thinking_budget": 0 } })),
+        );
+        // Anthropic defaults to no thinking; OpenAI has no safe "off" — both left
+        // untouched.
+        assert_eq!(reasoning_disable_for_kind("anthropic"), None);
+        assert_eq!(reasoning_disable_for_kind("openai"), None);
     }
 
     #[test]
