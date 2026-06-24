@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-24
+
+### Fixed
+- **Mid-task context overflow now resumes the task after compaction instead of
+  stranding it.** When a turn overflowed the context mid-work, reactive
+  compaction ran but then sat idle because recovery refused to retry once any
+  tool had run. With eager post-turn compaction gone (0.12.0), that mid-turn
+  path became common, so the agent routinely stopped after compacting. The
+  partial assistant turn (streamed text + completed tool calls) is now recorded
+  into history before compacting, and recovery resumes as a continuation — the
+  already-run tools are not re-executed. (dirge-b899)
+- **Queuing a steering message mid-stream no longer duplicates the response.**
+  Echoing the queued message sealed the open stream block, and the next token
+  re-opened a new block with the whole accumulated response, painting the
+  partial `<dirge>` reply twice. The partial is now sealed and the render buffer
+  reset so post-queue tokens render as a clean continuation.
+
 ## [0.12.0] - 2026-06-24
 
 ### Added

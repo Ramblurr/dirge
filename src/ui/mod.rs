@@ -2174,14 +2174,14 @@ pub async fn run_interactive(
                                 // queue at turn boundaries and injects it as
                                 // mid-turn guidance within the same iteration.
                                 ui.interjection_queue.lock().unwrap().push_back(text.to_string());
-                                for line in text.lines() {
-                                    let safe_line = sanitize_output(line);
-                                    renderer.write_line(
-                                        &format!("» {}", safe_line),
-                                        theme::dim(),
-                                    )?;
-                                }
-                                renderer.write_line(
+                                // Seal the in-flight response + reset the render
+                                // buffer so a mid-stream queue doesn't duplicate the
+                                // partial (see render_queued_steering).
+                                run_handlers::streaming::render_queued_steering(
+                                    &mut renderer,
+                                    &mut ui.response_buf,
+                                    &mut ui.response_start_line,
+                                    &text,
                                     "loop active — message queued (will inject at next turn boundary; /loop stop to cancel)",
                                     c_agent(),
                                 )?;
@@ -2477,14 +2477,14 @@ pub async fn run_interactive(
                                 if let Some(tx) = ui.agent_interject.as_ref() {
                                     let _ = tx.try_send(());
                                 }
-                                for line in text.lines() {
-                                    let safe_line = sanitize_output(line);
-                                    renderer.write_line(
-                                        &format!("» {}", safe_line),
-                                        theme::dim(),
-                                    )?;
-                                }
-                                renderer.write_line(
+                                // Seal the in-flight response + reset the render
+                                // buffer so the steering echo below doesn't cause the
+                                // partial to re-render (duplicating the <dirge> block).
+                                run_handlers::streaming::render_queued_steering(
+                                    &mut renderer,
+                                    &mut ui.response_buf,
+                                    &mut ui.response_start_line,
+                                    &text,
                                     "(queued; will inject at next turn boundary — Alt+X drops, Ctrl+C cancels)",
                                     theme::dim(),
                                 )?;
@@ -3152,6 +3152,11 @@ pub async fn run_interactive(
                     Finish { clear_queue: bool },
                     Submit { run_prompt: String, record_text: String },
                     Retry { prompt: String },
+                    // dirge-b899: resume a made-progress turn as a continuation
+                    // against the compacted history (which already carries the
+                    // partial assistant turn + tool results) — no prompt re-send,
+                    // so side-effecting tools don't re-run.
+                    Continue,
                 }
 
                 let next = match ev {
@@ -3179,27 +3184,26 @@ pub async fn run_interactive(
                             CompactionThen::SendPrompt { run_prompt, record_text } => {
                                 Next::Submit { run_prompt, record_text }
                             }
-                            CompactionThen::RetryAfterOverflow { prompt, tools_already_ran } => {
-                                if compacted && !tools_already_ran {
-                                    Next::Retry { prompt }
-                                } else if compacted {
-                                    // Compacted, but the failed run already invoked
-                                    // tools — refuse auto-retry to avoid re-applying
-                                    // side effects.
-                                    renderer.write_line(
-                                        "  ↳ context compacted, but the failed run already invoked tools — not auto-retrying. Re-issue your prompt manually if you want to continue.",
-                                        c_error(),
-                                    )?;
-                                    Next::Finish { clear_queue: true }
-                                } else {
-                                    // Install made no progress (e.g. summary larger
-                                    // than what it replaced) — retrying would just
-                                    // overflow again.
-                                    renderer.write_line(
-                                        "auto-compact made no progress; leaving session as-is. Try /compress with stricter instructions, lower keep_recent_tokens, or /clear.",
-                                        c_error(),
-                                    )?;
-                                    Next::Finish { clear_queue: true }
+                            CompactionThen::RetryAfterOverflow { prompt, made_progress } => {
+                                use crate::ui::compaction::OverflowRecovery;
+                                match crate::ui::compaction::overflow_recovery(compacted, made_progress) {
+                                    // The partial turn (text + tool results) is in
+                                    // the compacted history — resume the task as a
+                                    // continuation without re-running tools.
+                                    OverflowRecovery::Continue => Next::Continue,
+                                    // Nothing streamed before the overflow — safe to
+                                    // re-send the prompt against the compacted history.
+                                    OverflowRecovery::Resend => Next::Retry { prompt },
+                                    OverflowRecovery::GiveUp => {
+                                        // Install made no progress (e.g. summary larger
+                                        // than what it replaced) — retrying would just
+                                        // overflow again.
+                                        renderer.write_line(
+                                            "auto-compact made no progress; leaving session as-is. Try /compress with stricter instructions, lower keep_recent_tokens, or /clear.",
+                                            c_error(),
+                                        )?;
+                                        Next::Finish { clear_queue: true }
+                                    }
                                 }
                             }
                         }
@@ -3271,6 +3275,27 @@ pub async fn run_interactive(
                         runner.install_into(&mut ui.agent_rx, &mut ui.agent_abort, &mut ui.agent_interject, &mut ui.agent_cancel, &mut ui.is_running);
                         ui.last_collapsed = None;
                         renderer.write_line("  ↳ resumed run with compacted history", theme::dim())?;
+                        renderer.set_avatar_state(avatar::AvatarState::Idle);
+                    }
+                    Next::Continue => {
+                        // dirge-b899: the failed turn's partial assistant message
+                        // (text + completed tool calls) is already in the compacted
+                        // history, so resume with a continuation nudge instead of
+                        // re-sending the prompt — the side-effecting tools that
+                        // already ran are NOT re-executed.
+                        const RESUME_NUDGE: &str = "Your context was compacted to free up space. Continue the task from where you left off.";
+                        let history = crate::agent::runner::convert_history(session);
+                        ui.last_user_prompt = RESUME_NUDGE.to_string();
+                        let runner = agent.clone().spawn_runner(
+                            crate::agent::tools::background::prepend_pending_notifications(RESUME_NUDGE, bg_store.as_ref()),
+                            history,
+                            Some(ui.interjection_queue.clone()),
+                        );
+                        runner.install_into(&mut ui.agent_rx, &mut ui.agent_abort, &mut ui.agent_interject, &mut ui.agent_cancel, &mut ui.is_running);
+                        session.add_message(MessageRole::User, RESUME_NUDGE);
+                        begin_snapshot_turn(session);
+                        ui.last_collapsed = None;
+                        renderer.write_line("  ↳ resumed task with compacted history", theme::dim())?;
                         renderer.set_avatar_state(avatar::AvatarState::Idle);
                     }
                     Next::Finish { clear_queue } => {

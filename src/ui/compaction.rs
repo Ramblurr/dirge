@@ -34,15 +34,70 @@ pub(crate) enum CompactionThen {
         record_text: String,
     },
     /// Reactive overflow recovery: the prompt already overflowed and is ALREADY
-    /// in the session, so the retry drops the trailing user message from history
-    /// and does NOT re-record it. Only retried when compaction actually shrank
-    /// the context (`Compacted`) AND no side-effecting tools ran on the failed
-    /// turn (re-running them would double-apply). Otherwise the user is told to
-    /// recover manually.
-    RetryAfterOverflow {
-        prompt: String,
-        tools_already_ran: bool,
-    },
+    /// in the session. After a successful compaction we RESUME the task rather
+    /// than stranding it (dirge-b899):
+    ///   - `made_progress` (streamed text and/or completed tool calls on the
+    ///     failed turn): the partial assistant turn was recorded into
+    ///     `session.messages` before compacting, so the compacted history
+    ///     carries the tool RESULTS. The arm spawns a CONTINUATION ("continue
+    ///     from where you left off") — no prompt re-send, so side-effecting
+    ///     tools don't re-run.
+    ///   - otherwise (pure first-token overflow, nothing streamed): re-send the
+    ///     `prompt` against the compacted history (the trailing user message is
+    ///     dropped + not re-recorded).
+    /// If compaction made no progress, the user is told to recover manually.
+    RetryAfterOverflow { prompt: String, made_progress: bool },
+}
+
+/// What the `compaction_phase` arm does after a reactive-overflow compaction
+/// finishes installing. Extracted as a pure decision so the regression
+/// (dirge-b899: stranding a made-progress turn instead of resuming) is
+/// directly testable.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OverflowRecovery {
+    /// Resume the task as a continuation against the compacted history (the
+    /// partial assistant turn + tool results are already recorded).
+    Continue,
+    /// Re-send the original prompt (nothing streamed before the overflow).
+    Resend,
+    /// Compaction made no progress — leave the session as-is.
+    GiveUp,
+}
+
+/// Decide how to recover from a reactive context overflow once compaction
+/// has run. `made_progress` is true when the failed turn streamed text and/or
+/// completed tool calls (so its partial turn was recorded into the history
+/// before compacting).
+pub(crate) fn overflow_recovery(compacted: bool, made_progress: bool) -> OverflowRecovery {
+    match (compacted, made_progress) {
+        (true, true) => OverflowRecovery::Continue,
+        (true, false) => OverflowRecovery::Resend,
+        (false, _) => OverflowRecovery::GiveUp,
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::{OverflowRecovery, overflow_recovery};
+
+    #[test]
+    fn made_progress_resumes_as_continuation() {
+        // dirge-b899: the failed turn ran tools / streamed text — resume the
+        // task, do NOT strand it (the old code refused when tools had run).
+        assert_eq!(overflow_recovery(true, true), OverflowRecovery::Continue);
+    }
+
+    #[test]
+    fn no_progress_resends_prompt() {
+        // Pure first-token overflow: nothing streamed, safe to re-send.
+        assert_eq!(overflow_recovery(true, false), OverflowRecovery::Resend);
+    }
+
+    #[test]
+    fn uncompacted_gives_up_regardless_of_progress() {
+        assert_eq!(overflow_recovery(false, true), OverflowRecovery::GiveUp);
+        assert_eq!(overflow_recovery(false, false), OverflowRecovery::GiveUp);
+    }
 }
 
 /// Terminal event from the spawned summarizer task. (There's no `Progress` —

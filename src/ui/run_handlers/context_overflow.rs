@@ -73,6 +73,27 @@ pub(crate) async fn handle_context_overflow(
         ctx.response_buf,
         ctx.tool_calls_buf,
     );
+
+    // dirge-b899: record the partial assistant turn (streamed text + the
+    // tool calls that DID complete on the failed turn) into session.messages
+    // BEFORE compacting, so the compacted history carries the tool RESULTS.
+    // That lets recovery resume as a continuation instead of re-sending the
+    // prompt — re-sending would re-run the side-effecting tools from scratch.
+    // A pure first-token overflow (nothing streamed) records nothing and
+    // falls back to a plain prompt re-send.
+    let made_progress = !ctx.response_buf.is_empty() || !ctx.tool_calls_buf.is_empty();
+    if made_progress {
+        // `take` (not clone) — response_buf is cleared in the teardown below
+        // regardless, so move the streamed text out instead of heap-copying a
+        // potentially-large response on this now-common overflow path.
+        let partial = std::mem::take(ctx.response_buf);
+        ctx.session.add_message_with_tool_calls(
+            crate::session::MessageRole::Assistant,
+            &partial,
+            std::mem::take(ctx.tool_calls_buf),
+        );
+    }
+
     // Tear down the current runner before compaction.
     if let Some(h) = agent_abort.take() {
         h.abort();
@@ -86,21 +107,16 @@ pub(crate) async fn handle_context_overflow(
     ctx.reasoning_buf.clear();
     *ctx.reasoning_start_line = None;
 
-    // Tool-side-effect safety (Review #2): re-issuing the prompt re-runs any
-    // side-effecting tool calls the failed turn already made. We have no direct
-    // `had_tool_calls` signal (the runner emitted ContextOverflow without saying
-    // whether tools fired); approximate it by `tool_calls_this_run > 0`. Captured
-    // BEFORE compaction; the arm only retries when it's false. Reset regardless —
-    // the failed run is over.
-    let tools_already_ran = *ctx.tool_calls_this_run > 0;
+    // The failed run is over — reset the per-run tool-call counter.
     *ctx.tool_calls_this_run = 0;
 
     ctx.renderer
         .write_line("▒░ auto-compacting then retrying ░▒", theme::accent())?;
 
     // dirge-tv3p: decide on-thread, then spawn the summarizer off-thread. The
-    // `compaction_phase` arm installs the summary and, on success (Compacted &&
-    // !tools_already_ran), retries the prompt against the compacted history.
+    // `compaction_phase` arm installs the summary and, on `Compacted`, resumes
+    // the task — as a continuation when the failed turn made progress (the
+    // partial turn was recorded above), else by re-sending the prompt.
     match crate::ui::slash::prepare_compaction(
         None,
         false, // forced: auto-compaction stays threshold-gated [dirge-fgtj]
@@ -115,7 +131,7 @@ pub(crate) async fn handle_context_overflow(
                 *req,
                 crate::ui::compaction::CompactionThen::RetryAfterOverflow {
                     prompt: prompt.to_string(),
-                    tools_already_ran,
+                    made_progress,
                 },
             ));
             // Stay busy while compaction runs; the arm releases / retries.
