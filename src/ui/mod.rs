@@ -73,7 +73,7 @@ use crate::provider::{AnyAgent, AnyClient};
 use crate::sandbox::Sandbox;
 #[cfg(feature = "semantic")]
 use crate::semantic::SemanticManager;
-use crate::session::{MessageRole, PermissionAllowEntry, Session};
+use crate::session::{MessageRole, PermissionAllowEntry, Session, SessionMessage};
 use crate::shell;
 #[cfg(feature = "plugin")]
 use crate::ui::agent_io::render_plugin_entry;
@@ -130,6 +130,23 @@ use tool_display::*;
 /// Cached state for a collapsed tool result, so Ctrl+O can re-render
 /// it as a fresh chamber with the full body. We hold only the last
 /// one — older collapses live in chat history but aren't addressable.
+/// Real user-typed prompt text from `msg`, or `None` for synthetic turns
+/// (non-user roles, system-reminder wrappers, mid-turn steers, and
+/// auto-continue messages) that must never pollute command history.
+fn real_user_prompt(msg: &SessionMessage) -> Option<&str> {
+    if msg.role != MessageRole::User {
+        return None;
+    }
+    let content = strip_leading_system_reminder(&msg.content);
+    if content.is_empty()
+        || content.starts_with("[Mid-turn steer")
+        || content == "Continue based on the background task results above."
+    {
+        return None;
+    }
+    Some(content)
+}
+
 // Interactive entry point — every collaborator (client, agent, CLI,
 // config, session, context, hooks, plugin manager, …) is threaded in
 // explicitly so the TUI loop owns no globals. Refactoring into a
@@ -255,20 +272,23 @@ pub async fn run_interactive(
         cfg.chord_timeout_ms.map(std::time::Duration::from_millis);
     let mut chord_deadline: Option<tokio::time::Instant> = None;
     const TOOL_ACTIVITY_CAP: usize = 8;
-    // Seed the editor's history from the session so Up/Down arrow
-    // navigation and Ctrl+F search work across restarts.
-    // Skip synthetic prompts (system-reminder wrappers, mid-turn
-    // steer wrappers, auto-continue messages) — only real user
-    // input belongs in the searchable history.
-    for msg in &session.messages {
-        if msg.role == MessageRole::User {
-            let content = strip_leading_system_reminder(&msg.content);
-            if content.is_empty()
-                || content.starts_with("[Mid-turn steer")
-                || content == "Continue based on the background task results above."
-            {
-                continue;
+    // Seed Up/Down + Ctrl+F history. Prior same-project sessions are
+    // mined first (oldest→newest, capped at `max_sessions`) so the
+    // current session's own prompts stay most-recent at the tail of
+    // history — the spot Up-arrow recall starts from. Synthetic turns
+    // (system-reminder wrappers, mid-turn steers, auto-continues) never
+    // enter history.
+    for prior in
+        crate::session::storage::recent_project_sessions(session, cfg.resolve_max_sessions())
+    {
+        for msg in &prior.messages {
+            if let Some(content) = real_user_prompt(msg) {
+                input.load_history_entry(content);
             }
+        }
+    }
+    for msg in &session.messages {
+        if let Some(content) = real_user_prompt(msg) {
             input.load_history_entry(content);
         }
     }

@@ -585,6 +585,13 @@ pub struct Config {
     /// arrives within this many milliseconds. Absent = wait indefinitely
     /// (emacs default); Esc/Ctrl+G always cancels regardless.
     pub chord_timeout_ms: Option<u64>,
+    /// Cross-session Up-arrow history: how many of the most-recent prior
+    /// sessions in the same project (same working directory) to mine for
+    /// command history. Their user prompts are seeded into history ahead
+    /// of the current session's own, so pressing Up in a fresh session
+    /// recalls commands typed in earlier conversations. `None` (default)
+    /// → 3. Set 0 to keep history scoped to the current session only.
+    pub max_sessions: Option<usize>,
     /// User-defined aliases for built-in slash commands: `{alias: command}`.
     /// `{"exit": "quit"}` makes `/exit` run `/quit`. A leading `/` on either
     /// side is optional. Targets that aren't known built-ins warn at startup
@@ -847,6 +854,12 @@ impl Config {
     /// Defaults to false — reasoning stays hidden until toggled with Ctrl+O.
     pub fn resolve_show_reasoning(&self) -> bool {
         self.show_reasoning.unwrap_or(false)
+    }
+
+    /// Resolve the cross-session history depth (how many prior
+    /// same-project sessions are mined for Up-arrow recall). Default 3.
+    pub fn resolve_max_sessions(&self) -> usize {
+        self.max_sessions.unwrap_or(3)
     }
 
     /// Resolve the sandbox mode, preferring the nested `sandbox.mode`.
@@ -1239,6 +1252,23 @@ mod tests {
         assert!(cfg.chord_timeout_ms.is_none());
         let cfg: Config = serde_json::from_str(r#"{ "chord_timeout_ms": 1500 }"#).unwrap();
         assert_eq!(cfg.chord_timeout_ms, Some(1500));
+    }
+
+    /// Cross-session Up-arrow history depth: absent by default (→3),
+    /// parses from the documented key, and resolve applies the default.
+    #[test]
+    fn max_sessions_absent_and_parses() {
+        let cfg: Config = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(cfg.max_sessions.is_none());
+        assert_eq!(cfg.resolve_max_sessions(), 3, "default depth is 3");
+
+        let cfg: Config = serde_json::from_str(r#"{ "max_sessions": 5 }"#).unwrap();
+        assert_eq!(cfg.max_sessions, Some(5));
+        assert_eq!(cfg.resolve_max_sessions(), 5);
+
+        // 0 is a valid opt-out: mine zero prior sessions.
+        let cfg: Config = serde_json::from_str(r#"{ "max_sessions": 0 }"#).unwrap();
+        assert_eq!(cfg.resolve_max_sessions(), 0);
     }
 
     #[test]

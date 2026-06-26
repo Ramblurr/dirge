@@ -367,6 +367,99 @@ mod tests {
         );
     }
 
+    /// Cross-session Up-arrow history: `recent_project_sessions` returns
+    /// the `max_sessions` most-recent OTHER sessions in the same project
+    /// (same `working_dir`, different conversation origin), oldest-first,
+    /// and excludes other-project sessions plus the current conversation's
+    /// own fold-chain members.
+    #[test]
+    fn recent_project_sessions_filters_and_orders() {
+        use crate::session::{MessageRole, Session, SessionMessage};
+        let dir = session_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        // Unique project per run so other tests' session files can't leak in.
+        let proj = format!(
+            "/tmp/dirge-hist-proj-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let other = "/tmp/dirge-hist-other-project";
+
+        let seed = |id: &str, origin: Option<&str>, updated: &str, wd: &str, msgs: &[&str]| {
+            let mut s = Session::new("p", "m", 0);
+            s.id = compact_str::CompactString::new(id);
+            s.origin_id = origin.map(compact_str::CompactString::new);
+            s.updated_at = compact_str::CompactString::new(updated);
+            s.working_dir = compact_str::CompactString::new(wd);
+            s.messages = msgs
+                .iter()
+                .map(|t| SessionMessage {
+                    role: MessageRole::User,
+                    content: compact_str::CompactString::new(*t),
+                    estimated_tokens: 0,
+                    id: compact_str::CompactString::new("m"),
+                    timestamp: 0,
+                    tool_calls: Vec::new(),
+                })
+                .collect();
+            let path = dir.join(format!("{id}.json"));
+            std::fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+            id.to_string()
+        };
+
+        let t1 = "2026-01-01T00:00:00+00:00";
+        let t2 = "2026-02-01T00:00:00+00:00";
+        let t3 = "2026-03-01T00:00:00+00:00";
+        let t4 = "2026-04-01T00:00:00+00:00";
+        let t5 = "2026-05-01T00:00:00+00:00";
+
+        // A < B < C are real same-project priors of increasing recency.
+        let a = seed("hist-a", None, t1, &proj, &["a1"]);
+        let b = seed("hist-b", None, t2, &proj, &["b1", "b2"]);
+        let c = seed("hist-c", None, t3, &proj, &["c1"]);
+        // D: newest of all, but a DIFFERENT project → must be dropped.
+        let _d = seed("hist-d", None, t4, other, &["d1"]);
+        // F: same project, newest, but shares the current conversation's
+        // origin (a stale fold rotation) → must be dropped.
+        let _f = seed("hist-f", Some("hist-current"), t5, &proj, &["f1"]);
+
+        // Current session lives only in memory (brand-new, not yet saved).
+        let mut current = Session::new("p", "m", 0);
+        current.id = compact_str::CompactString::new("hist-current");
+        current.working_dir = compact_str::CompactString::new(&proj);
+
+        // Cap at 2: the two most-recent priors are C and B, returned
+        // oldest-first → [B, C]. A is too old; D (other project) and F
+        // (current's own origin) are excluded.
+        let out = recent_project_sessions(&current, 2);
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["hist-b", "hist-c"]);
+
+        // Messages survive the round-trip and stay in entry order.
+        assert_eq!(
+            out[0]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b1", "b2"],
+        );
+
+        // Uncapped → all three same-project priors, oldest-first.
+        let out_all = recent_project_sessions(&current, 10);
+        let ids_all: Vec<&str> = out_all.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids_all, vec!["hist-a", "hist-b", "hist-c"]);
+
+        // max_sessions 0 disables mining entirely.
+        assert!(recent_project_sessions(&current, 0).is_empty());
+
+        for id in [a.as_str(), b.as_str(), c.as_str(), "hist-d", "hist-f"] {
+            let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+        }
+    }
+
     #[test]
     fn validate_session_id_accepts_uuids() {
         assert!(validate_session_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890").is_ok());
@@ -1132,6 +1225,80 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
     // window by mtime. (A chain occupying the window can yield slightly
     // fewer than `limit` rows — acceptable for a recents list.)
     Ok(dedup_by_origin(sessions))
+}
+
+/// Cross-session Up-arrow history: the `max_sessions` most-recent OTHER
+/// sessions in the same project (same `working_dir`, different
+/// conversation origin than `current`). Returned OLDEST-first so the
+/// caller can append their prompts ahead of the current session's own,
+/// keeping the newest command at the tail of history (where Up-arrow
+/// recall starts).
+///
+/// A cheap partial parse (`ProjMeta`) filters and ranks candidate files
+/// by `working_dir` + `updated_at` before fully deserializing only the
+/// few winners — mirroring `load_session_tip`'s scan so a large session
+/// store isn't loaded wholesale on startup.
+pub fn recent_project_sessions(current: &Session, max_sessions: usize) -> Vec<Session> {
+    if max_sessions == 0 {
+        return Vec::new();
+    }
+    let dir = session_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let current_origin = current.effective_origin();
+    let current_wd = current.working_dir.as_str();
+
+    #[derive(serde::Deserialize)]
+    struct ProjMeta {
+        id: String,
+        #[serde(default)]
+        origin_id: Option<String>,
+        #[serde(default)]
+        working_dir: Option<String>,
+        updated_at: String,
+    }
+
+    // Rank same-project, other-origin sessions newest-first via the
+    // cheap partial parse. A vanished or unparseable sibling is skipped
+    // rather than aborting the whole scan (concurrent fold/cleanup can
+    // delete or rewrite a file mid-iteration).
+    let mut ranked: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Ok(json) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_str::<ProjMeta>(&json) else {
+            continue;
+        };
+        if meta.working_dir.as_deref() != Some(current_wd) {
+            continue;
+        }
+        let origin = meta.origin_id.as_deref().unwrap_or(&meta.id);
+        if origin == current_origin {
+            continue;
+        }
+        ranked.push((meta.updated_at, path));
+    }
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    ranked.truncate(max_sessions);
+    // Oldest-first: appending then yields oldest-session prompts first,
+    // so the newest prior session sits just behind the current session.
+    ranked.reverse();
+
+    let mut out = Vec::with_capacity(ranked.len());
+    for (_, path) in ranked {
+        if let Ok(json) = std::fs::read_to_string(&path)
+            && let Ok(session) = serde_json::from_str::<Session>(&json)
+        {
+            out.push(session);
+        }
+    }
+    out
 }
 
 pub fn agents_path() -> PathBuf {

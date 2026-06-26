@@ -948,3 +948,58 @@ fn expanded_thinking_wrapped_rows_keep_the_bar() {
         );
     }
 }
+
+// ============================================================
+// real_user_prompt — history seeding filter
+// ============================================================
+use crate::session::{MessageRole, SessionMessage};
+
+fn user_msg(content: &str) -> SessionMessage {
+    SessionMessage {
+        role: MessageRole::User,
+        content: compact_str::CompactString::new(content),
+        estimated_tokens: 0,
+        id: compact_str::CompactString::new("m"),
+        timestamp: 0,
+        tool_calls: Vec::new(),
+    }
+}
+
+#[test]
+fn real_user_prompt_passes_real_input() {
+    assert_eq!(
+        super::real_user_prompt(&user_msg("run tests")),
+        Some("run tests")
+    );
+}
+
+#[test]
+fn real_user_prompt_strips_system_reminder_wrapper() {
+    let m = user_msg("<system-reminder>\nctx\n</system-reminder>\n\nwhat's next?");
+    assert_eq!(super::real_user_prompt(&m), Some("what's next?"));
+}
+
+#[test]
+fn real_user_prompt_rejects_synthetic_turns() {
+    // Non-user role.
+    let mut m = user_msg("x");
+    m.role = MessageRole::Assistant;
+    assert_eq!(super::real_user_prompt(&m), None);
+    // Empty after strip.
+    assert_eq!(super::real_user_prompt(&user_msg("")), None);
+    assert_eq!(
+        super::real_user_prompt(&user_msg("<system-reminder>x</system-reminder>")),
+        None,
+    );
+    // Mid-turn steer + auto-continue markers.
+    assert_eq!(
+        super::real_user_prompt(&user_msg("[Mid-turn steer from user] hey")),
+        None,
+    );
+    assert_eq!(
+        super::real_user_prompt(&user_msg(
+            "Continue based on the background task results above."
+        )),
+        None,
+    );
+}

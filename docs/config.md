@@ -103,6 +103,7 @@ Accepted top-level keys:
 | `show_tool_details`       | boolean | Show tool-result output in the TUI. Default: `true`.                                                                                                                         |
 | `show_edit_diff`          | boolean | Show colorized diff output for `edit` tool results (`-` red, `+` green, `@@` cyan). Default: `true`.                                                                        |
 | `show_reasoning`          | boolean | Show the model's thinking/reasoning by default, instead of having to press `Ctrl+O` each turn. Default: `false`.                                                            |
+| `max_sessions`            | integer | How many of the most-recent prior sessions in the same project (same working dir) to mine for Up-arrow / Ctrl+F command history, seeded ahead of the current session's prompts. Default: `3`. Set `0` to keep recall to the current session only. See [Command history](#command-history-cross-session-recall). |
 | `display`                 | string  | Preferred startup pane layout: a `\|`/`,`/space-separated subset of `left`, `main`, `right` (e.g. `"main\|right"`, `"main"`). The main pane is always shown; this picks which side panels appear. Override at runtime with `/display`. Default: automatic (side panels shown at ≥152 cols). |
 | `tool_result_max_chars`   | integer | Hard ceiling on characters per tool result. Default: `500`. Combined with `tool_result_max_lines` (lines applied first; chars trim what's left).                                |
 | `tool_result_max_lines`   | integer | Body lines shown inside a tool chamber before collapsing to `↓ N more lines (Ctrl+O to expand)`. Default: `4`. Press `Ctrl+O` to re-print the most recent collapsed result in full. `edit`, `apply_patch`, `question`, `task`, and `task_status` are exempt (their body IS the value). |
@@ -707,6 +708,23 @@ Notes:
   a plugin. See [plugins.md](plugins.md#keyboard-shortcuts).
 - Unrecognized chords or unknown commands are skipped with a warning on
   startup; the rest of the config still loads.
+
+## Command history (cross-session recall)
+
+Pressing **Up** in the input box recalls previous prompts, and **Ctrl+F**
+opens a reverse-i-search over them. By default the recall pool is the
+*current* session's prompts. Set top-level `max_sessions` to an integer
+`N` (default `3`) to additionally mine the `N` most-recent *prior*
+sessions in the same project (matching `working_dir`) for their user
+prompts. Those older prompts are seeded ahead of the current session's
+own, so Up starts from your newest command and walks back through earlier
+conversations in the project.
+
+The scan is scoped to the same project and excludes the current
+conversation's own compaction-fold rotations, so a fold doesn't double its
+prompts into history. Set `"max_sessions": 0` to keep recall limited to
+the current session. Synthetic turns (system-reminder wrappers, mid-turn
+steering, auto-continue markers) never enter history.
 
 ## Slash-command aliases
 
