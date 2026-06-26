@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-06-26
+
 ### Fixed
 - **Tool chambers and chat now span the full chat band.** On wide terminals
   with the side panels hidden, the chat band reclaims the panel gutters but the
@@ -15,6 +17,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   band (`Layout::chat.width`), so the right border lands on the last painted cell
   and the box matches the left edge. When panels are visible the band is capped
   as before, so that mode is unchanged.
+- **`--no-default-features --features mcp` builds again.** The MCP setup
+  referenced `cli.loop_mode` and an `ansi` import that only exist with the `loop`
+  feature, so that combination failed under `-D warnings`. Both are now gated on
+  `loop`. (dirge-oae9)
 
 ### Changed
 - Bumped `crypto-bigint` 0.7.3 → 0.7.5 (0.7.3 was yanked upstream).
