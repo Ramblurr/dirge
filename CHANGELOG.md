@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Tool chambers and chat now span the full chat band.** On wide terminals
+  with the side panels hidden, the chat band reclaims the panel gutters but the
+  chamber boxes (and chat text) were still pinned to the gutter-blind, 120-capped
+  `content_width`, leaving a dead strip on the right where stale border glyphs
+  rendered. Chamber width and chat wrapping now derive from the actual painted
+  band (`Layout::chat.width`), so the right border lands on the last painted cell
+  and the box matches the left edge. When panels are visible the band is capped
+  as before, so that mode is unchanged.
+
+### Changed
+- Bumped `crypto-bigint` 0.7.3 → 0.7.5 (0.7.3 was yanked upstream).
+
 ## [0.12.5] - 2026-06-26
 
 ### Fixed

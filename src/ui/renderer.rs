@@ -1301,14 +1301,15 @@ impl Renderer {
         self.test_cols = Some(cols);
     }
 
-    /// Width chat text wraps to before pushing into the buffer. Uses
-    /// the *capped* `content_width()` (120 cols max) so wide terminals
-    /// don't grow scrollback past the centered band into the
-    /// divider/panel margin. Previously aliased `line_width()` which
-    /// returns the raw band width and ignored the 120-col cap —
-    /// chat overflowed the documented content area on wide terminals.
-    fn max_line_width(&self) -> usize {
-        self.content_width()
+    /// Width chat text wraps to before pushing into the buffer. Matches
+    /// the painted chat band (`chat_band_width`) minus the 1-col right
+    /// margin `ChatPane` reserves, so chat text fills the band to the
+    /// right │ exactly like the chamber boxes — no capped-then-padded
+    /// dead zone on wide terminals. When side panels are visible the band
+    /// is itself capped (panels take the gutter), so this still honors
+    /// the readability cap in that mode.
+    pub(crate) fn max_line_width(&self) -> usize {
+        self.chat_band_width().saturating_sub(1).max(1)
     }
 
     /// The display width the compose buffer is soft-wrapped to in the
@@ -1331,9 +1332,33 @@ impl Renderer {
 
     /// Target width for chat content. Caps at 120 cols so wide
     /// terminals don't stretch chambers + chat lines into sprawling
-    /// rivers of text. Matches the cap used by tool chambers.
+    /// rivers of text. Still drives `content_indent` (centering) and,
+    /// through it, side-panel visibility — so this MUST stay capped even
+    /// though chamber/chat rendering now spans the full band (see
+    /// `chat_band_width`).
     pub fn content_width(&self) -> usize {
         self.line_width().min(120)
+    }
+
+    /// Width of the chat band actually painted by `ChatPane`, i.e.
+    /// `Layout::chat.width` for the current terminal + panel visibility.
+    /// Unlike `content_width` this is NOT capped at 120 and reclaims the
+    /// gutter of any hidden side panel — so it matches the real paint
+    /// rect. Chamber boxes and chat text wrap to this so they span to the
+    /// right │ instead of stopping at a capped width and leaving a dead
+    /// band on the right (where stale glyphs showed). The horizontal
+    /// layout depends only on `cols` + panel flags, so the rows/input
+    /// args are placeholders (dirge: chamber-width fix).
+    pub fn chat_band_width(&self) -> usize {
+        let (cols, _) = self.terminal_size();
+        let layout = crate::ui::tui::layout::Layout::with_panels(
+            cols,
+            1,
+            1,
+            self.left_panel_visible(),
+            self.right_panel_visible(),
+        );
+        layout.chat.width as usize
     }
 
     /// Left padding in columns to horizontally center the chat

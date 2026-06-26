@@ -4477,9 +4477,11 @@ fn render_thinking_block(renderer: &mut Renderer, text: &str) -> std::io::Result
     // Wrap each line ourselves and carry the `  │ ` bar onto EVERY wrapped row.
     // Passing `  │ {line}` straight to write_line lets its prefix-less wrap drop
     // the bar on continuation rows, so a long thought escaped the box at the
-    // left edge. Pre-wrap to the content width minus the 4-col `  │ ` prefix so
-    // the prefixed row still fits and write_line doesn't wrap it again.
-    let inner_w = renderer.content_width().saturating_sub(4).max(1);
+    // left edge. Pre-wrap to `write_line`'s OWN wrap width (`max_line_width`)
+    // minus the 4-col `  │ ` prefix so the prefixed row is exactly that width
+    // and write_line doesn't wrap it again. (Must track `max_line_width`, not
+    // `content_width` — they diverge now that chat spans the full band.)
+    let inner_w = renderer.max_line_width().saturating_sub(4).max(1);
     for line in text.lines() {
         for chunk in crate::ui::wrap::soft_wrap(line, inner_w, "") {
             renderer.write_line(&format!("  │ {}", chunk), crate::ui::theme::thinking())?;

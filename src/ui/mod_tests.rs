@@ -592,6 +592,55 @@ fn chamber_row_with_bg_right_border_aligns_with_tabs() {
     assert!(row.ends_with('│'));
 }
 
+/// dirge chamber-width fix: a chamber box must span the full painted chat
+/// band (`Layout::chat.width - 1`), not the gutter-blind, 120-capped
+/// `content_width`. With panels hidden the band reclaims both gutters, so
+/// the box must widen with it — otherwise a dead strip is left on the
+/// right where stale border glyphs showed.
+#[test]
+fn chamber_spans_full_chat_band_when_panels_hidden() {
+    use crate::ui::tool_display::chamber_widths;
+    let mut r = Renderer::new().expect("renderer");
+    // Wide gutter but below the panel auto-show threshold (152), so both
+    // side panels are hidden and the chat band reclaims their gutters.
+    r.set_test_cols(148);
+    assert!(
+        !r.left_panel_visible() && !r.right_panel_visible(),
+        "panels should be hidden at 148 cols"
+    );
+
+    let band = r.chat_band_width();
+    let (frame_w, inner) = chamber_widths(&r);
+    // Right │ lands on the last painted cell (ChatPane paints chat.width-1).
+    assert_eq!(frame_w, band - 1, "chamber must fill the painted band");
+    assert_eq!(inner + 4, frame_w);
+    // The band genuinely exceeds the old 120-capped content_width — i.e.
+    // the dead strip the artifacts lived in is gone.
+    assert!(
+        band > r.content_width(),
+        "band should reclaim gutters past the 120 cap (band={band}, content_width={})",
+        r.content_width(),
+    );
+}
+
+/// No regression when panels ARE shown: the band is capped at the panel
+/// layout width, so the chamber width is unchanged from the old behavior.
+#[test]
+fn chamber_width_unchanged_when_panels_shown() {
+    use crate::ui::tool_display::chamber_widths;
+    let mut r = Renderer::new().expect("renderer");
+    r.set_test_cols(200); // >= 152 and wide gutter → panels auto-show
+    assert!(
+        r.left_panel_visible() && r.right_panel_visible(),
+        "panels should be visible at 200 cols"
+    );
+    let (frame_w, _) = chamber_widths(&r);
+    // Panels take the gutter, so the band is the 120-cap and the chamber
+    // matches the pre-fix content_width-1.
+    assert_eq!(frame_w, r.chat_band_width() - 1);
+    assert_eq!(frame_w, r.content_width() - 1);
+}
+
 /// Chat window switching: next / prev index math wraps correctly.
 #[test]
 fn chat_index_next_prev_wraps() {

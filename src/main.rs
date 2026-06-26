@@ -49,6 +49,9 @@ use crate::lsp::spawn::{ProcessCommand, ProcessSpawner};
 use crate::permission::ask::{AskReceiver, AskSender};
 use crate::permission::checker::{PermCheck, PermissionChecker};
 use crate::permission::{PermissionConfig, SecurityMode};
+// Only used inside `run_headless_loop` (loop-gated); without the feature
+// the import is dead and `-D warnings` rejects it (dirge-oae9).
+#[cfg(feature = "loop")]
 use crate::ui::ansi::{self, StripPolicy};
 
 /// Per-session channels and shared state, threaded through the agent build
@@ -1103,7 +1106,14 @@ async fn main() -> anyhow::Result<()> {
     // (dirge-x949). ACP / no-tools don't use MCP on this path.
     #[cfg(feature = "mcp")]
     let mcp_manager = if let Some(servers) = &cfg.mcp_servers {
-        if !cli.resolve_no_tools(&cfg) && (cli.print || cli.loop_mode) {
+        // `loop_mode` only exists with the `loop` feature; treat it as
+        // false otherwise so `--features mcp` (no loop) still compiles
+        // (dirge-oae9).
+        #[cfg(feature = "loop")]
+        let loop_mode = cli.loop_mode;
+        #[cfg(not(feature = "loop"))]
+        let loop_mode = false;
+        if !cli.resolve_no_tools(&cfg) && (cli.print || loop_mode) {
             Some(extras::mcp::McpClientManager::connect_all(servers).await)
         } else {
             None

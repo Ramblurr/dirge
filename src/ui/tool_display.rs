@@ -345,7 +345,13 @@ pub(crate) fn render_collapsed_in_full(
 }
 
 pub(crate) fn chamber_widths(renderer: &Renderer) -> (usize, usize) {
-    let frame_w = renderer.content_width().saturating_sub(1).max(20);
+    // Span the full painted chat band: `ChatPane` draws each row at
+    // `chat.x` for up to `chat.width - 1` columns, so a chamber row of
+    // `chat.width - 1` lands its right │ exactly on the last painted
+    // cell. Using the gutter-blind, 120-capped `content_width` here left
+    // the box short of the band on wide terminals (panels hidden),
+    // leaving a dead strip where stale border glyphs showed.
+    let frame_w = renderer.chat_band_width().saturating_sub(1).max(20);
     let inner = frame_w.saturating_sub(4); // `│ ` + ` │`
     (frame_w, inner)
 }

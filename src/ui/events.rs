@@ -229,11 +229,14 @@ pub fn render_session(
             // a bare `<dirge>` handle with nothing after it on reload.
             if !msg.content.is_empty() {
                 // Wrap chat to the same width tool chambers use so chat
-                // and chamber blocks line up visually. The 8-col handle
-                // prefix is subtracted so wrapped continuation text fits
-                // beneath the handle position.
+                // and chamber blocks line up visually. Mirrors the live
+                // chat wrap (`chat_band_width - 1`) so a reloaded session
+                // matches what was on screen. The 8-col handle prefix is
+                // subtracted so wrapped continuation text fits beneath the
+                // handle position.
                 let max_width = renderer
-                    .content_width()
+                    .chat_band_width()
+                    .saturating_sub(1)
                     .saturating_sub(handle.chars().count() + 1);
                 let mut styled = markdown::markdown_to_styled(&msg.content, max_width, line_color);
                 for (i, entry) in styled.iter_mut().enumerate() {
