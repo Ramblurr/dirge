@@ -21,7 +21,7 @@ type SleepFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DeviceAuthError {
     #[error(
-        "OpenAI device-code auth is not enabled. Please enable device-code auth in ChatGPT Codex security settings, then run `dirge auth openai` again."
+        "OpenAI device-code auth is not enabled. Please enable device-code auth in ChatGPT Codex security settings, then run `dirge auth openai --device-code` again."
     )]
     DeviceAuthDisabled,
     #[error("OpenAI device-code auth timed out after 15 minutes")]
@@ -336,11 +336,48 @@ where
         match response.status {
             200..=299 => {
                 let body: TokenResponse = parse_response(&response.body)?;
+                let account_id = normalize_optional_string(body.account_id)
+                    .or_else(|| account_id_from_access_token(&body.access_token));
                 Ok(OAuthTokens {
                     access_token: body.access_token,
                     refresh_token: body.refresh_token,
                     id_token: body.id_token,
-                    account_id: normalize_optional_string(body.account_id),
+                    account_id,
+                    expires_in: body.expires_in,
+                })
+            }
+            status => Err(DeviceAuthError::TokenExchangeStatus { status }),
+        }
+    }
+
+    /// Exchange a refresh token for a fresh access token at `{issuer}/oauth/token`.
+    ///
+    /// OpenAI's refresh response may omit `refresh_token`/`id_token`; in that
+    /// case the prior refresh token is retained so future refreshes still work.
+    pub(crate) async fn refresh_access_token(&self, refresh_token: &str) -> Result<OAuthTokens> {
+        let response = self
+            .http
+            .post_form(
+                format!("{}/oauth/token", self.issuer),
+                vec![
+                    ("grant_type".to_string(), "refresh_token".to_string()),
+                    ("refresh_token".to_string(), refresh_token.to_string()),
+                    ("client_id".to_string(), self.client_id.clone()),
+                ],
+            )
+            .await?;
+
+        match response.status {
+            200..=299 => {
+                let body: RefreshTokenResponse = parse_response(&response.body)?;
+                let account_id = normalize_optional_string(body.account_id)
+                    .or_else(|| account_id_from_access_token(&body.access_token));
+                Ok(OAuthTokens {
+                    access_token: body.access_token,
+                    refresh_token: normalize_optional_string(body.refresh_token)
+                        .unwrap_or_else(|| refresh_token.to_string()),
+                    id_token: body.id_token.unwrap_or_default(),
+                    account_id,
                     expires_in: body.expires_in,
                 })
             }
@@ -386,10 +423,49 @@ struct TokenResponse {
     expires_in: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct RefreshTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    id_token: Option<String>,
+    #[serde(
+        default,
+        alias = "chatgpt_account_id",
+        alias = "chatgptAccountId",
+        alias = "chatgpt_account",
+        alias = "accountId"
+    )]
+    account_id: Option<String>,
+    expires_in: Option<u64>,
+}
+
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Extract `chatgpt_account_id` from the access token's JWT payload.
+///
+/// OpenAI's `/oauth/token` response omits a top-level account id; the id lives
+/// inside the access token's `https://api.openai.com/auth` claim. Without it the
+/// Codex backend rejects requests with a 401, so fall back to the JWT when the
+/// response body has no account id.
+pub(crate) fn account_id_from_access_token(access_token: &str) -> Option<String> {
+    use base64::Engine;
+
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let account_id = claims
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()?;
+    normalize_optional_string(Some(account_id.to_string()))
 }
 
 fn default_poll_interval_seconds() -> u64 {
@@ -793,6 +869,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_exchange_recovers_account_id_from_access_token_jwt() {
+        use base64::Engine;
+
+        // Access token JWT (header.payload.signature) whose payload carries the
+        // account id only inside the OpenAI auth claim, like the real response.
+        let payload = json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-from-jwt"
+            }
+        });
+        let encode = |value: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+        };
+        let access_token = format!(
+            "{}.{}.{}",
+            encode(&json!({"alg": "RS256", "typ": "JWT"})),
+            encode(&payload),
+            "signature"
+        );
+
+        let http = FakeHttp::new([
+            response(
+                200,
+                json!({
+                    "authorization_code": "AUTH-CODE",
+                    "code_challenge": "challenge",
+                    "code_verifier": "verifier"
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "access_token": access_token,
+                    "refresh_token": "REFRESH-TOKEN",
+                    "id_token": "ID-TOKEN",
+                    "expires_in": 3600
+                }),
+            ),
+        ]);
+        let device_code = DeviceCode {
+            verification_url: "https://auth.openai.com/codex/device".to_string(),
+            user_code: "USER-CODE".to_string(),
+            device_auth_id: "device-auth-id".to_string(),
+            interval: Duration::from_secs(5),
+        };
+
+        let tokens = flow(http, FakeRuntime::new())
+            .complete_device_code_login(device_code)
+            .await
+            .unwrap();
+
+        assert_eq!(tokens.account_id.as_deref(), Some("acct-from-jwt"));
+    }
+
+    #[tokio::test]
     async fn pending_poll_times_out_without_real_sleeping() {
         let http = FakeHttp::new(
             std::iter::repeat_with(|| response(404, json!({"pending": true}))).take(4),
@@ -906,6 +1037,80 @@ mod tests {
         assert!(!message.contains("ID-TOKEN"));
         assert!(!message.contains("AUTH-CODE"));
         assert!(!message.contains("USER-CODE"));
+    }
+
+    #[tokio::test]
+    async fn refresh_access_token_posts_refresh_grant() {
+        let http = FakeHttp::new([response(
+            200,
+            json!({
+                "access_token": "NEW-ACCESS",
+                "refresh_token": "NEW-REFRESH",
+                "id_token": "NEW-ID",
+                "expires_in": 3600
+            }),
+        )]);
+        let runtime = FakeRuntime::new();
+        let flow = flow(http.clone(), runtime);
+
+        let tokens = flow
+            .refresh_access_token("OLD-REFRESH")
+            .await
+            .expect("refresh succeeds");
+
+        assert_eq!(tokens.access_token, "NEW-ACCESS");
+        assert_eq!(tokens.refresh_token, "NEW-REFRESH");
+        assert_eq!(tokens.expires_in, Some(3600));
+
+        let requests = http.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://auth.openai.com/oauth/token");
+        let RecordedBody::Form(form) = &requests[0].body else {
+            panic!("expected form body");
+        };
+        assert!(form.contains(&("grant_type".to_string(), "refresh_token".to_string())));
+        assert!(form.contains(&("refresh_token".to_string(), "OLD-REFRESH".to_string())));
+        assert!(form.contains(&("client_id".to_string(), "client-test".to_string())));
+    }
+
+    #[tokio::test]
+    async fn refresh_access_token_keeps_prior_refresh_token_when_omitted() {
+        let http = FakeHttp::new([response(
+            200,
+            json!({
+                "access_token": "NEW-ACCESS",
+                "id_token": "NEW-ID",
+                "expires_in": 3600
+            }),
+        )]);
+        let runtime = FakeRuntime::new();
+
+        let tokens = flow(http, runtime)
+            .refresh_access_token("OLD-REFRESH")
+            .await
+            .expect("refresh succeeds");
+
+        assert_eq!(tokens.access_token, "NEW-ACCESS");
+        assert_eq!(tokens.refresh_token, "OLD-REFRESH");
+    }
+
+    #[tokio::test]
+    async fn refresh_access_token_error_does_not_echo_secret_body() {
+        let http = FakeHttp::new([response(400, json!({ "error": "OLD-REFRESH NEW-ACCESS" }))]);
+        let runtime = FakeRuntime::new();
+
+        let err = flow(http, runtime)
+            .refresh_access_token("OLD-REFRESH")
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+
+        assert!(matches!(
+            err,
+            DeviceAuthError::TokenExchangeStatus { status: 400 }
+        ));
+        assert!(!message.contains("OLD-REFRESH"));
+        assert!(!message.contains("NEW-ACCESS"));
     }
 
     #[tokio::test]

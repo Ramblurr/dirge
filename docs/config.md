@@ -239,13 +239,18 @@ Each `providers` entry accepts:
 The aliases on the left of the map become the values you write in
 role-assignment keys.
 
-### OpenAI device-code auth
+### OpenAI browser / device-code auth
 
-Run `dirge auth openai` to authorize OpenAI through the device-code flow and
-persist a local OAuth refresh token. Before running the command, enable
-device-code auth in ChatGPT Codex security settings. Dirge prints the OpenAI
-verification URL and user code; the user code is part of the interactive login
-UX, but you should not share it with anyone.
+Run `dirge auth openai` to authorize OpenAI through the browser OAuth flow and
+persist a local OAuth refresh token. Dirge prints an OpenAI authorization URL
+and waits for the browser redirect on `http://localhost:1455/auth/callback`.
+This is the preferred ChatGPT/Codex subscription login path.
+
+For headless environments, run `dirge auth openai --device-code` to use the
+older device-code flow. Before using that mode, enable device-code auth in
+ChatGPT Codex security settings. Dirge prints the OpenAI verification URL and
+user code; the user code is part of the interactive login UX, but you should
+not share it with anyone.
 
 The credential store lives in the Dirge data directory, not the repository or
 program directory:
@@ -267,9 +272,12 @@ asks before switching that request to API-key billing.
 
 Troubleshooting:
 
+- Browser callback port is busy: stop the process using port 1455 and rerun
+  `dirge auth openai`, or use `dirge auth openai --device-code` in a headless
+  environment.
 - `OpenAI device-code auth is not enabled` or a 404 from the user-code endpoint:
   enable device-code auth in ChatGPT Codex security settings and rerun
-  `dirge auth openai`.
+  `dirge auth openai --device-code`.
 - Timeout: complete approval in the browser and rerun the command.
 - Corrupt auth store: fix or remove `auth.json`, then rerun `dirge auth openai`.
 

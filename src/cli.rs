@@ -281,13 +281,17 @@ pub enum Command {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum AuthAction {
-    /// Log in to OpenAI using device-code auth
+    /// Log in to OpenAI using browser OAuth (or device-code auth with --device-code)
     #[command(
         name = "openai",
         visible_alias = "chatgpt",
-        long_about = "Log in to OpenAI using device-code auth.\n\nBefore running this command, enable device-code auth in ChatGPT Codex security settings."
+        long_about = "Log in to OpenAI using browser OAuth by default.\n\nUse --device-code for headless device-code auth; before using that mode, enable device-code auth in ChatGPT Codex security settings."
     )]
-    Openai,
+    Openai {
+        /// Use the headless device-code login flow instead of browser OAuth
+        #[arg(long = "device-code")]
+        device_code: bool,
+    },
     /// Start Anthropic Claude Code OAuth login and persist credentials
     Anthropic,
 }
@@ -404,7 +408,7 @@ mod tests {
 
         match cli.command {
             Some(Command::Auth {
-                action: AuthAction::Openai,
+                action: AuthAction::Openai { device_code: false },
             }) => {}
             other => panic!("expected auth openai command, got {other:?}"),
         }
@@ -416,7 +420,7 @@ mod tests {
 
         match cli.command {
             Some(Command::Auth {
-                action: AuthAction::Openai,
+                action: AuthAction::Openai { device_code: false },
             }) => {}
             other => panic!("expected auth openai command from chatgpt alias, got {other:?}"),
         }
@@ -434,7 +438,20 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let openai_help = err.to_string();
 
+        assert!(openai_help.contains("browser OAuth"));
         assert!(openai_help.contains("device-code auth"));
         assert!(openai_help.contains("ChatGPT Codex security settings"));
+    }
+
+    #[test]
+    fn parses_auth_openai_device_code_option() {
+        let cli = Cli::try_parse_from(["dirge", "auth", "openai", "--device-code"]).unwrap();
+
+        match cli.command {
+            Some(Command::Auth {
+                action: AuthAction::Openai { device_code: true },
+            }) => {}
+            other => panic!("expected auth openai --device-code command, got {other:?}"),
+        }
     }
 }

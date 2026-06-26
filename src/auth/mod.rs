@@ -256,7 +256,7 @@ mod command_tests {
     async fn auth_action_dispatch_invokes_injected_openai_login() {
         let calls = Arc::new(Mutex::new(0));
 
-        run_auth_action_with(&AuthAction::Openai, || {
+        run_auth_action_with(&AuthAction::Openai { device_code: false }, || {
             let calls = calls.clone();
             async move {
                 *calls.lock().unwrap() += 1;
