@@ -507,6 +507,20 @@ pub async fn build_loop_tools(
         .await,
     );
 
+    // Persistent issue/kanban board — mutates the project DB, so Sequential.
+    tools.push(
+        wrap(
+            tools::IssueTool::new(
+                session_db_path.clone(),
+                session_id.clone(),
+                permission.clone(),
+                ask_tx.clone(),
+            ),
+            Some(ToolExecutionMode::Sequential),
+        )
+        .await,
+    );
+
     // Entity/relation graph search — read-only; feature-gated.
     #[cfg(feature = "experimental-graph-search")]
     tools.push(

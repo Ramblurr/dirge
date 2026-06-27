@@ -358,6 +358,10 @@ const MAX_CONSECUTIVE_COMPACTION_FAILURES: u32 = 3;
 /// when the task matches fewer exemplars.
 const EXEMPLAR_TOP_K: usize = 3;
 
+/// Max live issues surfaced in the turn-start board reminder. The rest are
+/// summarized as a "+N more" hint so a large backlog can't flood context.
+const ISSUE_BOARD_TOP_N: usize = 7;
+
 /// What the LLM-summary stage of a compaction pass did, so `run_loop`
 /// can drive the circuit-breaker counter. (The cheap prune always runs
 /// regardless of this outcome.)
@@ -912,6 +916,25 @@ pub async fn run_agent_loop(
             Err(e) => {
                 tracing::debug!(target: "dirge::memory", error = %e, "pre-recall task join failed")
             }
+        }
+    }
+
+    // Native issue board: surface the agent's persistent kanban at the top of
+    // each user-initiated run, so it doesn't have to remember to list it. Like
+    // pre-recall, this is model-facing context only (never persisted) and is
+    // gated on `memory_provider` — the same safety net that excludes the forked
+    // review/curator runners (they build with `memory_provider: None`). Bounded
+    // to the top N live issues with a "see the rest" hint, so a large backlog
+    // can't flood the context.
+    if memory_provider.is_some() {
+        let db_path = std::env::current_dir()
+            .map(|c| crate::extras::dirge_paths::ProjectPaths::new(&c).session_db_path())
+            .unwrap_or_else(|_| std::path::PathBuf::from(".dirge/sessions/state.db"));
+        if let Ok(store) = crate::extras::issue_db::IssueStore::open_at(&db_path)
+            && let Ok(Some(block)) = store.board_reminder(ISSUE_BOARD_TOP_N)
+        {
+            let msg = LoopMessage::User(super::message::UserMessage { content: block });
+            context.messages.push(loop_message_to_value(&msg));
         }
     }
 

@@ -12,6 +12,7 @@ mod edit_minified;
 mod find_files;
 mod glob;
 mod grep;
+mod issue;
 pub(crate) mod line_hash;
 mod list_dir;
 #[cfg(feature = "lsp")]
@@ -57,6 +58,7 @@ pub use glob::GlobTool;
 #[cfg(feature = "experimental-graph-search")]
 pub use graph::GraphTool;
 pub use grep::GrepTool;
+pub use issue::IssueTool;
 pub use list_dir::ListDirTool;
 #[cfg(feature = "lsp")]
 pub use lsp::LspTool;
@@ -113,6 +115,7 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "glob",
     "list_dir",
     "write_todo_list",
+    "issue",
     "apply_patch",
     "memory",
     "skill",
