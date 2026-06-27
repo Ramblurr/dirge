@@ -6,12 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-06-26
+
+### Changed
+- **`dirge auth openai` now uses a browser-based OAuth (PKCE) flow** instead of a
+  device password, matching standard Codex authentication — so you no longer have
+  to enable device passwords in the OpenAI console. The browser flow opens a
+  loopback redirect, validates a CSRF `state`, and exchanges the code with PKCE
+  S256. The previous device-code flow is retained behind
+  `dirge auth openai --device-code`. (#532)
+
 ### Fixed
 - **`auth: "chatgpt"` now honors fresh Dirge OpenAI OAuth credentials before
   falling back to legacy Codex storage.** This prevents a stale
   `~/.codex/auth.json` access token from causing repeated `token_expired` 401s
   after `dirge auth openai` has already produced a fresh, refreshable Dirge
-  credential.
+  credential. Stored credentials are refreshed on expiry (and re-persisted)
+  rather than served stale. (#532)
 
 ## [0.13.3] - 2026-06-26
 
