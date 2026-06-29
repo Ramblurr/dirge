@@ -1,9 +1,10 @@
 //! `issue` — the model's persistent issue/kanban board, stored in the
 //! per-project session DB via [`crate::extras::issue_db::IssueStore`].
 //!
-//! Unlike `write_todo_list` (ephemeral, single-session checklist), issues
-//! persist across sessions and are surfaced by the harness at turn start, so
-//! the model doesn't have to remember to list them. This tool is the WRITE +
+//! The incremental, single-item surface over the board; `write_todo_list`
+//! writes to the SAME store in bulk for laying out a plan. Issues persist
+//! across sessions and are surfaced by the harness at turn start, so the model
+//! doesn't have to remember to list them. This tool is the WRITE +
 //! on-demand-read surface; routine reads are injected automatically.
 
 use std::path::PathBuf;
@@ -127,10 +128,11 @@ impl Tool for IssueTool {
         }
         let store = self.store()?;
 
-        // After a write, re-sync the right-pane / nudge mirror from the board so
-        // the panel reflects issue-tool edits, not just `write_todo_list` ones.
-        let refresh = |this: &Self| {
-            crate::agent::tools::todo::refresh_board(&this.db_path, this.session_id.as_deref());
+        // After a write, re-sync the right-pane / nudge mirror from the store we
+        // already hold open (no second DB open), so the panel reflects
+        // issue-tool edits, not just `write_todo_list` ones.
+        let refresh = || {
+            crate::agent::tools::todo::refresh_board_from(&store, self.session_id.as_deref());
         };
 
         let need_id = |args: &IssueArgs| -> Result<i64, ToolError> {
@@ -155,7 +157,7 @@ impl Tool for IssueTool {
                         self.session_id.as_deref(),
                     )
                     .map_err(ToolError::Msg)?;
-                refresh(self);
+                refresh();
                 Ok(format!("Created issue #{id}: {}", title.trim()))
             }
             "start" | "block" | "close" => {
@@ -166,7 +168,7 @@ impl Tool for IssueTool {
                     _ => "done",
                 };
                 if store.set_status(id, status).map_err(ToolError::Msg)? {
-                    refresh(self);
+                    refresh();
                     Ok(format!("Issue #{id} → {status}"))
                 } else {
                     Err(ToolError::Msg(format!("no issue #{id}")))
@@ -212,7 +214,7 @@ impl Tool for IssueTool {
                     store.set_priority(id, priority).map_err(ToolError::Msg)?;
                     changed.push("priority");
                 }
-                refresh(self);
+                refresh();
                 Ok(format!("Updated issue #{id} ({})", changed.join(", ")))
             }
             "show" => {

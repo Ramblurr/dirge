@@ -268,26 +268,7 @@ impl IssueStore {
     /// within a state, high priority first, then most-recently-touched.
     /// `limit` caps the rows (the caller bounds context); `None` = all.
     pub fn board(&self, limit: Option<usize>) -> Result<Vec<Issue>, String> {
-        let conn = self.conn.lock_ignore_poison();
-        let sql = format!(
-            "SELECT {COLS} FROM issues
-             WHERE status IN ('open','in_progress','blocked')
-             ORDER BY
-               CASE status WHEN 'in_progress' THEN 0 WHEN 'blocked' THEN 1 ELSE 2 END,
-               CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-               updated_at DESC
-             {}",
-            match limit {
-                Some(n) => format!("LIMIT {n}"),
-                None => String::new(),
-            }
-        );
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("board: {e}"))?;
-        let rows = stmt
-            .query_map([], row_to_issue)
-            .map_err(|e| format!("board: {e}"))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| format!("board: {e}"))
+        self.board_query(None, limit)
     }
 
     /// The live board scoped to one session: open / in_progress / blocked
@@ -301,28 +282,49 @@ impl IssueStore {
         session_id: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<Issue>, String> {
+        self.board_query(Some(session_id), limit)
+    }
+
+    /// Shared live-board query for [`Self::board`] (project-wide) and
+    /// [`Self::board_for_session`] (session-scoped), so the column list and the
+    /// status/priority ordering can't drift between them. `session = None` means
+    /// no session filter; `session = Some(sid)` filters `session_id IS sid`
+    /// (where `sid = None` matches a NULL session). A trailing `id DESC` makes
+    /// the order total — a single `sync_todos` batch stamps every row with the
+    /// same `updated_at`, so without it the within-bucket order would be
+    /// nondeterministic.
+    fn board_query(
+        &self,
+        session: Option<Option<&str>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Issue>, String> {
         let conn = self.conn.lock_ignore_poison();
+        let where_session = if session.is_some() {
+            "session_id IS ?1 AND "
+        } else {
+            ""
+        };
         let sql = format!(
             "SELECT {COLS} FROM issues
-             WHERE session_id IS ?1 AND status IN ('open','in_progress','blocked')
+             WHERE {where_session}status IN ('open','in_progress','blocked')
              ORDER BY
                CASE status WHEN 'in_progress' THEN 0 WHEN 'blocked' THEN 1 ELSE 2 END,
                CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-               updated_at DESC
+               updated_at DESC, id DESC
              {}",
             match limit {
                 Some(n) => format!("LIMIT {n}"),
                 None => String::new(),
             }
         );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("session board: {e}"))?;
-        let rows = stmt
-            .query_map(params![session_id], row_to_issue)
-            .map_err(|e| format!("session board: {e}"))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("board: {e}"))?;
+        let rows = match session {
+            Some(sid) => stmt.query_map(params![sid], row_to_issue),
+            None => stmt.query_map([], row_to_issue),
+        }
+        .map_err(|e| format!("board: {e}"))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| format!("session board: {e}"))
+            .map_err(|e| format!("board: {e}"))
     }
 
     /// Bulk reconcile a `write_todo_list`-style plan into this session's issues,
@@ -382,15 +384,20 @@ impl IssueStore {
             }
             applied += 1;
         }
-        tx.commit().map_err(|e| format!("sync todos (commit): {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("sync todos (commit): {e}"))?;
         Ok(applied)
     }
 
-    /// Count of live (non-done) issues — used for the "N more" injection hint.
+    /// Count of live issues — used for the "N more" injection hint. Must match
+    /// [`Self::board`]'s membership (open / in_progress / blocked) so the
+    /// overflow hint is consistent: both terminal states (`done` and
+    /// `cancelled`) are excluded, otherwise cancelled issues would inflate the
+    /// "and N more" count for rows the model can never list.
     pub fn open_count(&self) -> Result<usize, String> {
         let conn = self.conn.lock_ignore_poison();
         conn.query_row(
-            "SELECT COUNT(*) FROM issues WHERE status != 'done'",
+            "SELECT COUNT(*) FROM issues WHERE status NOT IN ('done','cancelled')",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -589,6 +596,21 @@ mod tests {
         assert!(c.closed_at.is_some(), "cancelled should stamp closed_at");
         // Terminal → off the live board.
         assert!(s.board(None).unwrap().iter().all(|i| i.id != id));
+    }
+
+    #[test]
+    fn open_count_excludes_both_terminal_states() {
+        let s = store();
+        let live = s.create("live", "", None, None).unwrap();
+        let _ = live;
+        let done = s.create("done", "", None, None).unwrap();
+        s.set_status(done, "done").unwrap();
+        let cancelled = s.create("cancelled", "", None, None).unwrap();
+        s.set_status(cancelled, "cancelled").unwrap();
+        // Only the one live issue counts — cancelled must not inflate it (it's
+        // excluded from board(), so the "N more" hint would otherwise lie).
+        assert_eq!(s.open_count().unwrap(), 1);
+        assert_eq!(s.board(None).unwrap().len(), 1);
     }
 
     #[test]

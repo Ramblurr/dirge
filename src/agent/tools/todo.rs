@@ -27,7 +27,9 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm};
-use crate::extras::issue_db::{IssueStore, normalize_status};
+use crate::extras::issue_db::{
+    IssueStore, is_terminal_status, normalize_priority, normalize_status,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TodoItem {
@@ -52,9 +54,16 @@ pub static TODO_LIST: std::sync::Mutex<Vec<TodoItem>> = std::sync::Mutex::new(Ve
 /// as-is (transient lock) rather than blanking the panel. `session_id = None`
 /// matches issues with a NULL session.
 pub fn refresh_board(db_path: &Path, session_id: Option<&str>) {
-    let Ok(store) = IssueStore::open_at(db_path) else {
-        return;
-    };
+    if let Ok(store) = IssueStore::open_at(db_path) {
+        refresh_board_from(&store, session_id);
+    }
+}
+
+/// Refresh the mirror from an already-open store. Callers that just wrote to
+/// the board (the `write_todo_list` and `issue` tools) use this to avoid
+/// re-opening the DB — a second `open_at` would re-run `CREATE TABLE IF NOT
+/// EXISTS` and the WAL pragma and add lock contention on the shared file.
+pub fn refresh_board_from(store: &IssueStore, session_id: Option<&str>) {
     if let Ok(board) = store.board_for_session(session_id, None) {
         let items: Vec<TodoItem> = board
             .into_iter()
@@ -80,13 +89,14 @@ pub fn snapshot() -> Vec<TodoItem> {
 /// gone). Used by the agent loop to nudge the model not to stop with unfinished
 /// planned work.
 pub fn unfinished_count() -> usize {
+    // The mirror only ever holds normalized DB statuses (open / in_progress /
+    // blocked), so this need only match the two that count as unfinished.
+    // Blocked is deliberately parked and doesn't nudge.
     TODO_LIST
         .lock()
         .map(|list| {
             list.iter()
-                .filter(|t| {
-                    matches!(t.status.as_str(), "open" | "pending" | "in_progress")
-                })
+                .filter(|t| matches!(t.status.as_str(), "open" | "in_progress"))
                 .count()
         })
         .unwrap_or(0)
@@ -164,6 +174,38 @@ impl Tool for WriteTodoList {
             )));
         }
 
+        // No active session (e.g. `--no-session`): the user opted out of
+        // persistence, so keep the plan ephemeral in the mirror only rather
+        // than writing durable rows that would leak into the project-wide
+        // turn-start board reminder of every future session. Mirrors the old
+        // in-memory `write_todo_list` for this mode: replace the whole list,
+        // normalized and minus terminal items (which leave the board).
+        let Some(session_id) = self.session_id.as_deref() else {
+            let items: Vec<TodoItem> = args
+                .todos
+                .iter()
+                .filter_map(|t| {
+                    let content = t.content.trim();
+                    let status = normalize_status(&t.status).unwrap_or("open");
+                    if content.is_empty() || is_terminal_status(status) {
+                        return None;
+                    }
+                    Some(TodoItem {
+                        content: content.to_string(),
+                        status: status.to_string(),
+                        priority: normalize_priority(&t.priority)
+                            .unwrap_or("normal")
+                            .to_string(),
+                    })
+                })
+                .collect();
+            let live = items.len();
+            *TODO_LIST.lock_ignore_poison() = items;
+            return Ok(format!(
+                "Tracked {live} live item(s) (not persisted — no active session)."
+            ));
+        };
+
         let triples: Vec<(&str, &str, &str)> = args
             .todos
             .iter()
@@ -172,34 +214,14 @@ impl Tool for WriteTodoList {
 
         let store = IssueStore::open_at(&self.db_path).map_err(ToolError::Msg)?;
         let applied = store
-            .sync_todos(self.session_id.as_deref(), &triples)
+            .sync_todos(Some(session_id), &triples)
             .map_err(ToolError::Msg)?;
 
-        // Refresh the panel/nudge mirror from the freshly-written board.
-        refresh_board(&self.db_path, self.session_id.as_deref());
-
-        // Summarize against what the model asked for (normalized), since closed
-        // items have already dropped off the live board and wouldn't show in a
-        // board-derived count.
-        let mut open = 0;
-        let mut in_progress = 0;
-        let mut blocked = 0;
-        let mut done = 0;
-        let mut cancelled = 0;
-        for t in &args.todos {
-            match normalize_status(&t.status).unwrap_or("open") {
-                "in_progress" => in_progress += 1,
-                "blocked" => blocked += 1,
-                "done" => done += 1,
-                "cancelled" => cancelled += 1,
-                _ => open += 1,
-            }
-        }
+        // Refresh the panel/nudge mirror from the store we already hold open.
+        refresh_board_from(&store, Some(session_id));
         let live = TODO_LIST.lock_ignore_poison().len();
         Ok(format!(
-            "Synced {applied} item(s) to the board: {open} open, {in_progress} in progress, \
-             {blocked} blocked, {done} done, {cancelled} cancelled. \
-             {live} live item(s) now on this session's board."
+            "Synced {applied} item(s) to the board; {live} live item(s) now on this session's board."
         ))
     }
 }
