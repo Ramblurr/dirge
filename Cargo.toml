@@ -5,9 +5,10 @@
 name = "dirge-agent"
 version = "0.14.2"
 edition = "2024"
-# edition 2024 was stabilized in Rust 1.85; pin the MSRV so older
-# toolchains get a clear error instead of a cryptic edition failure.
-rust-version = "1.85"
+# MSRV: edition 2024 needs 1.85, but the dependency tree (time, serde_with,
+# darling, instability) requires 1.88 — pin there so older toolchains fail
+# with a clear version error instead of a cryptic edition/build failure.
+rust-version = "1.88"
 authors = ["Yogthos <yogthos@gmail.com>"]
 description = "Minimalistic coding agent written in Rust, optimized for memory footprint and performance"
 license = "GPL-3.0-only"
