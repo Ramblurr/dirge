@@ -6,6 +6,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-06-30
+
+### Added
+- **[AGENTS] left-panel box.** A fourth box below [GIT] lists the running
+  subagents by profile name. When two subagents share a profile the name alone
+  is ambiguous, so each row appends its `id_short` (e.g. `architect aaa111`);
+  the unnamed-agent fallback shows just the `id_short`. Real subagent data is
+  threaded through `LeftPanelInfo`, and the old separate subagent region
+  collapses into the vitals card. (#553, #554)
+
+### Changed
+- **Slash commands have a single source of truth.** The parallel name-only and
+  (name, description) lists are merged into one `slash_commands()`; tab
+  completion / `is_known_slash_command` and the `/help` render both derive from
+  it, so adding a command is one list entry plus one match arm instead of three
+  synchronized edits. name↔description drift is now structurally impossible
+  (a no-duplicate-names guard replaces the old drift test); `/help` renders
+  "name  description". (#553)
+- **Critic scoped or disabled for read-only and design prompts.** The built-in
+  critic is tuned for coding mode, where it checks that code, tests, and
+  verification all landed. In the read-only/design prompts every mutating tool
+  is denied, so it systematically false-positived — blocking turns to demand
+  builds or runs the denylist makes impossible. `ask`, `plan`, and
+  `write-prompt` keep the critic with a scoped preamble that judges only the
+  actual deliverable (answer completeness, plan actionability, prompt-contract
+  conformance); `brainstorm`, `review`, and `review-security` set
+  `critic: false`. Default coding mode is unchanged. (#549)
+
+### Fixed
+- **No duplicate output after a mid-response provider stall.** 0.14.0 (#547)
+  made stream-chunk timeouts retryable even after text had committed, but the
+  retry reset only clears the message history — not text already rendered — so
+  the second attempt re-streamed the whole response and appended a duplicate
+  copy. Retry is gated on `!committed` again; the pre-commit mid-assembly-stall
+  case (#545) still retries. Also narrows the "stuck in a long reasoning loop"
+  nudge so it no longer mis-fires on plain transport stream-chunk timeouts, and
+  corrects the now-inaccurate "retried automatically" wording in the timeout
+  error message and docs/config.md. (#552)
+
+### Documentation
+- **Building with newer libclang.** README notes the Janet build failure with
+  newer libclang and a documented workaround for pointing at a compatible
+  libclang. (#548)
+
 ## [0.14.1] - 2026-06-29
 
 ### Fixed
