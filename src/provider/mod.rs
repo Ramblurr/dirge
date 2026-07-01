@@ -90,6 +90,11 @@ pub struct AnyAgent {
     /// time when `ConfigRole::Critic` resolves (i.e. `critic_provider`
     /// is configured). Forwarded to `LoopConfig.critic_fn`. `None` = off.
     critic_fn: Option<crate::agent::agent_loop::critic::CriticFn>,
+    /// Diff-aware code reviewer judge (dirge-iyf5). Built at `build_agent`
+    /// time from the same critic provider as `critic_fn` but baking
+    /// `code_review::REVIEW_PREAMBLE`; forwarded to
+    /// `LoopConfig.code_review_fn`. `None` = off.
+    code_review_fn: Option<crate::agent::agent_loop::critic::CriticFn>,
     /// Goal gate's judge callback. Built at `build_agent` time from the
     /// same critic provider as `critic_fn` but baking its own
     /// `GOAL_PREAMBLE`; forwarded to `LoopConfig.goal_fn`. `None` = off.
@@ -193,6 +198,7 @@ impl AnyAgent {
             escalation_stream_fn: None,
             escalation_provider_name: None,
             critic_fn: None,
+            code_review_fn: None,
             goal_fn: None,
             goal: None,
             summarize_fn: None,
@@ -275,6 +281,13 @@ impl AnyAgent {
         self.memory_provider.as_ref()
     }
 
+    /// The diff-aware code reviewer judge (dirge-iyf5), if a
+    /// `critic_provider` was configured. Used by the `/code-review` slash
+    /// command to run an on-demand review; `None` = reviewer not wired.
+    pub fn code_review_fn(&self) -> Option<&crate::agent::agent_loop::critic::CriticFn> {
+        self.code_review_fn.as_ref()
+    }
+
     /// dirge-9tfq: install the per-session background-task store so
     /// `spawn_runner` can wire the subagent-completion follow-up
     /// hook into the agent loop. Called by `build_agent` whenever a
@@ -344,6 +357,17 @@ impl AnyAgent {
     /// only when `ConfigRole::Critic` resolves (`critic_provider` set).
     pub fn with_critic(mut self, critic_fn: crate::agent::agent_loop::critic::CriticFn) -> Self {
         self.critic_fn = Some(critic_fn);
+        self
+    }
+
+    /// Attach the diff-aware code reviewer judge (dirge-iyf5). Built from
+    /// the same critic provider as the critic but baking
+    /// `code_review::REVIEW_PREAMBLE`.
+    pub fn with_code_review_fn(
+        mut self,
+        code_review_fn: crate::agent::agent_loop::critic::CriticFn,
+    ) -> Self {
+        self.code_review_fn = Some(code_review_fn);
         self
     }
 
