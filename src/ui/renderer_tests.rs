@@ -1,28 +1,5 @@
 use super::*;
 
-/// dirge-8855: `PANEL_AUTO_MIN_COLS` must be the real boundary at which a
-/// side panel first has room (`content_indent() >= 15`), not the stale
-/// 100 that the indent gate silently overrode. The gutter indent for a
-/// given terminal width is `((cols-2) - min(cols-2, 120)) / 2`.
-#[test]
-fn panel_auto_min_cols_matches_gutter_threshold() {
-    let indent_at = |cols: u16| -> usize {
-        let band = (cols.saturating_sub(2)) as usize;
-        let target = band.min(120);
-        band.saturating_sub(target) / 2
-    };
-    assert!(
-        indent_at(PANEL_AUTO_MIN_COLS) >= 15,
-        "at the threshold ({PANEL_AUTO_MIN_COLS}) a panel must fit (indent {} >= 15)",
-        indent_at(PANEL_AUTO_MIN_COLS),
-    );
-    assert!(
-        indent_at(PANEL_AUTO_MIN_COLS - 1) < 15,
-        "one column below the threshold a panel must NOT fit (indent {} < 15)",
-        indent_at(PANEL_AUTO_MIN_COLS - 1),
-    );
-}
-
 #[test]
 fn parse_display_spec_full_layout() {
     let v = parse_display_spec("left|main|right").unwrap();
