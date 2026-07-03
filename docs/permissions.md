@@ -50,11 +50,12 @@ to claim a resource sets its base effect:
 |---|--------|--------|
 | 1 | prompt-deny | terminal **Deny** if the active prompt's `deny_tools` forbids the tool (beats even Yolo) |
 | 2 | yolo | terminal **Allow** when `--yolo` |
-| 3 | session-allow | terminal **Allow** for anything you picked "allow always" for this session |
-| 4 | configured-rule | your configured rules, **last match wins** |
-| 5 | builtin-allow | the **sane defaults** (below) |
-| 6 | external-dir | out-of-project paths → your `external_directory` rules, else Ask |
-| 7 | default | the configured fallback (Ask) |
+| 3 | configured-deny | terminal **Deny** for a matching configured `deny` rule (dirge-ct16); below Yolo, above session-allow so a session grant can't override it |
+| 4 | session-allow | terminal **Allow** for anything you picked "allow always" for this session |
+| 5 | configured-rule | your configured rules, **last match wins** |
+| 6 | builtin-allow | the **sane defaults** (below) |
+| 7 | external-dir | out-of-project paths → your `external_directory` rules, else Ask |
+| 8 | default | the configured fallback (Ask) |
 
 Then **Accept-mode coercion** runs (the one place a mode *loosens*): in
 `--accept-all`, a base `Ask` becomes `Allow` for low-risk, in-project
@@ -85,7 +86,7 @@ Out of the box, with no configuration, these never prompt:
 - No-effect internal tools (todo list, task status, the question tool).
 
 These are code, not config, so they can't drift — and an explicit
-config rule (precedence 4) always overrides them.
+config rule (precedence 5) always overrides them.
 
 ## Configuration
 
@@ -136,7 +137,7 @@ Set with `--standard` (default), `--accept-all`, `--restrictive`, or
 |------|----------|
 | **Standard** | builtin defaults + your rules; unmatched mutating ops Ask |
 | **Accept** | coerces in-project `Ask`s to Allow; shell/MCP/network still Ask |
-| **Restrictive** | every write/edit (incl. in-project, memory/skill writes) Asks |
+| **Restrictive** | unmatched/builtin-allowed writes (in-project, memory/skill) Ask; explicit `allow` rules still allow |
 | **Yolo** | allow everything — except a prompt's `deny_tools`, which still wins |
 
 ### LLM auto-approval (`approval_provider`)
