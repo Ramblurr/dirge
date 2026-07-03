@@ -27,8 +27,10 @@ or add it to the project's `.mcp.json`:
 }
 ```
 
-The server runs in the project directory, so dirge's session lives in
-that project's `.dirge/` and its tools operate on that codebase.
+The server runs in the project directory, so its tools operate on that
+codebase. Session files are stored in the global user data dir (shared
+across projects); only the current-session pointer is kept in the
+project's `.dirge/`.
 
 Options: `dirge mcp --model <id>` to pin the model dirge uses for
 delegated work, `--sandbox bwrap|microvm` to isolate the bash it runs.
@@ -81,8 +83,10 @@ session without immediately delegating.
 orientation on the current session.
 
 ### `list_sessions`
-Recent sessions in the project: `[{ id, last_active, messages, preview }]`
-so you can resume a past thread.
+Recent dirge sessions across all projects:
+`[{ id, last_active, messages, preview }]` — for orientation. The server
+runs whichever session its pointer file names; an arbitrary past id
+can't be resumed through the MCP API.
 
 ## The loop in practice
 

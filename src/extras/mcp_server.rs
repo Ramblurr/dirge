@@ -221,8 +221,9 @@ impl DirgeMcp {
     }
 
     #[tool(
-        description = "List recent dirge sessions in this project (id, last activity, and a \
-            one-line preview) so you can resume a past task thread by passing its id."
+        description = "List recent dirge sessions across all projects (id, last activity, and a \
+            one-line preview) for orientation. The server runs the session its pointer file \
+            names; an arbitrary past id can't be resumed through this API."
     )]
     async fn list_sessions(&self) -> Result<CallToolResult, ErrorData> {
         let sessions = crate::session::storage::find_recent_sessions(20).unwrap_or_default();
