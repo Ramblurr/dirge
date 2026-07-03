@@ -124,10 +124,14 @@ const HARNESS_INIT: &str = r#"
 (var harness-recorded-entities "")
 (var harness-recorded-relations "")
 
-# harness/log is now a no-op. The return value of plugin commands
-# is what surfaces in chat — that's the supported surface for
-# plugin output.
-(defn harness/log [msg] nil)
+# harness/log queues a debug breadcrumb. The host drains
+# `harness-log-messages` after each hook dispatch and emits each line
+# via tracing::info! (target dirge::plugin::log), so it surfaces under
+# RUST_LOG / --verbose. The return value of plugin commands is still
+# what surfaces in chat; harness/log is the out-of-band debug sink
+# (dirge-8gdv.7). The queueing `defn` lives below `harness/-escape`
+# (which it uses); the var is declared here with the other slots.
+(var harness-log-messages "")
 (defn harness/get-cwd [] (os/cwd))
 (defn harness/request-prompt [prompt]
   (when (string? prompt)
@@ -168,6 +172,12 @@ const HARNESS_INIT: &str = r#"
        (string/replace-all "\\" "\\\\")
        (string/replace-all "\t" "\\t")
        (string/replace-all "\n" "\\n")))
+
+# harness/log breadcrumb queue (see the harness-log-messages var above).
+(defn harness/log [msg]
+  (when (string? msg)
+    (set harness-log-messages
+         (string harness-log-messages (harness/-escape msg) "\n"))))
 
 (defn harness/record-entity [kind name &opt extra]
   (when (and (string? kind) (string? name))

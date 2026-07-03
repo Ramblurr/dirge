@@ -378,6 +378,8 @@ impl PluginManager {
             }
         }
 
+        // Flush any harness/log breadcrumbs these hooks queued.
+        let _ = self.drain_log_messages();
         Ok(results)
     }
 
@@ -459,6 +461,20 @@ impl PluginManager {
     /// loop's `getFollowUpMessages` hook.
     pub fn drain_followup_messages(&mut self) -> Vec<String> {
         self.drain_newline_blob("harness-followup-messages")
+    }
+
+    /// Drain the `harness-log-messages` blob — debug breadcrumbs queued
+    /// by plugins via `harness/log` (dirge-8gdv.7). Each entry is emitted
+    /// at info level under the `dirge::plugin::log` target so it surfaces
+    /// via `--verbose` / `RUST_LOG=info`. Auto-drained at the end of
+    /// `dispatch` and `dispatch_tool_hook`; returns the drained lines so
+    /// tests can assert the round-trip.
+    pub fn drain_log_messages(&mut self) -> Vec<String> {
+        let msgs = self.drain_newline_blob("harness-log-messages");
+        for m in &msgs {
+            tracing::info!(target: "dirge::plugin::log", "{m}");
+        }
+        msgs
     }
 
     /// Drain the `harness-custom-messages` blob — UI-only
@@ -725,6 +741,8 @@ impl PluginManager {
             }
         }
 
+        // Flush any harness/log breadcrumbs these tool hooks queued.
+        let _ = self.drain_log_messages();
         Ok(ToolHookResult {
             block: self.take_pending_block(),
             mutate_input: self.take_pending_mutate_input(),

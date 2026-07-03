@@ -92,7 +92,7 @@ file without imports.
 
 | Function | Signature | Effect |
 |----------|-----------|--------|
-| `harness/log` | `(msg)` | No-op; the message is discarded (kept for backwards compatibility with plugins that still call it). Use `harness/notify` for output visible in chat, or return a value from a plugin command |
+| `harness/log` | `(msg)` | Debug breadcrumb. Queued and drained after each hook dispatch into the host log at info level (target `dirge::plugin::log`), so it shows under `--verbose` / `RUST_LOG=info` but not in chat. Use `harness/notify` for output the user should see, or return a value from a plugin command |
 | `harness/get-cwd` | `()` | Returns the agent's working directory |
 | `harness/has-symbol?` | `(name)` | True if `name` is bound in the Janet env |
 

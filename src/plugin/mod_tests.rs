@@ -1604,6 +1604,24 @@ fn drain_followup_messages_round_trips_embedded_newlines() {
     assert_eq!(drained[0], "do this\nthen that");
 }
 
+/// dirge-8gdv.7: harness/log queues breadcrumbs that drain into
+/// tracing, one entry per call, embedded newlines preserved, and the
+/// queue clears on drain.
+#[cfg(feature = "plugin")]
+#[test]
+fn harness_log_queues_and_drains() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(harness/log "line one")"#).unwrap();
+    mgr.eval(r#"(harness/log "with\nembedded")"#).unwrap();
+    let drained = mgr.drain_log_messages();
+    assert_eq!(
+        drained,
+        vec!["line one".to_string(), "with\nembedded".to_string()]
+    );
+    // Draining clears the queue.
+    assert!(mgr.drain_log_messages().is_empty());
+}
+
 // --- P9d: plugin-registered message renderers -----------------------
 
 #[cfg(feature = "plugin")]
