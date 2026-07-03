@@ -433,7 +433,6 @@ pub(crate) async fn install_compaction(
         Some(session.id.to_string()),
     )
     .await;
-    renderer.write_line("prompt cleared (back to default behavior)", c_agent())?;
 
     render_session(renderer, session, cli, cfg, context)?;
     if pruned_branches > 0 {
