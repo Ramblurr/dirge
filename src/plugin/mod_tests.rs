@@ -1573,6 +1573,37 @@ fn drain_custom_messages_clears_slot() {
     assert_eq!(mgr.drain_custom_messages().len(), 0);
 }
 
+// --- dirge-yrta: steering/followup newline round-trip ----------------
+
+/// A multi-line steering message must survive the append->drain
+/// round-trip as ONE message with its embedded newline intact. The
+/// steering/followup queues use the same harness/-escape wire format
+/// as add-custom-message; without it a `step 1\nstep 2` payload is
+/// stored as raw newlines and drains as two separate messages,
+/// shredding a formatted instruction (dirge-yrta).
+#[cfg(feature = "plugin")]
+#[test]
+fn drain_steering_messages_round_trips_embedded_newlines() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(harness/add-steering "step 1\nstep 2")"#)
+        .unwrap();
+    let drained = mgr.drain_steering_messages();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0], "step 1\nstep 2");
+}
+
+/// Same property for the followup queue (same blob shape as steering).
+#[cfg(feature = "plugin")]
+#[test]
+fn drain_followup_messages_round_trips_embedded_newlines() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(harness/add-followup "do this\nthen that")"#)
+        .unwrap();
+    let drained = mgr.drain_followup_messages();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0], "do this\nthen that");
+}
+
 // --- P9d: plugin-registered message renderers -----------------------
 
 #[cfg(feature = "plugin")]

@@ -543,6 +543,7 @@ impl PluginManager {
 
     /// Shared body for `drain_*_messages` — read the slot's
     /// string contents, split on newline, filter empty entries,
+    /// unescape each (harness/-escape wire format, dirge-yrta),
     /// clear the slot to `""`.
     fn drain_newline_blob(&mut self, var: &str) -> Vec<String> {
         let raw = self
@@ -551,8 +552,8 @@ impl PluginManager {
             .unwrap_or_default();
         let _ = self.worker.eval(&format!("(set {var} \"\")"));
         raw.lines()
-            .map(|s| s.to_string())
             .filter(|s| !s.is_empty())
+            .map(|s| unescape_harness_field(s))
             .collect()
     }
 

@@ -282,13 +282,13 @@ const HARNESS_INIT: &str = r#"
 # Steering message queue (mid-run). Plugins call
 # (harness/add-steering "wait, also do X") to inject a user
 # turn between assistant turns. Drained per turn-boundary by
-# the host. Stored as a `msg\n` blob (newline-separated) so the
-# read side is a single string roundtrip.
+# the host. Stored as a `harness/-escape'd msg\n` blob so an
+# embedded newline round-trips as a single message (dirge-yrta).
 (var harness-steering-messages "")
 (defn harness/add-steering [content]
   (when (string? content)
     (set harness-steering-messages
-         (string harness-steering-messages content "\n"))))
+         (string harness-steering-messages (harness/-escape content) "\n"))))
 
 # Follow-up message queue (outer-loop boundary). Plugins call
 # (harness/add-followup "do this next") to add a turn AFTER the
@@ -297,7 +297,7 @@ const HARNESS_INIT: &str = r#"
 (defn harness/add-followup [content]
   (when (string? content)
     (set harness-followup-messages
-         (string harness-followup-messages content "\n"))))
+         (string harness-followup-messages (harness/-escape content) "\n"))))
 
 # Custom (UI-only) message queue. Plugins call this to push a
 # notification the user SEES in the chat but the model does NOT
