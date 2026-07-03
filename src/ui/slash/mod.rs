@@ -25,6 +25,11 @@ mod cmd;
 #[cfg(feature = "slash-completion")]
 mod completion;
 
+// Exposed for the DEFER_WT_* parse arms in ui/mod.rs; `cmd` itself stays
+// private to this module. Gated to match `cmd::wt_defer` (git-worktree).
+#[cfg(feature = "git-worktree")]
+pub(crate) use cmd::wt_defer::{parse_wt_exit, parse_wt_merge};
+
 #[cfg(feature = "slash-completion")]
 pub use completion::{CompletionResult, format_completion_preview, ghost_suffix, try_complete};
 // Only meaningful with plugins; gated to match its sole caller so a

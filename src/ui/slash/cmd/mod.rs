@@ -45,3 +45,5 @@ pub(crate) mod tree;
 pub(crate) mod undo;
 #[cfg(feature = "git-worktree")]
 pub(crate) mod worktree;
+#[cfg(feature = "git-worktree")]
+pub(crate) mod wt_defer;

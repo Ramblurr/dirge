@@ -2563,12 +2563,7 @@ pub async fn run_interactive(
                                         // handing it to an LLM prompt, and restore the
                                         // cwd to the main repo ONLY on a clean merge.
                                         let err_msg = e.to_string();
-                                        let parts: Vec<&str> = err_msg.strip_prefix("DEFER_WT_MERGE:").unwrap_or("").splitn(5, ':').collect();
-                                        if parts.len() == 5 {
-                                            let branch = parts[0].to_string();
-                                            let target = parts[1].to_string();
-                                            let main_path = parts[2].to_string();
-                                            let wt_path = parts[3].to_string();
+                                        if let Some(m) = crate::ui::slash::parse_wt_merge(&err_msg) {
                                             // dirge-iagk: run the (synchronous,
                                             // multi-subprocess) git merge on a
                                             // blocking thread; the wt_merge_phase
@@ -2576,18 +2571,22 @@ pub async fn run_interactive(
                                             // once it lands. Keeps the loop
                                             // responsive + Ctrl+C-able.
                                             ui.wt_merge_phase = Some(crate::ui::wt_merge_phase::spawn(
-                                                branch, target, main_path, wt_path,
+                                                m.branch, m.target, m.main_path, m.wt_path,
                                             ));
                                             ui.is_running = true;
                                             renderer.set_avatar_state(avatar::AvatarState::Thinking);
+                                        } else {
+                                            renderer.write_line(
+                                                "internal error: malformed /wt-merge handoff",
+                                                c_error(),
+                                            )?;
                                         }
                                     }
                                     #[cfg(feature = "git-worktree")]
                                     Err(e) if e.to_string().starts_with("DEFER_WT_EXIT:") => {
                                         let err_msg = e.to_string();
-                                        let parts: Vec<&str> = err_msg.strip_prefix("DEFER_WT_EXIT:").unwrap_or("").splitn(2, ':').collect();
-                                        if parts.len() == 2 {
-                                            let main_path = parts[0];
+                                        if let Some(x) = crate::ui::slash::parse_wt_exit(&err_msg) {
+                                            let main_path = x.main_path.as_str();
                                             std::env::set_current_dir(main_path)
                                                 .map_err(|e| anyhow::anyhow!("failed to change directory: {}", e))?;
                                             session.working_dir = compact_str::CompactString::new(main_path);
@@ -2624,6 +2623,11 @@ pub async fn run_interactive(
                                             renderer.write_line(
                                                 &format!("returned to main repo at {}", main_path),
                                                 c_agent(),
+                                            )?;
+                                        } else {
+                                            renderer.write_line(
+                                                "internal error: malformed /wt-exit handoff",
+                                                c_error(),
                                             )?;
                                         }
                                     }

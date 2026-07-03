@@ -8,6 +8,8 @@
 use crate::ui::events::render_session;
 use crate::ui::slash::{SlashCtx, c_agent, c_error};
 
+use super::wt_defer::{pack_wt_exit, pack_wt_merge};
+
 pub(crate) async fn cmd_worktree(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::Result<()> {
     if parts.len() < 2 {
         ctx.renderer
@@ -124,14 +126,13 @@ pub(crate) async fn cmd_wt_merge(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyh
         ),
         c_agent(),
     )?;
-    Err(anyhow::anyhow!(
-        "DEFER_WT_MERGE:{}:{}:{}:{}:{}",
-        info.branch,
-        target,
-        main_path,
-        wt_path,
-        repo_name
-    ))
+    Err(anyhow::anyhow!(pack_wt_merge(
+        &info.branch,
+        &target,
+        &main_path.to_string(),
+        &wt_path.to_string(),
+        &repo_name,
+    )))
 }
 
 pub(crate) async fn cmd_wt_exit(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::Result<()> {
@@ -180,9 +181,8 @@ pub(crate) async fn cmd_wt_exit(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyho
         &format!("returning to main repo at {}", main_path),
         c_agent(),
     )?;
-    Err(anyhow::anyhow!(
-        "DEFER_WT_EXIT:{}:{}",
-        main_path,
-        info.worktree_path.display()
-    ))
+    Err(anyhow::anyhow!(pack_wt_exit(
+        &main_path.to_string(),
+        &info.worktree_path.display().to_string(),
+    )))
 }
