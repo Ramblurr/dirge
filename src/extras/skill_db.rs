@@ -228,14 +228,17 @@ impl SkillStore {
         crate::extras::memory_db::scan_for_threats(content)?;
         let content = redact_for_fts(content);
 
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         if Self::get_locked(&conn, name)?.is_some() {
             return Err(format!("A skill named '{name}' already exists"));
         }
 
         let uid = random_skill_id();
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        tx.execute(
             "INSERT INTO skills
                  (uid, name, description, content, source, skill_path, status,
                   tier, pinned, confidence, salience, created_at, updated_at,
@@ -254,12 +257,13 @@ impl SkillStore {
             ],
         )
         .map_err(|e| format!("Failed to insert skill: {e}"))?;
-        let rowid = conn.last_insert_rowid();
-        conn.execute(
+        let rowid = tx.last_insert_rowid();
+        tx.execute(
             "INSERT INTO skills_fts(rowid, content) VALUES (?1, ?2)",
             params![rowid, fts_projection(name, description, &content)],
         )
         .map_err(|e| format!("Failed to index skill: {e}"))?;
+        tx.commit().map_err(|e| format!("Failed to commit: {e}"))?;
 
         Self::get_locked(&conn, name)?
             .ok_or_else(|| "Skill vanished immediately after insert".to_string())
@@ -411,19 +415,22 @@ impl SkillStore {
         validate_skill_name(name)?;
         let description = description.trim();
         let content = redact_for_fts(content.trim());
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         let source = if agent_created { "learned" } else { "file" };
         let existed = Self::get_locked(&conn, name)?.is_some();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
         if existed {
-            conn.execute(
+            tx.execute(
                 "UPDATE skills SET status = 'active', description = ?1, content = ?2, updated_at = ?3
                  WHERE name = ?4",
                 params![description, content, now, name],
             )
             .map_err(|e| format!("Failed to refresh skill: {e}"))?;
         } else {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO skills
                      (uid, name, description, content, source, status, tier,
                       pinned, confidence, salience, created_at, updated_at)
@@ -441,20 +448,21 @@ impl SkillStore {
             )
             .map_err(|e| format!("Failed to register skill: {e}"))?;
         }
-        let rowid: i64 = conn
+        let rowid: i64 = tx
             .query_row(
                 "SELECT id FROM skills WHERE name = ?1",
                 params![name],
                 |r| r.get(0),
             )
             .map_err(|e| format!("Failed to read skill id: {e}"))?;
-        conn.execute("DELETE FROM skills_fts WHERE rowid = ?1", params![rowid])
+        tx.execute("DELETE FROM skills_fts WHERE rowid = ?1", params![rowid])
             .map_err(|e| format!("Failed to reindex skill: {e}"))?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO skills_fts(rowid, content) VALUES (?1, ?2)",
             params![rowid, fts_projection(name, description, &content)],
         )
         .map_err(|e| format!("Failed to reindex skill: {e}"))?;
+        tx.commit().map_err(|e| format!("Failed to commit: {e}"))?;
         Ok(())
     }
 
@@ -931,6 +939,33 @@ mod tests {
         // …and on body ("pg_dump").
         let by_body = s.search("pg_dump").expect("search");
         assert_eq!(by_body.len(), 1);
+    }
+
+    #[test]
+    fn create_is_atomic_skills_row_and_fts_projection_both_exist() {
+        // Regression guard for the bare-autocommit write path (dirge-if4v):
+        // a successful create must leave BOTH the skills row and its
+        // skills_fts projection, so the skill is immediately searchable.
+        // The two inserts now run in one transaction, so a failure between
+        // them rolls both back rather than stranding an unsearchable row.
+        let s = store();
+        let row = s
+            .create(
+                "deploy-cache",
+                "Flush and warm the edge cache after a deploy.",
+                "Run cachectl purge --all then cachectl prefetch sitemap.",
+                SkillSource::Learned,
+                None,
+            )
+            .expect("create");
+        assert_eq!(row.name, "deploy-cache");
+        assert!(s.get("deploy-cache").expect("get").is_some());
+        let by_desc = s.search("edge").expect("search");
+        assert_eq!(by_desc.len(), 1);
+        assert_eq!(by_desc[0].name, "deploy-cache");
+        let by_body = s.search("cachectl").expect("search");
+        assert_eq!(by_body.len(), 1);
+        assert_eq!(by_body[0].name, "deploy-cache");
     }
 
     #[test]
