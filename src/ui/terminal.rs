@@ -35,6 +35,132 @@ pub fn set_log_path(path: Option<std::path::PathBuf>) {
     let _ = LOG_PATH.set(path);
 }
 
+/// Terminal reset emitted before printing a panic notice: SGR default,
+/// disable mouse + bracketed paste, clear title, leave the alternate
+/// screen, show the cursor. Same modes `new` sets, in reverse — matches
+/// the suspend path's sequence with a trailing cursor-show.
+const PANIC_RESET_SEQ: &[u8] = b"\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b]0;\x1b\\\x1b[?1049l\x1b[?25h";
+
+/// Set once `install_panic_hook` has chained onto the process hook, so
+/// repeated `TerminalGuard::new` calls (tests, embedded use) don't stack
+/// duplicate hooks.
+static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// The thread that installed the panic hook — `TerminalGuard::new`
+/// runs on the UI thread, so this is the thread that owns the
+/// terminal. The hook only resets the terminal for panics on this
+/// thread: worker/blocking threads panic behind `catch_unwind`
+/// guards (plugin FFI boundaries, DAP Janet bindings) or get
+/// degraded to `None` via `spawn_blocking` JoinErrors, and the
+/// process survives — resetting the live terminal for those would
+/// wreck a running TUI session.
+static UI_THREAD_ID: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+/// Set by the panic hook (SeqCst) after it has reset the terminal for
+/// a UI-thread panic. `TerminalGuard::drop` runs later on the same
+/// unwind; it checks this and skips its own sentinel-drain/reset
+/// phases — raw mode is already off by then, so the DSR-CPR reply
+/// would sit in the canonical input buffer and echo as `^[[NN;1R`
+/// garbage at the shell prompt.
+static PANIC_HOOK_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Should the panic hook reset the live terminal for a panic on
+/// `current`? Only when the panicking thread is the one that
+/// installed the hook (the UI thread). Pure so it's testable; the
+/// hook passes `UI_THREAD_ID.get().copied()` and the current thread
+/// id. `None` (hook somehow ran before the id was stored) means
+/// don't touch the terminal — a spurious reset is worse than a
+/// missed one.
+fn thread_owns_terminal(
+    ui_thread: Option<std::thread::ThreadId>,
+    current: std::thread::ThreadId,
+) -> bool {
+    ui_thread == Some(current)
+}
+
+/// Where the default hook's panic backtrace actually landed. With fd 1/2
+/// redirected to the log for the session, the message the default hook
+/// prints to stderr goes to that file, not the screen — so point the
+/// user at it.
+fn log_path_hint() -> String {
+    match LOG_PATH.get().and_then(|opt| opt.clone()) {
+        Some(p) => p.display().to_string(),
+        None => "stderr (run with --verbose or DIRGE_LOG to capture a log file)".to_string(),
+    }
+}
+
+/// Build the on-tty panic notice. Pure (no I/O) so it can be tested; the
+/// hook writes the returned string to /dev/tty after the terminal reset.
+/// Every line carries `\r\n` — raw mode is off by the time this prints,
+/// so a bare `\n` would stair-step across the cooked screen.
+fn format_panic_notice(payload: &str, location: Option<&str>, log_hint: &str) -> String {
+    let at = location.unwrap_or("unknown location");
+    format!(
+        "\r\n\x1b[1;31mdirge panicked:\x1b[0m {payload}\r\n  at {at}\r\n  full backtrace in the log: {log_hint}\r\n"
+    )
+}
+
+/// Install a panic hook that restores the terminal and surfaces the
+/// panic on /dev/tty before delegating to the previous hook (dirge-9ny9).
+///
+/// `panic = unwind` means `TerminalGuard::drop` also resets the terminal
+/// as the stack unwinds, but the default hook writes its message to
+/// stderr — redirected to the log during the session — so a UI-thread
+/// panic otherwise makes the TUI vanish with nothing shown and no hint
+/// where to look. The hook fires at the panic point (before unwinding,
+/// so raw mode and the alt screen are still up): reset the terminal so
+/// the notice lands on a clean cooked screen, print the message + log
+/// path to the controlling terminal, then chain the previous hook (whose
+/// stderr output populates the log with the full backtrace).
+///
+/// Idempotent — installs at most once per process.
+pub fn install_panic_hook() {
+    // Record the installing thread as the terminal owner (first call
+    // wins, same as the hook itself). `TerminalGuard::new` calls this
+    // on the UI thread.
+    let _ = UI_THREAD_ID.set(std::thread::current().id());
+    if PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Panics on worker/blocking threads are routinely caught and
+        // survived (plugin FFI catch_unwind guards, spawn_blocking
+        // JoinErrors) — the TUI keeps running, so leave the terminal
+        // alone and just chain the default hook, whose output lands
+        // on the redirected stderr/log.
+        if !thread_owns_terminal(UI_THREAD_ID.get().copied(), std::thread::current().id()) {
+            previous(info);
+            return;
+        }
+
+        if let Some(mut tty) = open_tty_for_write() {
+            let _ = tty.write_all(PANIC_RESET_SEQ);
+            let _ = tty.flush();
+        }
+        let _ = terminal::disable_raw_mode();
+        // Tell `TerminalGuard::drop` (which runs as this same panic
+        // unwinds) that the terminal is already reset, so it skips
+        // its sentinel-drain/reset phases.
+        PANIC_HOOK_FIRED.store(true, Ordering::SeqCst);
+
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "Box<dyn Any>".to_string());
+        let location = info.location().map(|l| l.to_string());
+        let notice = format_panic_notice(&payload, location.as_deref(), &log_path_hint());
+        if let Some(mut tty) = open_tty_for_write() {
+            let _ = tty.write_all(notice.as_bytes());
+            let _ = tty.flush();
+        }
+
+        previous(info);
+    }));
+}
+
 /// Shared shutdown signal between the input-reader background thread
 /// in `ui::mod` and `TerminalGuard::drop`. The reader polls this with
 /// each `event::poll` tick; the guard sets it before tearing down so
@@ -71,10 +197,17 @@ pub struct TerminalGuard {
 
 impl TerminalGuard {
     pub fn new() -> std::io::Result<Self> {
-        // Reset both flags in case the binary previously held a
+        // Reset the flags in case the binary previously held a
         // guard in the same process (test harness, embedded use).
         EVENT_READER_SHUTDOWN.store(false, Ordering::Relaxed);
         EVENT_READER_EXITED.store(false, Ordering::Relaxed);
+        PANIC_HOOK_FIRED.store(false, Ordering::SeqCst);
+
+        // dirge-9ny9: chain a panic hook that resets the terminal and
+        // prints the panic + log path to /dev/tty. Must be in place
+        // before the fd redirect below, or a panic during setup would
+        // vanish into the log with nothing on screen.
+        install_panic_hook();
 
         // Open /dev/tty for all subsequent setup writes AND for
         // ratatui's backend to use later. If /dev/tty isn't
@@ -245,6 +378,27 @@ impl Drop for TerminalGuard {
         // not before (would race for stdin bytes) and not after
         // (would burn unnecessary shutdown time on a fast path).
         EVENT_READER_SHUTDOWN.store(true, Ordering::Relaxed);
+
+        // If the panic hook already reset the terminal (UI-thread
+        // panic — this drop runs on that unwind), skip the reset and
+        // sentinel-drain phases: raw mode is off, so the DSR-CPR
+        // reply would land in the canonical input buffer and echo as
+        // `^[[NN;1R` garbage at the shell prompt. Just restore fd 1/2.
+        if PANIC_HOOK_FIRED.load(Ordering::SeqCst) {
+            #[cfg(unix)]
+            unsafe {
+                if let Some(orig) = self.saved_stdout_fd {
+                    libc::dup2(orig, 1);
+                    libc::close(orig);
+                }
+                if let Some(orig) = self.saved_stderr_fd {
+                    libc::dup2(orig, 2);
+                    libc::close(orig);
+                }
+            }
+            return;
+        }
+
         wait_for_reader_exit(Duration::from_millis(50));
         // Cleanup writes go to /dev/tty, NOT stdout — fd 1 is still
         // redirected to the log file at this point. We restore
@@ -598,4 +752,56 @@ pub(crate) fn resume_tui_after_subprocess(
     EVENT_READER_SHUTDOWN.store(false, Ordering::Relaxed);
     EVENT_READER_EXITED.store(false, Ordering::Relaxed);
     crate::ui::input_reader::spawn_input_reader(user_tx.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_notice_carries_message_location_and_log() {
+        let notice = format_panic_notice(
+            "index out of bounds: the len is 0 but the index is 3",
+            Some("src/ui/mod.rs:42:9"),
+            "/home/x/.dirge/dirge.log",
+        );
+        assert!(notice.contains("dirge panicked"));
+        assert!(notice.contains("index out of bounds"));
+        assert!(notice.contains("src/ui/mod.rs:42:9"));
+        assert!(notice.contains("/home/x/.dirge/dirge.log"));
+        // Written to a cooked terminal after reset — every line needs a
+        // carriage return or it stair-steps across the screen.
+        assert!(notice.contains("\r\n"));
+    }
+
+    #[test]
+    fn panic_notice_tolerates_unknown_location() {
+        let notice = format_panic_notice("boom", None, "stderr");
+        assert!(notice.contains("boom"));
+        assert!(notice.contains("stderr"));
+    }
+
+    #[test]
+    fn ui_thread_panic_resets_terminal() {
+        let me = std::thread::current().id();
+        assert!(thread_owns_terminal(Some(me), me));
+    }
+
+    #[test]
+    fn worker_thread_panic_leaves_terminal_alone() {
+        let ui = std::thread::current().id();
+        let worker = std::thread::spawn(std::thread::current)
+            .join()
+            .unwrap()
+            .id();
+        assert_ne!(ui, worker);
+        assert!(!thread_owns_terminal(Some(ui), worker));
+    }
+
+    #[test]
+    fn unknown_ui_thread_means_no_reset() {
+        // Hook somehow fired before the installing thread id was
+        // stored — never touch the terminal in that case.
+        assert!(!thread_owns_terminal(None, std::thread::current().id()));
+    }
 }
