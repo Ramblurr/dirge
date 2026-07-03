@@ -4,30 +4,30 @@ pub(crate) mod clear;
 pub(crate) mod list;
 pub(crate) mod switch;
 
-use crate::ui::slash::SlashCtx;
+use crate::ui::slash::{SlashCtx, rebuild_agent_parts};
 
 /// Rebuild the agent from the current session model and context.
 /// Shared by agent activation/deactivation and /regen-prompts.
 pub(crate) async fn rebuild_agent(ctx: &mut SlashCtx<'_>) {
-    let model = ctx.client.completion_model(ctx.session.model.to_string());
-    *ctx.agent = crate::provider::build_agent(
-        model,
+    rebuild_agent_parts(
+        ctx.agent,
+        ctx.client,
+        ctx.session,
         ctx.cli,
         ctx.cfg,
         ctx.context,
-        ctx.permission.clone(),
-        ctx.ask_tx.clone(),
-        ctx.question_tx.clone(),
-        ctx.plan_tx.clone(),
-        ctx.bg_store.clone(),
-        #[cfg(feature = "lsp")]
-        ctx.lsp_manager.cloned(),
-        ctx.sandbox.clone(),
+        ctx.permission,
+        ctx.ask_tx,
+        ctx.question_tx,
+        ctx.plan_tx,
+        ctx.bg_store,
+        ctx.sandbox,
         #[cfg(feature = "mcp")]
         ctx.mcp_manager,
         #[cfg(feature = "semantic")]
         ctx.semantic_manager,
-        Some(ctx.session.id.to_string()),
+        #[cfg(feature = "lsp")]
+        ctx.lsp_manager,
     )
     .await;
 }

@@ -7,6 +7,7 @@ use crate::sync_util::LockExt;
 use compact_str::CompactString;
 
 use crate::config::ProviderEntry;
+use crate::ui::slash::cmd::agent;
 use crate::ui::slash::{SlashCtx, c_agent, c_error, c_result};
 
 /// Build the sorted list of models the config pins, one per provider that
@@ -106,28 +107,8 @@ pub(crate) async fn cmd_model(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow:
             }
         }
 
-        let model = ctx.client.completion_model(new_model.to_string());
-        *ctx.agent = crate::provider::build_agent(
-            model,
-            ctx.cli,
-            ctx.cfg,
-            ctx.context,
-            ctx.permission.clone(),
-            ctx.ask_tx.clone(),
-            ctx.question_tx.clone(),
-            ctx.plan_tx.clone(),
-            ctx.bg_store.clone(),
-            #[cfg(feature = "lsp")]
-            ctx.lsp_manager.cloned(),
-            ctx.sandbox.clone(),
-            #[cfg(feature = "mcp")]
-            ctx.mcp_manager,
-            #[cfg(feature = "semantic")]
-            ctx.semantic_manager,
-            Some(ctx.session.id.to_string()),
-        )
-        .await;
         ctx.session.model = new_model.clone();
+        agent::rebuild_agent(ctx).await;
         // On a cross-provider switch the active provider becomes the target
         // alias. On a same-provider model swap it is left UNCHANGED — the live
         // client is still on the previously active provider, and resetting to

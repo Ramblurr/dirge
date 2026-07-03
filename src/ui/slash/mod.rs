@@ -347,6 +347,53 @@ pub(crate) fn prepare_compaction(
     })))
 }
 
+/// Rebuild the agent from its constituent parts — the single shared body
+/// every "rebuild after a config/session change" site routes through.
+/// Reads `session.model` for model resolution. `rebuild_agent(&mut
+/// SlashCtx)` is the SlashCtx-flavored wrapper; this bare-params form is
+/// for sites that aren't holding a SlashCtx (the compaction install path
+/// and `/wt-exit`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rebuild_agent_parts(
+    agent: &mut AnyAgent,
+    client: &AnyClient,
+    session: &Session,
+    cli: &Cli,
+    cfg: &Config,
+    context: &mut ContextFiles,
+    permission: &Option<PermCheck>,
+    ask_tx: &Option<AskSender>,
+    question_tx: &Option<crate::agent::tools::question::QuestionSender>,
+    plan_tx: &Option<crate::agent::tools::plan::PlanSwitchSender>,
+    bg_store: &Option<crate::agent::tools::background::BackgroundStore>,
+    sandbox: &Sandbox,
+    #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    #[cfg(feature = "semantic")] semantic_manager: Option<&SemanticManager>,
+    #[cfg(feature = "lsp")] lsp_manager: Option<&std::sync::Arc<crate::lsp::manager::LspManager>>,
+) {
+    let model = client.completion_model(session.model.to_string());
+    *agent = crate::provider::build_agent(
+        model,
+        cli,
+        cfg,
+        context,
+        permission.clone(),
+        ask_tx.clone(),
+        question_tx.clone(),
+        plan_tx.clone(),
+        bg_store.clone(),
+        #[cfg(feature = "lsp")]
+        lsp_manager.cloned(),
+        sandbox.clone(),
+        #[cfg(feature = "mcp")]
+        mcp_manager,
+        #[cfg(feature = "semantic")]
+        semantic_manager,
+        Some(session.id.to_string()),
+    )
+    .await;
+}
+
 /// dirge-tv3p: the on-UI-thread INSTALL half — given the summary from the
 /// (off-thread) summarizer, rotate the session and rebuild the agent. Cheap
 /// relative to the LLM call. Refuses to install a summary larger than the
@@ -417,25 +464,25 @@ pub(crate) async fn install_compaction(
     // siblings silently; dirge prefers the explicit notification.
     let pruned_branches = session.compress_reporting(summary, cut_idx, tokens_before);
 
-    let model = client.completion_model(session.model.to_string());
-    *agent = crate::provider::build_agent(
-        model,
+    rebuild_agent_parts(
+        agent,
+        client,
+        session,
         cli,
         cfg,
         context,
-        permission.clone(),
-        ask_tx.clone(),
-        question_tx.clone(),
-        plan_tx.clone(),
-        bg_store.clone(),
-        #[cfg(feature = "lsp")]
-        lsp_manager.cloned(),
-        sandbox.clone(),
+        permission,
+        ask_tx,
+        question_tx,
+        plan_tx,
+        bg_store,
+        sandbox,
         #[cfg(feature = "mcp")]
         mcp_manager,
         #[cfg(feature = "semantic")]
         semantic_manager,
-        Some(session.id.to_string()),
+        #[cfg(feature = "lsp")]
+        lsp_manager,
     )
     .await;
 

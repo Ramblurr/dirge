@@ -5,6 +5,7 @@ use crate::sync_util::LockExt;
 use compact_str::CompactString;
 
 use crate::ui::events::render_session;
+use crate::ui::slash::cmd::agent;
 use crate::ui::slash::{SlashCtx, c_agent, c_error};
 
 pub(crate) async fn cmd_cd(ctx: &mut SlashCtx<'_>, text: &str) -> anyhow::Result<()> {
@@ -29,27 +30,7 @@ pub(crate) async fn cmd_cd(ctx: &mut SlashCtx<'_>, text: &str) -> anyhow::Result
                 guard.set_working_dir(&ctx.session.working_dir);
             }
             ctx.context.reload();
-            let model = ctx.client.completion_model(ctx.session.model.to_string());
-            *ctx.agent = crate::provider::build_agent(
-                model,
-                ctx.cli,
-                ctx.cfg,
-                ctx.context,
-                ctx.permission.clone(),
-                ctx.ask_tx.clone(),
-                ctx.question_tx.clone(),
-                ctx.plan_tx.clone(),
-                ctx.bg_store.clone(),
-                #[cfg(feature = "lsp")]
-                ctx.lsp_manager.cloned(),
-                ctx.sandbox.clone(),
-                #[cfg(feature = "mcp")]
-                ctx.mcp_manager,
-                #[cfg(feature = "semantic")]
-                ctx.semantic_manager,
-                Some(ctx.session.id.to_string()),
-            )
-            .await;
+            agent::rebuild_agent(ctx).await;
             render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
             ctx.renderer.write_line(
                 &format!("changed directory to {}", ctx.session.working_dir),

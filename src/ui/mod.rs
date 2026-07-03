@@ -2601,24 +2601,24 @@ pub async fn run_interactive(
                                                 guard.set_working_dir(&session.working_dir);
                                             }
                                             context.reload();
-                                            let model = client.completion_model(session.model.to_string());
-                                            agent = crate::provider::build_agent(
-                                                model,
+                                            crate::ui::slash::rebuild_agent_parts(
+                                                &mut agent,
+                                                &client,
+                                                session,
                                                 cli,
                                                 cfg,
                                                 context,
-                                                permission.clone(),
-                                                ask_tx.clone(),
-                                                question_tx.clone(),
-                                                plan_tx.clone(),
-                                                bg_store.clone(),
-                                                                                                #[cfg(feature = "lsp")]
-                                                                                                lsp_manager.clone(),
-                                                sandbox.clone(),
+                                                &permission,
+                                                &ask_tx,
+                                                &question_tx,
+                                                &plan_tx,
+                                                &bg_store,
+                                                &sandbox,
                                                 #[cfg(feature = "mcp")] mcp_manager.as_ref(),
                                                 #[cfg(feature = "semantic")] semantic_manager,
-                                                Some(session.id.to_string()),
-                                            ).await;
+                                                #[cfg(feature = "lsp")] lsp_manager.as_ref(),
+                                            )
+                                            .await;
                                             render_session(&mut renderer, session, cli, cfg, context)?;
                                             renderer.write_line(
                                                 &format!("returned to main repo at {}", main_path),
