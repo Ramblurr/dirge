@@ -970,13 +970,16 @@ mod tests {
     }
 
     #[test]
-    fn openai_oauth_fallback_maps_openai_default_model_to_codex_default() {
+    fn openai_oauth_fallback_builds_a_codex_client_and_passes_the_name_through() {
         let client = create_client_with("openai", None, &HashMap::new(), no_env, || {
             Ok(Some(oauth("oauth-token")))
         })
         .unwrap();
 
-        let model = client.completion_model(crate::provider::default_model_for("openai"));
+        // completion_model no longer remaps (dirge-ovjk) — the Codex default
+        // is resolved upstream by resolve_model_name. Here the OAuth fallback
+        // still builds a Codex *client*; the name passes through verbatim.
+        let model = client.completion_model("gpt-5.5");
 
         match model {
             crate::provider::AnyModel::OpenAICodex(model) => {
@@ -984,6 +987,31 @@ mod tests {
             }
             _ => panic!("OAuth fallback must build a ChatGPT Codex model"),
         }
+    }
+
+    #[test]
+    fn resolve_model_name_ties_provenance_to_a_real_codex_client() {
+        use crate::provider::resolve_model_name;
+
+        // A Dirge OAuth fallback builds a Codex client.
+        let codex = create_client_with("openai", None, &HashMap::new(), no_env, || {
+            Ok(Some(oauth("oauth-token")))
+        })
+        .unwrap();
+        assert!(codex.is_codex());
+        // Defaulted OpenAI id -> Codex default; explicit gpt-4o preserved
+        // (dirge-ovjk); a non-default name is untouched.
+        assert_eq!(resolve_model_name(&codex, "gpt-4o", false), "gpt-5.5");
+        assert_eq!(resolve_model_name(&codex, "gpt-4o", true), "gpt-4o");
+        assert_eq!(resolve_model_name(&codex, "o3", false), "o3");
+
+        // A plain API-key OpenAI client is not Codex — never remapped.
+        let plain = create_client_with("openai", Some("sk-test"), &HashMap::new(), no_env, || {
+            Ok(None)
+        })
+        .unwrap();
+        assert!(!plain.is_codex());
+        assert_eq!(resolve_model_name(&plain, "gpt-4o", false), "gpt-4o");
     }
 
     #[test]

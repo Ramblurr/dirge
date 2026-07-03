@@ -52,6 +52,21 @@ fn openai_api_billing_fallback_key(cli: &Cli) -> Option<&str> {
         .or_else(|| cli.api_key.as_deref().filter(|key| !key.is_empty()))
 }
 
+/// dirge-ovjk: resolve the model name for a role provider's client. `entry.model`
+/// carries the explicit-vs-default signal (Some = the user set it), so a
+/// codex-authed role provider with no model still resolves to the Codex default
+/// while an explicit `gpt-4o` is honored — the same rule the main session model
+/// follows. Every role-client site (critic, review, escalation, summarization,
+/// subagent, approval) goes through here so `completion_model` never has to
+/// remap.
+fn resolve_entry_model_name(client: &AnyClient, alias: &str, entry: &ProviderEntry) -> String {
+    let requested = entry
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model_for_entry(alias, entry).to_string());
+    super::resolve_model_name(client, &requested, entry.model.is_some())
+}
+
 #[cfg(test)]
 pub fn create_client(
     provider_name: &str,
@@ -390,10 +405,7 @@ pub async fn build_agent(
                 match create_role_client(&alias, &providers, cfg.auth) {
                     Ok(raw_client) => {
                         let client = std::sync::Arc::new(raw_client);
-                        let model_name = entry
-                            .model
-                            .clone()
-                            .unwrap_or_else(|| default_model_for_entry(&alias, &entry).to_string());
+                        let model_name = resolve_entry_model_name(&client, &alias, &entry);
                         // Goal gate: always wired (fires only with --goal),
                         // judged under its OWN fixed preamble — decoupled
                         // from any critic override.
@@ -591,10 +603,7 @@ fn build_escalation_stream_fn(
     use crate::agent::agent_loop::{loop_tool_to_rig_definition, retrying_stream_fn};
     use crate::agent::recovery::RecoveryPolicy;
     let client = create_role_client(alias, providers, default_auth)?;
-    let model_name = entry
-        .model
-        .clone()
-        .unwrap_or_else(|| default_model_for_entry(alias, entry).to_string());
+    let model_name = resolve_entry_model_name(&client, alias, entry);
     let model = client.completion_model(model_name);
     let tool_defs: Vec<rig::completion::ToolDefinition> = loop_tools
         .iter()
@@ -666,10 +675,7 @@ pub(crate) fn build_compaction_model(
                     if matches!(&client, AnyClient::AnthropicOauth(_)) {
                         anyhow::bail!(ANTHROPIC_OAUTH_COMPACTION_DISABLED);
                     }
-                    let model_name = entry
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| default_model_for_entry(&alias, &entry).to_string());
+                    let model_name = resolve_entry_model_name(&client, &alias, &entry);
                     tracing::info!(
                         target: "dirge::provider",
                         alias = %alias,
@@ -727,10 +733,7 @@ pub(crate) fn build_summarize_fn(
                     if matches!(&client, AnyClient::AnthropicOauth(_)) {
                         return anthropic_oauth_compaction_disabled_fn();
                     }
-                    let model_name = entry
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| default_model_for_entry(&alias, &entry).to_string());
+                    let model_name = resolve_entry_model_name(&client, &alias, &entry);
                     let model = client.completion_model(model_name);
                     tracing::info!(
                         target: "dirge::provider",
@@ -769,10 +772,7 @@ fn resolve_subagent_model(cfg: &Config) -> Option<AnyModel> {
     }
     match create_role_client(&alias, &cfg.providers_map(), cfg.auth) {
         Ok(client) => {
-            let model_name = entry
-                .model
-                .clone()
-                .unwrap_or_else(|| default_model_for_entry(&alias, &entry).to_string());
+            let model_name = resolve_entry_model_name(&client, &alias, &entry);
             tracing::info!(
                 target: "dirge::provider",
                 alias = %alias,
@@ -807,10 +807,7 @@ pub fn build_approval_fn(
         parse_decision,
     };
     let client = std::sync::Arc::new(create_role_client(alias, providers, default_auth)?);
-    let model_name = entry
-        .model
-        .clone()
-        .unwrap_or_else(|| default_model_for_entry(alias, entry).to_string());
+    let model_name = resolve_entry_model_name(&client, alias, entry);
     Ok(std::sync::Arc::new(move |req: ApprovalRequest| {
         let client = client.clone();
         let model_name = model_name.clone();
@@ -845,10 +842,7 @@ fn build_review_stream_fn(
 ) -> anyhow::Result<(crate::agent::agent_loop::StreamFn, String)> {
     use crate::agent::agent_loop::loop_tool_to_rig_definition;
     let client = create_role_client(alias, providers, default_auth)?;
-    let model_name = entry
-        .model
-        .clone()
-        .unwrap_or_else(|| default_model_for_entry(alias, entry).to_string());
+    let model_name = resolve_entry_model_name(&client, alias, entry);
     let model = client.completion_model(model_name.clone());
     // Review path uses ONLY memory + skill — match what
     // `spawn_review_runner_with_cache` puts in `cfg.tools` so

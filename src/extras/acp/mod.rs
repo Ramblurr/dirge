@@ -315,7 +315,8 @@ async fn run_prompt(
         .cfg
         .resolve_role(crate::config::ConfigRole::Default)
         .and_then(|(_, e)| e.model);
-    let model_str = if state.cli.model.is_none() && config_model.is_none() {
+    let model_explicit = state.cli.model.is_some() || config_model.is_some();
+    let model_str = if !model_explicit {
         // dirge-j3jd: resolve the alias's provider TYPE so a custom alias
         // doesn't fall back to the OpenRouter default model id.
         compact_str::CompactString::new(crate::provider::default_model_for_alias(
@@ -329,7 +330,10 @@ async fn run_prompt(
     let client = create_acp_client(&provider_str, &state.cfg)
         .map_err(|e| agent_client_protocol::Error::new(-32603, e.to_string()))?;
 
-    let model = client.completion_model(model_str.to_string());
+    // dirge-ovjk: apply the Codex-default substitution only for a defaulted
+    // model, so an explicit choice is honored here the same as the main path.
+    let model_str = crate::provider::resolve_model_name(&client, &model_str, model_explicit);
+    let model = client.completion_model(model_str.clone());
 
     let (permission, ask_tx) = build_acp_permission(state);
     // Adversarial-review finding #2: ACP used to build its checker

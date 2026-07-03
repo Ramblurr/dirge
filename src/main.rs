@@ -732,7 +732,12 @@ async fn main() -> anyhow::Result<()> {
     let config_model = cfg
         .resolve_role(config::ConfigRole::Default)
         .and_then(|(_, e)| e.model);
-    let model = if cli.model.is_none() && config_model.is_none() {
+    // dirge-ovjk: whether the model was explicitly chosen (via --model or a
+    // provider entry's `model`) vs defaulted. The Codex-default substitution
+    // must fire only for the defaulted case, so an explicit `gpt-4o` under a
+    // Codex login is honored instead of being rewritten to the Codex default.
+    let model_explicit = cli.model.is_some() || config_model.is_some();
+    let model = if !model_explicit {
         // dirge-j3jd: resolve the alias's provider TYPE so a custom alias
         // doesn't fall back to the OpenRouter default model id.
         CompactString::new(provider::default_model_for_alias(
@@ -748,6 +753,10 @@ async fn main() -> anyhow::Result<()> {
         &model,
         cfg.resolve_context_window(model.as_str()),
     );
+    // dirge-ovjk: track whether `session` ends up loaded from disk. A fresh
+    // session has its model resolved from the known explicit-vs-default
+    // signal below; a resumed one keeps the model it was saved with.
+    let mut resumed = false;
 
     if cli.resume && cli.session.is_none() && !cli.continue_session {
         let sessions = session::storage::find_recent_sessions(10)?;
@@ -774,6 +783,7 @@ async fn main() -> anyhow::Result<()> {
             }
             if let Some(s) = sessions.into_iter().next() {
                 session = s;
+                resumed = true;
                 // SESS-8: only warn when a session was actually loaded —
                 // the empty-list branch above leaves the fresh default.
                 warn_on_stale_resume(&session);
@@ -787,6 +797,7 @@ async fn main() -> anyhow::Result<()> {
         && let Some(s) = sessions.into_iter().next()
     {
         session = s;
+        resumed = true;
         // SESS-8: warn on stale cwd/age for -c the same as --session.
         warn_on_stale_resume(&session);
     }
@@ -799,7 +810,10 @@ async fn main() -> anyhow::Result<()> {
         // leaves the older file behind, so resuming by the id the user
         // started with must hop forward to the live state.
         match session::storage::load_session_tip(session_id) {
-            Ok(s) => session = s,
+            Ok(s) => {
+                session = s;
+                resumed = true;
+            }
             Err(_) => {
                 let matches = session::storage::find_sessions_by_prefix(session_id)?;
                 match matches.len() {
@@ -818,6 +832,7 @@ async fn main() -> anyhow::Result<()> {
                     1 => {
                         let m = matches.into_iter().next().expect("len == 1");
                         session = session::storage::load_session_tip(&m.id).unwrap_or(m);
+                        resumed = true;
                     }
                     n => {
                         let ids: Vec<String> =
@@ -1151,6 +1166,38 @@ async fn main() -> anyhow::Result<()> {
         &cfg.providers_map(),
         cfg.auth,
     )?;
+
+    // dirge-ovjk: now that the client is built we know whether it speaks the
+    // Codex subscription backend, and we still know whether the model was
+    // explicit. Resolve the effective model name here — the single place that
+    // has both facts — so an explicit `gpt-4o` under a Codex login is honored
+    // and a *defaulted* OpenAI id becomes the Codex default. This resolved
+    // name drives the startup agent build below AND is stored as the session's
+    // model, which every runtime `completion_model` call site reads; the
+    // per-client remap in `completion_model` is gone.
+    let model = CompactString::new(provider::resolve_model_name(
+        &client,
+        &model,
+        model_explicit,
+    ));
+    if resumed {
+        // A loaded session carries no explicit-vs-default signal. Resolve it as
+        // non-explicit, which reproduces the pre-fix Codex-default mapping for
+        // a session saved as the OpenAI default; a post-fix session saved the
+        // already-resolved name, so it passes through unchanged. Only when the
+        // shim actually remaps do we resize the context window to the new model.
+        let resolved = provider::resolve_model_name(&client, &session.model, false);
+        if resolved != session.model.as_str() {
+            session.context_window = cfg.resolve_context_window(&resolved);
+            session.model = CompactString::new(resolved);
+        }
+    } else {
+        // Fresh session: store the resolved name so every runtime rebuild that
+        // reads `session.model` gets the same already-correct id, and keep the
+        // context window in sync with it.
+        session.model = model.clone();
+        session.context_window = cfg.resolve_context_window(model.as_str());
+    }
 
     // dirge-ykeu Phase 4: pre-resolve user agent profiles into subagent
     // routes (model + system prompt) and install them process-globally so the

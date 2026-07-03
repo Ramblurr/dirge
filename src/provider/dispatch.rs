@@ -36,17 +36,26 @@ pub enum AnyClient {
 }
 
 impl AnyClient {
+    /// Whether this client speaks the ChatGPT/Codex subscription backend.
+    /// Only these two variants map the OpenAI default model id to the Codex
+    /// subscription default (dirge-ovjk).
+    pub(crate) fn is_codex(&self) -> bool {
+        matches!(
+            self,
+            AnyClient::ChatGptOpenAI(_) | AnyClient::OpenAICodex(_)
+        )
+    }
+
     pub fn completion_model(&self, name: impl Into<String>) -> AnyModel {
         let name = name.into();
         match self {
             AnyClient::OpenRouter(c) => AnyModel::OpenRouter(c.completion_model(name)),
             AnyClient::OpenAI(c) => AnyModel::OpenAI(c.completion_model(name)),
-            AnyClient::ChatGptOpenAI(c) => {
-                AnyModel::ChatGptOpenAI(c.completion_model(codex_model_name(name)))
-            }
-            AnyClient::OpenAICodex(c) => {
-                AnyModel::OpenAICodex(c.completion_model(codex_model_name(name)))
-            }
+            // The Codex subscription default is resolved upstream by
+            // `resolve_model_name` (dirge-ovjk) and stored as the session's
+            // model, so `name` already carries the right id here — no remap.
+            AnyClient::ChatGptOpenAI(c) => AnyModel::ChatGptOpenAI(c.completion_model(name)),
+            AnyClient::OpenAICodex(c) => AnyModel::OpenAICodex(c.completion_model(name)),
             AnyClient::Anthropic(c) => AnyModel::Anthropic(c.completion_model(name)),
             AnyClient::AnthropicOauth(c) => AnyModel::AnthropicOauth(c.completion_model(name)),
             AnyClient::Gemini(c) => AnyModel::Gemini(c.completion_model(name)),
@@ -131,11 +140,70 @@ pub(crate) async fn run_compaction(model: AnyModel, prompt_text: String) -> anyh
     Ok(prompt::strip_compaction_delimiters(&response))
 }
 
-fn codex_model_name(name: String) -> String {
-    if name == super::default_model_for("openai") {
+/// Resolve the effective model name for `client`, substituting the Codex
+/// subscription default for the OpenAI default id — but ONLY when the model
+/// was not explicitly chosen (dirge-ovjk).
+///
+/// This is the single place that knows an explicit `gpt-4o` (a user who
+/// typed `--model gpt-4o` / `/model gpt-4o`) from a *defaulted* `gpt-4o` (no
+/// model set, so the OpenAI default was filled in). The old `codex_model_name`
+/// remap ran inside `completion_model`, downstream of that distinction, so it
+/// rewrote an explicit `gpt-4o` to `gpt-5.5` with no way to tell the two
+/// apart. Resolving here, where `explicit` is still known, and storing the
+/// result as the session's model gives every `completion_model` call site a
+/// single already-correct name to pass through.
+pub(crate) fn resolve_model_name(client: &AnyClient, requested: &str, explicit: bool) -> String {
+    resolve_codex_default(client.is_codex(), requested, explicit)
+}
+
+/// Pure core of [`resolve_model_name`]: the Codex default applies only to a
+/// non-explicit OpenAI default id on a Codex client; everything else is the
+/// requested name verbatim.
+fn resolve_codex_default(is_codex: bool, requested: &str, explicit: bool) -> String {
+    if !explicit && is_codex && requested == super::default_model_for("openai") {
         OPENAI_CODEX_OAUTH_DEFAULT_MODEL.to_string()
     } else {
-        name
+        requested.to_string()
+    }
+}
+
+#[cfg(test)]
+mod resolve_model_name_tests {
+    use super::*;
+
+    // The whole remap hinges on this identity — guard the premise so a change
+    // to the OpenAI default can't silently make the matrix below vacuous.
+    #[test]
+    fn openai_default_is_the_id_that_gets_remapped() {
+        assert_eq!(super::super::default_model_for("openai"), "gpt-4o");
+    }
+
+    #[test]
+    fn defaulted_openai_id_under_codex_becomes_the_codex_default() {
+        assert_eq!(
+            resolve_codex_default(true, "gpt-4o", false),
+            OPENAI_CODEX_OAUTH_DEFAULT_MODEL
+        );
+    }
+
+    #[test]
+    fn explicit_gpt_4o_under_codex_is_preserved() {
+        // dirge-ovjk: the bug. An explicit choice must never be rewritten,
+        // even when it happens to equal the OpenAI default id.
+        assert_eq!(resolve_codex_default(true, "gpt-4o", true), "gpt-4o");
+    }
+
+    #[test]
+    fn non_default_model_under_codex_is_verbatim_either_way() {
+        assert_eq!(resolve_codex_default(true, "o3", false), "o3");
+        assert_eq!(resolve_codex_default(true, "o3", true), "o3");
+    }
+
+    #[test]
+    fn non_codex_clients_never_remap() {
+        assert_eq!(resolve_codex_default(false, "gpt-4o", false), "gpt-4o");
+        assert_eq!(resolve_codex_default(false, "gpt-4o", true), "gpt-4o");
+        assert_eq!(resolve_codex_default(false, "o3", false), "o3");
     }
 }
 
