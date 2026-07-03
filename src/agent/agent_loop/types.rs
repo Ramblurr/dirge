@@ -260,14 +260,6 @@ pub struct LoopConfig {
     /// abuse / rate-limit tracking). Pi `StreamOptions.metadata?`
     /// (types.ts:142).
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
-    /// Request-level timeout (full HTTP request). Separate from
-    /// dirge's per-chunk timeout (`chunk_timeout` on `AnyAgent`)
-    /// which guards individual stream chunks. Pi
-    /// `StreamOptions.timeoutMs?` (types.ts:125). Rig clients
-    /// expose this at client-construction time today; per-request
-    /// override is not yet wired — field present so future
-    /// commits can honor it without another LoopConfig change.
-    pub request_timeout: Option<std::time::Duration>,
 
     /// Provider name passed to the `getApiKey` hook so a single
     /// hook implementation can resolve keys for multiple
@@ -534,7 +526,6 @@ impl std::fmt::Debug for LoopConfig {
             .field("thinking_budgets", &self.thinking_budgets)
             .field("headers", &self.headers)
             .field("metadata", &self.metadata)
-            .field("request_timeout", &self.request_timeout)
             .field("provider_name", &self.provider_name)
             .field("model_name", &self.model_name)
             .field("compact_model", &self.compact_model)
@@ -602,7 +593,6 @@ impl Clone for LoopConfig {
             thinking_budgets: self.thinking_budgets.clone(),
             headers: self.headers.clone(),
             metadata: self.metadata.clone(),
-            request_timeout: self.request_timeout,
             provider_name: self.provider_name.clone(),
             model_name: self.model_name.clone(),
             compact_model: self.compact_model.clone(),
@@ -653,7 +643,6 @@ impl LoopConfig {
             thinking_budgets: None,
             headers: std::collections::HashMap::new(),
             metadata: std::collections::HashMap::new(),
-            request_timeout: None,
             provider_name: None,
             model_name: None,
             compact_model: None,

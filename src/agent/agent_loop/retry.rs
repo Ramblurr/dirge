@@ -57,10 +57,10 @@ use super::stream::StreamFn;
 use super::tool::AbortSignal;
 
 /// Graceful-recovery nudge reinjected (once per run) when a request times out
-/// mid-stream. dirge's `request_timeout` already aborts a stuck/hung stream and
-/// triggers a retry, but a blind retry can stall the same way (e.g. the model
-/// stuck in a long reasoning loop). Reinjecting a "conclude and act" directive
-/// gives it a chance to break out instead of repeating the stall.
+/// mid-stream. A mid-assembly stream-chunk timeout aborts a stuck/hung stream
+/// and triggers a retry, but a blind retry can stall the same way (e.g. the
+/// model stuck in a long reasoning loop). Reinjecting a "conclude and act"
+/// directive gives it a chance to break out instead of repeating the stall.
 const STALL_RECOVERY_NUDGE: &str = "Your previous response did not complete in time — you may have been stuck in a long reasoning loop. Stop deliberating: state your conclusion concisely and take the next concrete action (a tool call, or your final answer) now.";
 
 /// Whether `msg` looks like a stall timeout the nudge can help break
@@ -72,7 +72,12 @@ const STALL_RECOVERY_NUDGE: &str = "Your previous response did not complete in t
 /// reasoning loop" there is mis-attributed, so the retry re-runs clean.
 fn is_stall_timeout(msg: &str) -> bool {
     let l = msg.to_ascii_lowercase();
-    (l.contains("timeout") || l.contains("timed out")) && !l.contains("connection silently dropped")
+    (l.contains("timeout") || l.contains("timed out"))
+        && !l.contains("connection silently dropped")
+        // A request-establish timeout is a connection/handshake stall, not a
+        // reasoning-loop stall — the "conclude now" nudge would misattribute
+        // it (same reasoning as the silently-dropped case above, dirge-u44q).
+        && !l.contains("establish")
 }
 
 /// Wrap an inner `StreamFn` with retry-on-transient-error
@@ -900,5 +905,50 @@ mod tests {
             !has_stall_nudge(&recorded[1]),
             "transport stream-chunk timeout is not a reasoning-loop stall — no nudge"
         );
+    }
+
+    #[tokio::test]
+    async fn request_establish_timeout_retries_without_a_stall_nudge() {
+        // dirge-u44q: a request-establish timeout is a connection/handshake
+        // stall, not a reasoning loop. It retries (classified Network) but
+        // must NOT get the "conclude now" nudge.
+        let (factory, seen) = recording_factory(
+            "request establish timed out after 300s — the connection/handshake stalled before \
+             the first response. Bump `timeouts.request_establish_secs` in config.json if a \
+             legitimately slow first response was cut off.",
+        );
+        let wrapped = retrying_stream_fn(factory, RecoveryPolicy::default());
+        let _ = drain(wrapped(
+            ctx(),
+            crate::agent::agent_loop::StreamOptions::from_signal(AbortSignal::new()),
+        ))
+        .await;
+        let recorded = seen.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "pre-commit establish timeout still retries"
+        );
+        assert!(
+            !has_stall_nudge(&recorded[1]),
+            "establish timeout is a connection stall — no reasoning-loop nudge"
+        );
+    }
+
+    #[test]
+    fn is_stall_timeout_excludes_connection_stalls() {
+        // Mid-assembly reasoning stall — nudge helps.
+        assert!(is_stall_timeout(
+            "stream chunk timed out after 60s while a tool call was mid-assembly"
+        ));
+        // Connection-level stalls — nudge would misattribute.
+        assert!(!is_stall_timeout(
+            "stream chunk timed out (provider stalled or connection silently dropped)"
+        ));
+        assert!(!is_stall_timeout(
+            "request establish timed out after 300s — the connection/handshake stalled"
+        ));
+        // Non-timeout errors are never stalls.
+        assert!(!is_stall_timeout("503 service unavailable"));
     }
 }

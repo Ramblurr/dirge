@@ -197,6 +197,7 @@ pub struct ToolsConfig {
 #[serde(default)]
 pub struct TimeoutsConfig {
     pub stream_chunk_secs: Option<u64>,
+    pub request_establish_secs: Option<u64>,
     pub tool_call_gap_secs: Option<u64>,
     pub mcp_call_secs: Option<u64>,
     pub mcp_init_secs: Option<u64>,
@@ -851,6 +852,7 @@ impl Config {
         };
         crate::timeout::Timeouts {
             stream_chunk: or_default(c.stream_chunk_secs, d.stream_chunk),
+            request_establish: or_default(c.request_establish_secs, d.request_establish),
             tool_call_gap: or_default(c.tool_call_gap_secs, d.tool_call_gap),
             mcp_call: or_default(c.mcp_call_secs, d.mcp_call),
             mcp_init: or_default(c.mcp_init_secs, d.mcp_init),
@@ -1362,6 +1364,14 @@ mod tests {
         // Untouched fields keep defaults.
         assert_eq!(t.lsp_request, d.lsp_request);
         assert_eq!(t.mcp_init, d.mcp_init);
+        assert_eq!(t.request_establish, d.request_establish);
+
+        // dirge-u44q: request_establish_secs is a first-class override.
+        let cfg: Config =
+            serde_json::from_str(r#"{ "timeouts": { "request_establish_secs": 90 } }"#).unwrap();
+        let t = cfg.resolve_timeouts();
+        assert_eq!(t.request_establish, std::time::Duration::from_secs(90));
+        assert_eq!(t.stream_chunk, d.stream_chunk);
     }
 
     #[test]

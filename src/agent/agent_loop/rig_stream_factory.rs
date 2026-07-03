@@ -271,18 +271,34 @@ where
         }
         let request = builder.build();
 
-        // 4. Call model.stream; wrap result or emit error.
-        match model.stream(request).await {
-            Ok(response) => {
+        // 4. Call model.stream, bounded by the request-establish deadline.
+        //    This await covers the connection/handshake and the wait for the
+        //    first response event; the per-chunk timeout only guards gaps
+        //    AFTER the stream is live, so a connection that stalls here would
+        //    otherwise hang the run with no bound (dirge-u44q). Read from the
+        //    process-wide resolved timeouts, the same source every other
+        //    consumer uses. The "timed out" wording classifies as a
+        //    retryable Network error so the retry wrapper reconnects.
+        let establish = crate::timeout::Timeouts::get().request_establish;
+        match tokio::time::timeout(establish, model.stream(request)).await {
+            Ok(Ok(response)) => {
                 let mut wrapped = wrap_rig_stream(response, chunk_timeout, Some(opts.signal.clone()));
                 use futures::stream::StreamExt;
                 while let Some(evt) = wrapped.next().await {
                     yield evt;
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 yield StreamEvent::Error {
                     error: format!("rig stream call failed: {e}"),
+                };
+            }
+            Err(_) => {
+                yield StreamEvent::Error {
+                    error: format!(
+                        "request establish timed out after {}s — the connection/handshake stalled before the first response. Bump `timeouts.request_establish_secs` in config.json if a legitimately slow first response was cut off.",
+                        establish.as_secs(),
+                    ),
                 };
             }
         }

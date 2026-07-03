@@ -597,6 +597,7 @@ above is the one exception with richer per-provider precedence;
 | Field | Default | What it bounds |
 |---|---|---|
 | `stream_chunk_secs` | 300 | Per-chunk read deadline for a streaming LLM response (fallback for the per-provider key above) |
+| `request_establish_secs` | 300 | Deadline for establishing a streaming request — the connection/handshake and the wait for the first response event. Distinct from `stream_chunk_secs`, which only guards gaps *between* chunks once the stream is live; a connection that stalls during the handshake never produces a first chunk. A timeout here is retried automatically. Generous by default so it only fires on a genuine stall; lower it for faster failure or raise it if a provider legitimately delays the first response. |
 | `tool_call_gap_secs` | 60 | Stall window while a tool call is mid-assembly in the stream. A timeout here is retried automatically when no response text has been emitted yet (the partial tool call is discarded and the request restarted); if text was already shown, the partial is kept to avoid a duplicated response. Raise it only if your provider legitimately pauses longer than 60s between tool-call deltas. |
 | `mcp_call_secs` | 120 | Total budget for one MCP tool call, including reconnect + retry |
 | `mcp_init_secs` | 10 | MCP server `initialize` handshake |

@@ -61,9 +61,9 @@ pub struct LlmContext {
 ///   - `api_key`: resolved per-call via getApiKey hook (token
 ///     rotation). May change between turns.
 ///   - `reasoning`: per-call (prepareNextTurn can swap the level).
-///   - `thinking_budgets` / `headers` / `metadata` /
-///     `request_timeout`: usually constant per-run; can vary
-///     across calls if prepareNextTurn rewrites config.
+///   - `thinking_budgets` / `headers` / `metadata`: usually
+///     constant per-run; can vary across calls if prepareNextTurn
+///     rewrites config.
 ///   - `signal`: per-call cancellation; same Arc for the whole
 ///     run by convention.
 ///
@@ -79,8 +79,6 @@ pub struct StreamOptions {
     pub thinking_budgets: Option<super::types::ThinkingBudgets>,
     pub headers: std::collections::HashMap<String, String>,
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
-    #[allow(dead_code)]
-    pub request_timeout: Option<std::time::Duration>,
     pub signal: AbortSignal,
 }
 
@@ -95,7 +93,6 @@ impl StreamOptions {
             thinking_budgets: None,
             headers: std::collections::HashMap::new(),
             metadata: std::collections::HashMap::new(),
-            request_timeout: None,
             signal,
         }
     }
@@ -178,7 +175,6 @@ pub async fn stream_assistant_response(
         thinking_budgets: config.thinking_budgets.clone(),
         headers: config.headers.clone(),
         metadata: config.metadata.clone(),
-        request_timeout: config.request_timeout,
         signal,
     };
 
@@ -468,7 +464,6 @@ mod tests {
         config
             .metadata
             .insert("user_id".to_string(), serde_json::json!("u42"));
-        config.request_timeout = Some(std::time::Duration::from_secs(120));
 
         let mut ctx = Context {
             system_prompt: String::new(),
@@ -490,10 +485,6 @@ mod tests {
         assert_eq!(
             opts.metadata.get("user_id"),
             Some(&serde_json::json!("u42")),
-        );
-        assert_eq!(
-            opts.request_timeout,
-            Some(std::time::Duration::from_secs(120))
         );
     }
 

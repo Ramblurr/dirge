@@ -87,6 +87,16 @@ pub struct Timeouts {
     /// reasoning-heavy models that routinely produce 2-4 minute chunk
     /// gaps). Bump via `stream_chunk_timeout_secs` for longer budgets.
     pub stream_chunk: Duration,
+    /// Deadline for establishing a streaming LLM request — the
+    /// `model.stream(request).await` that covers the connection/handshake
+    /// and the wait for the first response event. Distinct from
+    /// [`stream_chunk`](Self::stream_chunk), which only guards gaps
+    /// *between* chunks once the stream is live: a connection that stalls
+    /// during the handshake never produces a first chunk, so without this
+    /// the run would hang unbounded (dirge-u44q). Generous by default so
+    /// it only fires on a genuine stall, never on a slow-but-progressing
+    /// first response; bump via `timeouts.request_establish_secs`.
+    pub request_establish: Duration,
     /// Stall window while a tool call is mid-assembly in the stream.
     pub tool_call_gap: Duration,
     /// Total budget for one MCP tool call, including reconnect + retry.
@@ -103,6 +113,7 @@ pub struct Timeouts {
 
 impl Timeouts {
     pub const DEFAULT_STREAM_CHUNK_SECS: u64 = 300;
+    pub const DEFAULT_REQUEST_ESTABLISH_SECS: u64 = 300;
     pub const DEFAULT_TOOL_CALL_GAP_SECS: u64 = 60;
     pub const DEFAULT_MCP_CALL_SECS: u64 = 120;
     pub const DEFAULT_MCP_INIT_SECS: u64 = 10;
@@ -115,6 +126,7 @@ impl Timeouts {
     /// (`Timeouts::DEFAULT.lsp_request`) instead of redefining the value.
     pub const DEFAULT: Timeouts = Timeouts {
         stream_chunk: Duration::from_secs(Self::DEFAULT_STREAM_CHUNK_SECS),
+        request_establish: Duration::from_secs(Self::DEFAULT_REQUEST_ESTABLISH_SECS),
         tool_call_gap: Duration::from_secs(Self::DEFAULT_TOOL_CALL_GAP_SECS),
         mcp_call: Duration::from_secs(Self::DEFAULT_MCP_CALL_SECS),
         mcp_init: Duration::from_secs(Self::DEFAULT_MCP_INIT_SECS),
@@ -196,6 +208,7 @@ mod tests {
     fn defaults_match_documented_values() {
         let t = Timeouts::DEFAULT;
         assert_eq!(t.stream_chunk, Duration::from_secs(300));
+        assert_eq!(t.request_establish, Duration::from_secs(300));
         assert_eq!(t.tool_call_gap, Duration::from_secs(60));
         assert_eq!(t.mcp_call, Duration::from_secs(120));
         assert_eq!(t.mcp_init, Duration::from_secs(10));

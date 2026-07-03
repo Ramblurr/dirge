@@ -369,7 +369,6 @@ mod tests {
             thinking_budgets: None,
             headers: std::collections::HashMap::new(),
             metadata: std::collections::HashMap::new(),
-            request_timeout: None,
             provider_name: None,
             model_name: None,
             compact_model: None,

@@ -777,6 +777,14 @@ mod tests {
             ErrorKind::Network
         );
         assert_eq!(classify_error("request timed out"), ErrorKind::Network);
+        // dirge-u44q: a request-establish timeout is a connection stall —
+        // retryable so the loop reconnects.
+        assert_eq!(
+            classify_error(
+                "request establish timed out after 300s — the connection/handshake stalled"
+            ),
+            ErrorKind::Network
+        );
         assert_eq!(
             classify_error("503 service unavailable"),
             ErrorKind::Network

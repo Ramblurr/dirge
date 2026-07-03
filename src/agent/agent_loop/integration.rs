@@ -515,7 +515,6 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         thinking_budgets: None,
         headers: std::collections::HashMap::new(),
         metadata: std::collections::HashMap::new(),
-        request_timeout: None,
         provider_name: cfg.provider_name.clone(),
         model_name: cfg.model_name.clone(),
         compact_model: None,
