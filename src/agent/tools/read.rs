@@ -325,6 +325,9 @@ impl Tool for ReadTool {
         let want_hashes = args.line_hashes.unwrap_or(false);
         let want_end = offset.saturating_add(limit);
         let mut first_line = true;
+        // dirge-w9q9: the previous line's full content, threaded into the
+        // predecessor-coupled line hash. None before the first line.
+        let mut prev_full: Option<String> = None;
         // Audit L11: bail out once we've satisfied the requested
         // range plus a tiny buffer for the header's `total_lines`.
         // For a 1GB log with offset=0, limit=100, the previous code
@@ -357,10 +360,23 @@ impl Tool for ReadTool {
             // hash the model sees matches what `edit_lines` recomputes
             // from disk. Only for in-range lines we'll actually show.
             let hash = if want_hashes && in_range {
-                Some(crate::agent::tools::line_hash::line_hash(&line))
+                // Coupled to the predecessor (dirge-w9q9). `prev_full` holds
+                // the previous line's FULL content — tracked for every line
+                // (including those before `offset`) so the first shown line
+                // gets its real predecessor, matching `edit_lines`.
+                Some(crate::agent::tools::line_hash::line_hash(
+                    prev_full.as_deref(),
+                    &line,
+                ))
             } else {
                 None
             };
+            // Capture this line's full content as the next line's predecessor,
+            // before the display truncation below. Only hash-anchored reads
+            // need it, so skip the clone otherwise.
+            if want_hashes {
+                prev_full = Some(line.clone());
+            }
             if line.len() > MAX_LINE_BYTES {
                 // Truncate by byte index — careful to land on a UTF-8
                 // boundary. Drop bytes until we find one.
@@ -739,10 +755,15 @@ mod tests {
             .expect("hashed read succeeds");
         let _ = std::fs::remove_file(&path);
 
-        // Each content line should render as `N hhh: content` where
-        // hhh == line_hash(content).
-        for (content, n) in [("alpha", 1), ("beta", 2), ("gamma", 3)] {
-            let expected = format!("{} {}: {}", n, line_hash(content), content);
+        // Each content line should render as `N hhh: content` where hhh is
+        // the predecessor-coupled hash (dirge-w9q9): line 1 has no
+        // predecessor, lines 2/3 are coupled to the prior line.
+        for (prev, content, n) in [
+            (None, "alpha", 1),
+            (Some("alpha"), "beta", 2),
+            (Some("beta"), "gamma", 3),
+        ] {
+            let expected = format!("{} {}: {}", n, line_hash(prev, content), content);
             assert!(
                 out.lines().any(|l| l.trim_start() == expected),
                 "expected line {expected:?} in output:\n{out}"

@@ -111,7 +111,10 @@ pub(crate) fn apply_line_edit(
     let mut mismatches = Vec::new();
     for (offset, expected) in expected_hashes.iter().enumerate() {
         let line_no = start_line + offset;
-        let actual = line_hash(lines[line_no - 1]);
+        // Predecessor coupling (dirge-w9q9): the real preceding file line,
+        // or None for line 1. Matches how the read tool derived the hash.
+        let prev = (line_no >= 2).then(|| lines[line_no - 2]);
+        let actual = line_hash(prev, lines[line_no - 1]);
         if &actual != expected {
             mismatches.push(format!(
                 "  line {line_no}: expected hash `{expected}`, found `{actual}` — \
@@ -291,11 +294,12 @@ mod tests {
     use crate::agent::tools::line_hash::line_hash;
 
     fn hashes_for(content: &str, start: usize, end: usize) -> Vec<String> {
-        content
-            .lines()
-            .skip(start - 1)
-            .take(end - start + 1)
-            .map(line_hash)
+        let lines: Vec<&str> = content.lines().collect();
+        (start..=end)
+            .map(|line_no| {
+                let prev = (line_no >= 2).then(|| lines[line_no - 2]);
+                line_hash(prev, lines[line_no - 1])
+            })
             .collect()
     }
 
@@ -379,7 +383,7 @@ mod tests {
                 path: tf.path.clone(),
                 start_line: 1,
                 end_line: 1,
-                expected_hashes: vec![line_hash("ok")],
+                expected_hashes: vec![line_hash(None, "ok")],
                 new_text: "OK".to_string(),
             })
             .await
@@ -418,7 +422,7 @@ mod tests {
     fn rejects_on_hash_mismatch_without_mutating() {
         let c = "a\nb\nc\n";
         // Pretend the model read a different content for line 2.
-        let stale = vec![line_hash("OLD_b")];
+        let stale = vec![line_hash(None, "OLD_b")];
         let err = apply_line_edit(c, 2, 2, &stale, "B").unwrap_err();
         assert!(err.contains("line 2"), "got: {err}");
         assert!(err.contains("changed since you read"), "got: {err}");
@@ -427,8 +431,13 @@ mod tests {
     #[test]
     fn reports_every_drifted_line() {
         let c = "a\nb\nc\n";
-        // Both line 1 and line 3 hashes are wrong; line 2 correct.
-        let mixed = vec![line_hash("WRONG"), line_hash("b"), line_hash("ALSO_WRONG")];
+        // Both line 1 and line 3 hashes are wrong; line 2 correct (its real
+        // predecessor-coupled hash: line "b" preceded by "a").
+        let mixed = vec![
+            line_hash(None, "WRONG"),
+            line_hash(Some("a"), "b"),
+            line_hash(None, "ALSO_WRONG"),
+        ];
         let err = apply_line_edit(c, 1, 3, &mixed, "x").unwrap_err();
         assert!(err.contains("line 1"), "got: {err}");
         assert!(err.contains("line 3"), "got: {err}");
@@ -436,9 +445,27 @@ mod tests {
     }
 
     #[test]
+    fn predecessor_drift_is_detected() {
+        // dirge-w9q9: the model read "a\nb\nc\n" and kept line 2's hash,
+        // which is coupled to its predecessor "a". Line 1 then drifted
+        // "a" -> "A" externally. Editing line 2 with the stale hash is now
+        // rejected — line 2's hash depends on its predecessor, so the stale
+        // context is caught. A predecessor-independent single-line hash would
+        // have matched and clobbered.
+        let read = "a\nb\nc\n";
+        let echoed = hashes_for(read, 2, 2);
+        let drifted = "A\nb\nc\n";
+        let err = apply_line_edit(drifted, 2, 2, &echoed, "B").unwrap_err();
+        assert!(err.contains("line 2"), "got: {err}");
+        assert!(err.contains("changed since you read"), "got: {err}");
+        // Bytes untouched on rejection.
+        assert_eq!(drifted, "A\nb\nc\n");
+    }
+
+    #[test]
     fn rejects_wrong_hash_count() {
         let c = "a\nb\nc\n";
-        let err = apply_line_edit(c, 1, 3, &[line_hash("a")], "x").unwrap_err();
+        let err = apply_line_edit(c, 1, 3, &[line_hash(None, "a")], "x").unwrap_err();
         assert!(err.contains("one hash per line"), "got: {err}");
     }
 
