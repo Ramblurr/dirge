@@ -22,6 +22,7 @@ pub mod entity_router;
 #[cfg(feature = "experimental-graph-search")]
 pub mod entity_search;
 
+pub mod content_guard;
 pub mod curator_clock;
 pub mod dirge_paths;
 pub mod fts;

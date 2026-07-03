@@ -30,12 +30,11 @@
 #[allow(unused_imports)]
 use crate::sync_util::LockExt;
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::sync::Mutex;
 
-use regex::Regex;
 use rusqlite::{Connection, params};
 
+use crate::extras::content_guard::{ScanHit, scan_content};
 use crate::extras::dirge_paths::ProjectPaths;
 use crate::extras::salience::{
     DECAY_FLOOR, DEFAULT_CONFIDENCE, DISUSE_DECAY, RECENT_USE_BONUS, RECENT_USE_WINDOW_DAYS,
@@ -263,95 +262,25 @@ fn is_overview_row(row: &ActiveRow) -> bool {
     row.kind == "overview"
 }
 
-// ── Threat scanning (port of Hermes `_MEMORY_THREAT_PATTERNS`) ──────
-
-/// Compiled regex patterns that indicate prompt injection or data
-/// exfiltration attempts in new memory content.
-static THREAT_PATTERNS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
-    vec![
-        (
-            Regex::new(r"(?i)ignore\s+(previous|all|above|prior)\s+instructions").unwrap(),
-            "prompt injection: role override",
-        ),
-        (
-            Regex::new(r"(?i)you\s+are\s+now\s+").unwrap(),
-            "prompt injection: role hijack",
-        ),
-        (
-            Regex::new(r"(?i)do\s+not\s+tell\s+the\s+user").unwrap(),
-            "prompt injection: deception",
-        ),
-        (
-            Regex::new(r"(?i)system\s+prompt\s+override").unwrap(),
-            "prompt injection: system prompt override",
-        ),
-        (
-            Regex::new(r"(?i)disregard\s+(your|all|any)\s+(instructions|rules|guidelines)").unwrap(),
-            "prompt injection: disregard rules",
-        ),
-        (
-            Regex::new(r"(?i)act\s+as\s+(if|though)\s+you\s+(have\s+no|don't\s+have)\s+(restrictions|limits|rules)").unwrap(),
-            "prompt injection: bypass restrictions",
-        ),
-        (
-            Regex::new(r"(?i)curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)").unwrap(),
-            "data exfiltration: curl with secrets",
-        ),
-        (
-            Regex::new(r"(?i)wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)").unwrap(),
-            "data exfiltration: wget with secrets",
-        ),
-        (
-            Regex::new(r"(?i)cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)").unwrap(),
-            "data exfiltration: reading secret files",
-        ),
-        (
-            Regex::new(r"(?i)authorized_keys").unwrap(),
-            "backdoor: SSH authorized_keys",
-        ),
-        (
-            Regex::new(r"\$(HOME|HOME)/\.ssh|~/\.ssh").unwrap(),
-            "backdoor: SSH access",
-        ),
-    ]
-});
-
-/// Invisible Unicode characters that indicate injection attempts.
-const INVISIBLE_CHARS: &[char] = &[
-    '\u{200b}', // zero-width space
-    '\u{200c}', // zero-width non-joiner
-    '\u{200d}', // zero-width joiner
-    '\u{2060}', // word joiner
-    '\u{feff}', // BOM / zero-width no-break space
-    '\u{202a}', // left-to-right embedding
-    '\u{202b}', // right-to-left embedding
-    '\u{202c}', // pop directional formatting
-    '\u{202d}', // left-to-right override
-    '\u{202e}', // right-to-left override
-];
+// Threat patterns + the invisible-Unicode set now live in `content_guard`;
+// `scan_for_threats` below delegates to `content_guard::scan_content` so the
+// memory and skills stores share one unioned pattern set.
 
 /// Scan content for prompt injection, exfiltration, and invisible
 /// Unicode patterns. Returns an error describing the threat if any
 /// pattern matches.
 pub fn scan_for_threats(content: &str) -> Result<(), String> {
-    for ch in INVISIBLE_CHARS {
-        if content.contains(*ch) {
-            return Err(format!(
-                "Security scan rejected content: invisible unicode character U+{:04X} detected",
-                *ch as u32
-            ));
-        }
-    }
-    for (re, description) in THREAT_PATTERNS.iter() {
-        if re.is_match(content) {
-            return Err(format!(
-                "Security scan rejected content: {} — matched '{}'",
-                description,
-                truncate_for_error(content)
-            ));
-        }
-    }
-    Ok(())
+    scan_content(content).map_err(|hit| match hit {
+        ScanHit::Invisible(ch) => format!(
+            "Security scan rejected content: invisible unicode character U+{:04X} detected",
+            ch as u32
+        ),
+        ScanHit::Pattern(description) => format!(
+            "Security scan rejected content: {} — matched '{}'",
+            description,
+            truncate_for_error(content)
+        ),
+    })
 }
 
 fn truncate_for_error(s: &str) -> String {
