@@ -499,6 +499,10 @@ impl std::fmt::Debug for LoopConfig {
                 "transform_context",
                 &self.transform_context.as_ref().map(|_| "<fn>"),
             )
+            .field(
+                "compaction_hooks",
+                &self.compaction_hooks.as_ref().map(|_| "<hooks>"),
+            )
             .field("get_api_key", &self.get_api_key.as_ref().map(|_| "<fn>"))
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
             .field("tool_execution", &self.tool_execution)
@@ -534,6 +538,10 @@ impl std::fmt::Debug for LoopConfig {
             .field("provider_name", &self.provider_name)
             .field("model_name", &self.model_name)
             .field("compact_model", &self.compact_model)
+            .field("storm_mutating_tools", &self.storm_mutating_tools)
+            .field("storm_exempt_tools", &self.storm_exempt_tools)
+            .field("repair_stats", &self.repair_stats)
+            .field("truncation_notes", &self.truncation_notes)
             .field(
                 "tool_def_filter",
                 &self.tool_def_filter.as_ref().map(|_| "<set>"),
@@ -564,6 +572,10 @@ impl std::fmt::Debug for LoopConfig {
             )
             .field("verifier", &self.verifier.as_ref().map(|_| "<gate>"))
             .field("critic_fn", &self.critic_fn.as_ref().map(|_| "<critic>"))
+            .field(
+                "code_review_fn",
+                &self.code_review_fn.as_ref().map(|_| "<reviewer>"),
+            )
             .field("goal_fn", &self.goal_fn.as_ref().map(|_| "<judge>"))
             .field("goal", &self.goal)
             .field("max_turns", &self.max_turns)
@@ -612,6 +624,59 @@ impl Clone for LoopConfig {
             goal_fn: self.goal_fn.clone(),
             goal: self.goal.clone(),
             max_turns: self.max_turns,
+        }
+    }
+}
+
+#[cfg(test)]
+impl LoopConfig {
+    /// Test-only constructor: every field at its default / `None`,
+    /// except `convert_to_llm` which tests must always supply. Keeps
+    /// the stream.rs test suite (and any other module) from
+    /// hand-maintaining a ~45-field struct literal that drifts every
+    /// time `LoopConfig` gains a field. dirge-6bcu.
+    pub fn for_tests(convert: ConvertToLlmFn) -> Self {
+        LoopConfig {
+            convert_to_llm: convert,
+            transform_context: None,
+            compaction_hooks: None,
+            get_api_key: None,
+            api_key: None,
+            tool_execution: ToolExecutionMode::Parallel,
+            before_tool_call: None,
+            after_tool_call: None,
+            prepare_next_turn: None,
+            should_stop_after_turn: None,
+            get_steering_messages: None,
+            get_followup_messages: None,
+            reasoning: None,
+            thinking_budgets: None,
+            headers: std::collections::HashMap::new(),
+            metadata: std::collections::HashMap::new(),
+            request_timeout: None,
+            provider_name: None,
+            model_name: None,
+            compact_model: None,
+            storm_mutating_tools: None,
+            storm_exempt_tools: None,
+            repair_stats: std::sync::Arc::new(super::tool_input_repair::RepairStats::new()),
+            truncation_notes: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            tool_def_filter: None,
+            dynamic_tool_search: false,
+            escalation_stream_fn: None,
+            escalation_provider_name: None,
+            escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            escalation_max_per_session: 3,
+            escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
+            file_touch_tracker: None,
+            verifier: None,
+            critic_fn: None,
+            code_review_fn: None,
+            goal_fn: None,
+            goal: None,
+            max_turns: None,
         }
     }
 }
@@ -714,5 +779,31 @@ mod tests {
         assert!(upd.context.is_none());
         assert!(upd.model.is_none());
         assert!(upd.thinking_level.is_none());
+    }
+
+    /// dirge-6bcu: the manual `Debug` impl must enumerate EVERY
+    /// field of `LoopConfig`. Several fields were silently dropped,
+    /// so debug logs under-reported the config. This guards
+    /// completeness — if a future field is added to the struct, add
+    /// its name here so it can't quietly disappear from `{:?}`.
+    #[test]
+    fn loop_config_debug_includes_all_fields() {
+        let convert: ConvertToLlmFn = std::sync::Arc::new(|m: &[serde_json::Value]| m.to_vec());
+        let config = LoopConfig::for_tests(convert);
+        let rendered = format!("{config:?}");
+        // Fields that were historically omitted from the Debug impl.
+        for field in [
+            "code_review_fn",
+            "compaction_hooks",
+            "storm_mutating_tools",
+            "storm_exempt_tools",
+            "truncation_notes",
+            "repair_stats",
+        ] {
+            assert!(
+                rendered.contains(field),
+                "Debug impl omits `{field}`\noutput: {rendered}"
+            );
+        }
     }
 }

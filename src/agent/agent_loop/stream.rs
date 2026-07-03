@@ -424,50 +424,7 @@ mod tests {
     }
 
     fn build_config(convert: ConvertToLlmFn) -> LoopConfig {
-        LoopConfig {
-            convert_to_llm: convert,
-            transform_context: None,
-            compaction_hooks: None,
-            get_api_key: None,
-            api_key: None,
-            tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
-            before_tool_call: None,
-            after_tool_call: None,
-            prepare_next_turn: None,
-            should_stop_after_turn: None,
-            get_steering_messages: None,
-            get_followup_messages: None,
-            reasoning: None,
-            thinking_budgets: None,
-            headers: std::collections::HashMap::new(),
-            metadata: std::collections::HashMap::new(),
-            request_timeout: None,
-            provider_name: None,
-            model_name: None,
-            compact_model: None,
-            storm_mutating_tools: None,
-            storm_exempt_tools: None,
-            repair_stats: std::sync::Arc::new(
-                crate::agent::agent_loop::tool_input_repair::RepairStats::new(),
-            ),
-            truncation_notes: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            tool_def_filter: None,
-            dynamic_tool_search: false,
-            escalation_stream_fn: None,
-            escalation_provider_name: None,
-            escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            escalation_max_per_session: 3,
-            escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
-            file_touch_tracker: None,
-            verifier: None,
-            critic_fn: None,
-            code_review_fn: None,
-            goal_fn: None,
-            goal: None,
-            max_turns: None,
-        }
+        LoopConfig::for_tests(convert)
     }
 
     /// Port of pi test 84 ("should emit events with AgentMessage
@@ -732,50 +689,8 @@ mod tests {
             messages.to_vec()
         });
 
-        let config = LoopConfig {
-            convert_to_llm: convert,
-            transform_context: Some(transform),
-            compaction_hooks: None,
-            get_api_key: None,
-            api_key: None,
-            tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
-            before_tool_call: None,
-            after_tool_call: None,
-            prepare_next_turn: None,
-            should_stop_after_turn: None,
-            get_steering_messages: None,
-            get_followup_messages: None,
-            reasoning: None,
-            thinking_budgets: None,
-            headers: std::collections::HashMap::new(),
-            metadata: std::collections::HashMap::new(),
-            request_timeout: None,
-            provider_name: None,
-            model_name: None,
-            compact_model: None,
-            storm_mutating_tools: None,
-            storm_exempt_tools: None,
-            repair_stats: std::sync::Arc::new(
-                crate::agent::agent_loop::tool_input_repair::RepairStats::new(),
-            ),
-            truncation_notes: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            tool_def_filter: None,
-            dynamic_tool_search: false,
-            escalation_stream_fn: None,
-            escalation_provider_name: None,
-            escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            escalation_max_per_session: 3,
-            escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
-            file_touch_tracker: None,
-            verifier: None,
-            critic_fn: None,
-            code_review_fn: None,
-            goal_fn: None,
-            goal: None,
-            max_turns: None,
-        };
+        let mut config = LoopConfig::for_tests(convert);
+        config.transform_context = Some(transform);
         let signal = AbortSignal::new();
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);
 
