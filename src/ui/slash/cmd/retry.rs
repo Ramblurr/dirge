@@ -26,8 +26,11 @@ pub(crate) async fn cmd_retry(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
                     break;
                 }
             }
-            ctx.input.buffer = msg.content.clone();
-            ctx.input.cursor = msg.content.len();
+            // set_text (not raw buffer/cursor pokes) so the paste-table,
+            // kill-ring, and history-draft resets fire — otherwise stale paste
+            // placeholders from the prior draft linger after /retry (dirge-nyr7,
+            // matches how /fork loads its text).
+            ctx.input.set_text(&msg.content);
             render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
             ctx.renderer
                 .write_line("edit last message and press Enter to retry", c_agent())?;
