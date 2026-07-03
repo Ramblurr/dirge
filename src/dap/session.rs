@@ -719,7 +719,10 @@ impl DapSessionManager {
         // on the mutex for this continue's full timeout — the one window where
         // pause is meaningful. Take the receivers out and release the lock so
         // concurrent requests (pause, evaluate) can reach the adapter.
-        let mut receivers = {
+        // dirge-8gdv: capture the session identity under the lock so phase 3 can
+        // detect that a launch/attach replaced `active` while we were parked,
+        // and refuse to restore our stale receivers into the new session.
+        let (mut receivers, session_id) = {
             let mut active = self.active.lock().await;
             let session = active
                 .as_mut()
@@ -753,7 +756,11 @@ impl DapSessionManager {
 
             session.status = SessionStatus::Running;
             session.stop_wait_in_flight = true;
-            std::mem::replace(&mut session.events, EventReceivers::dead())
+            let session_id = session.id.clone();
+            (
+                std::mem::replace(&mut session.events, EventReceivers::dead()),
+                session_id,
+            )
         };
 
         // Phases 2+3 run in a spawned task so they survive caller drop: the
@@ -787,6 +794,18 @@ impl DapSessionManager {
             let session = active
                 .as_mut()
                 .ok_or_else(|| ToolError::Msg("debug session ended during continue".into()))?;
+            // dirge-8gdv: if a launch/attach replaced the active session while
+            // we were parked, the session now in `active` is a different one.
+            // Restoring our (taken, now-stale) receivers into it would clobber
+            // the new session's live event channels and stomp its
+            // stop_wait_in_flight/status — it would then never see another
+            // event. Bail instead: drop the stale receivers and leave the
+            // replacement untouched.
+            if session.id != session_id {
+                return Err(ToolError::Msg(
+                    "debug session replaced during continue".into(),
+                ));
+            }
             session.events = receivers;
             session.stop_wait_in_flight = false;
 
@@ -2262,6 +2281,122 @@ mod tests {
         release_tx.send(()).unwrap();
         let outcome = cont.await.unwrap().unwrap();
         assert_eq!(outcome.stop_reason.as_deref(), Some("breakpoint"));
+    }
+
+    /// dirge-8gdv: a `continue_` parked in phase 2 must not, in phase 3,
+    /// restore its taken receivers / clear `stop_wait_in_flight` / record the
+    /// stop into a session that was replaced (launch/attach) while it was
+    /// parked. Phase 3 must check session identity and bail when the active
+    /// session is no longer the one the continue started under — otherwise it
+    /// overwrites the new session's live event receivers with the old client's
+    /// channels and the new session never sees another event.
+    #[tokio::test]
+    async fn continue_does_not_clobber_a_replacement_session() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mgr = std::sync::Arc::new(DapSessionManager::new());
+        let signal = AbortSignal::new();
+        let client = client_with_free_running_adapter(release_rx);
+
+        // Install session #1 (id "dap-1"), stopped on entry.
+        mgr.launch_with_client(
+            "fake-adapter",
+            "/tmp",
+            Some("p"),
+            None,
+            &[],
+            Some(true),
+            None,
+            &signal,
+            client,
+            Duration::from_secs(5),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        // Park a continue_ on session #1: the free-running adapter responds to
+        // `continue` and withholds the stop until `release_tx` fires, so phase
+        // 2 parks with the `active` lock released.
+        let mgr2 = mgr.clone();
+        let cont = tokio::spawn(async move {
+            let signal = AbortSignal::new();
+            mgr2.continue_(1, &signal, Duration::from_secs(5)).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // While continue_ is parked, simulate a launch/attach swapping in a
+        // FRESH session with a different id and its own live event receivers.
+        // Take session #1 out of `active` without dropping it so its
+        // client/senders stay alive and the parked continue wakes on the real
+        // stop (not a disconnect) — the race the fix targets.
+        let (stopped_tx_new, stopped_rx_new) = mpsc::unbounded_channel::<StoppedEventBody>();
+        let (_output_tx, output_rx) = mpsc::unbounded_channel();
+        let (_terminated_tx, terminated_rx) = mpsc::unbounded_channel();
+        let (_exited_tx, exited_rx) = mpsc::unbounded_channel();
+        let replacement = DapSession {
+            id: mgr.next_id(), // "dap-2", differs from the parked session's "dap-1"
+            client: client_with_fake_adapter(),
+            status: SessionStatus::Running,
+            breakpoints: HashMap::new(),
+            function_breakpoints: Vec::new(),
+            output: String::new(),
+            output_truncated: false,
+            exit_code: None,
+            events: EventReceivers {
+                stopped: stopped_rx_new,
+                output: output_rx,
+                terminated: terminated_rx,
+                exited: exited_rx,
+            },
+            cached_threads: Vec::new(),
+            cached_frames: Vec::new(),
+            cached_variables: Vec::new(),
+            last_stopped_thread_id: None,
+            languages: Vec::new(),
+            stop_wait_in_flight: false,
+        };
+        let _parked_session = {
+            let mut active = mgr.active.lock().await;
+            let old = active.take();
+            *active = Some(replacement);
+            old
+        };
+
+        // Drive the parked continue_ to completion by releasing session #1's
+        // stop. After the fix it bails on the id mismatch; before the fix it
+        // clobbers the replacement first. The return value is not the point —
+        // the invariant checked below is.
+        release_tx.send(()).unwrap();
+        let _ = cont.await;
+
+        // The replacement session must be completely untouched.
+        let mut active = mgr.active.lock().await;
+        let session = active.as_mut().expect("replacement session still active");
+        assert_eq!(session.id, "dap-2", "replacement id must be unchanged");
+        assert!(
+            !session.stop_wait_in_flight,
+            "replacement's stop_wait_in_flight must stay clear"
+        );
+        assert_eq!(
+            session.status,
+            SessionStatus::Running,
+            "replacement status must be unchanged"
+        );
+        let stop_body: StoppedEventBody = serde_json::from_value(serde_json::json!({
+            "reason": "breakpoint",
+            "threadId": 1
+        }))
+        .unwrap();
+        let send_ok = stopped_tx_new.send(stop_body).is_ok();
+        assert!(
+            send_ok,
+            "replacement's stopped receiver was dropped/clobbered by phase 3"
+        );
+        assert!(
+            session.events.stopped.try_recv().is_ok(),
+            "replacement's live receivers must still receive an event \
+             (phase 3 must not have swapped in the old client's channels)"
+        );
     }
 
     /// Launch handshake, then `continue` (respond, withhold the stop until
