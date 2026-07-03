@@ -14,11 +14,10 @@
 //! daemon/queue/sqlite infrastructure around them is not relevant to an
 //! in-loop reviewer and is deliberately left behind.
 //!
-//! This module (R1) is the PURE core: the preambles, the [`Severity`] /
-//! [`Finding`] types, and the parser. The finalization wiring, the diff
-//! capture, the two-pass verify, and the severity gate land in later
-//! rounds — until then several items here have no non-test caller.
-#![allow(dead_code)]
+//! This module is the PURE core: the preambles, the [`Severity`] /
+//! [`Finding`] types, and the parser. The finalization wiring, diff
+//! capture, two-pass verify, and severity gate are wired around it in
+//! the agent loop.
 
 /// Finding severity, ported from roborev's four-level model. Declared in
 /// ASCENDING order so the derived [`Ord`] makes `Critical` the greatest —
@@ -121,52 +120,12 @@ Judge whether a feature or API exists from the project's toolchain and dependenc
 Do not flag valid recent APIs as broken, and do not miss calls to APIs that genuinely do not \
 exist for the project's versions.";
 
-/// System preamble for the security-focused pass. Ported from roborev's
-/// `default_security.md.gotmpl` — the "exploitability burden of proof"
-/// stance plus its long don't-report list, which is what keeps a security
-/// pass from drowning the user in defense-in-depth noise. Used when the
-/// reviewer runs in security stance (R3+); the format still comes from
-/// [`REVIEW_FORMAT`].
-pub const SECURITY_PREAMBLE: &str = "\
-You are a security code reviewer with an exploitability burden of proof. Review the diff for \
-concrete vulnerabilities, material weakening of security controls, and newly reachable attack \
-surface.\n\
-\n\
-Report an issue only when the changed code affects a real trust boundary, security decision, \
-secret-bearing path, privileged operation, or externally/user-controlled input path. The finding \
-does not need a turnkey exploit, but it must identify a realistic attacker capability, the \
-weakened boundary or control, and the concrete asset or privilege at risk.\n\
-\n\
-Prefer NO finding over generic hardening advice, local-only paranoia, or best-practice \
-commentary without a changed security outcome. Focus on injection, broken auth/authorization, \
-credential exposure, path traversal, unsafe deserialization/patterns, dependency risks the diff \
-introduces, CI/CD workflow injection, sensitive-data handling, security-relevant races/TOCTOU, \
-and information leakage — but do not produce one finding per category.\n\
-\n\
-Only report vulnerabilities with a plausible exploit path visible in the diff. Do NOT report:\n\
-- Theoretical vulnerabilities in code not touched by this change.\n\
-- Generic hardening unrelated to the specific code under review.\n\
-- Missing validation unless the value is attacker-controlled and reaches a security-sensitive \
-sink.\n\
-- Missing encryption/hashing/signing/rate-limiting/audit-logging unless the reviewed code \
-handles sensitive assets and the absence creates a concrete abuse path.\n\
-- Dependency pinning, stale-dependency, or typosquatting concerns unless this diff introduces or \
-changes the dependency and there is specific evidence of risk.\n\
-- Error-message leakage unless the leaked value is sensitive and reachable by an unauthorized \
-actor.\n\
-- CI permission concerns unless untrusted code or input can influence the privileged workflow.\n\
-- Environment-variable exposure unless the reviewed code newly exposes env vars across a trust \
-boundary — returning them in an HTTP response, writing them to user-visible logs, embedding them \
-in generated artifacts, sending them to third-party services, or making them readable by \
-less-privileged users.\n\
-- Process environment variables being readable by local same-user code, child processes, or \
-same-user tooling. Local same-user access is not an attacker boundary by itself — a finding must \
-involve a weaker actor gaining access they did not already have.\n\
-\n\
-Before reporting, verify: who is the attacker or less-privileged actor? What do they control? \
-What boundary or control changed? What can they now access, modify, trigger, or bypass that they \
-could not before? Is this risk introduced or materially worsened by the diff? Drop the finding if \
-those answers are vague or rely only on \"this could be more secure.\"";
+// A security-stance review mode (roborev's `default_security.md.gotmpl`,
+// the "exploitability burden of proof" preamble) was never wired up —
+// the /code-review pass ships the general REVIEW_PREAMBLE only. The
+// constant and its test were intentionally removed rather than left to
+// rot under a blanket allow; reintroduce it if/when a security stance
+// is actually wired.
 
 /// Response-format instruction, carried in the user prompt beside the diff
 /// (mirrors the critic's split: role in the preamble, format next to the
@@ -1151,20 +1110,6 @@ mod tests {
         assert!(p.contains("told not to take"));
         // Toolchain-from-manifest rule survived the port.
         assert!(p.contains("manifest"));
-    }
-
-    #[test]
-    fn security_preamble_has_burden_of_proof() {
-        let p = SECURITY_PREAMBLE.to_ascii_lowercase();
-        assert!(p.contains("exploitability burden of proof"));
-        assert!(p.contains("prefer no finding"));
-        // The same-user env-var carve-out is the highest-value noise filter.
-        assert!(p.contains("same-user"));
-        // The ported don't-report carve-outs that keep the security pass
-        // from flagging routine churn (roborev parity).
-        assert!(p.contains("typosquatting"));
-        assert!(p.contains("error-message leakage"));
-        assert!(p.contains("ci permission"));
     }
 
     #[test]
