@@ -50,6 +50,6 @@ short-circuits before the prompt fires.
 - Symlink swap between check and open: `check_perm_path_resolve`
   canonicalizes the path and the tool opens the canonical form;
   the cwd is also re-canonicalized on each check.
-- Doom-loop: same `tool + input` key counted in a 32-call window;
+- Doom-loop: same `tool + input` key counted in a 6-call window;
   after 3 identical calls the `doom_loop_action` (default `Ask`)
   overrides.
