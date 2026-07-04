@@ -6,6 +6,86 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-03
+
+A large security- and correctness-hardening release: the findings from a
+multi-round internal audit (rounds R1–R8) plus follow-up remediation. Almost
+all of it is bug fixes, robustness, and behavior-preserving refactors; a few
+user-visible behaviors changed for the better (below). No breaking config or
+CLI changes.
+
+### Added
+- `timeouts.request_establish_secs` (default 300) bounds the request-establish
+  phase — the connection/handshake and wait for the first response event — so a
+  stalled connection can't hang a run indefinitely. It sits alongside the other
+  named `timeouts.*` keys and retries as a transient network error.
+
+### Changed
+- An explicit model choice under a ChatGPT/Codex login is now honored. Previously
+  `--model gpt-4o` (or `/model gpt-4o`) was silently rewritten to the Codex
+  subscription default; the explicit-vs-default distinction is now resolved once,
+  up front, and stored on the session — so it survives resume too.
+- `--no-color` now collapses the *entire* TUI (chat, side panels, frames, tool
+  output), not just themed text. Color is stripped at the paint chokepoints, so
+  the ~100 raw color literals that previously leaked are covered.
+- `edit_lines`' staleness hash is now coupled to each line's predecessor. A
+  single line drifting perturbs two adjacent hashes, so slipping a stale edit
+  past the guard needs two independent collisions (~1/16.7M instead of ~1/4096)
+  — with no extra tokens. The first line, and hashes for unchanged regions, are
+  unaffected.
+- Typing while scrolled up in the chat log no longer jumps you to the bottom —
+  you can read back through history while composing. Press Down (when scrolled
+  up) to return to the newest content.
+- Restored `harness/log` as a working plugin debug sink (drains to the host log
+  under `--verbose`/`RUST_LOG`); it had regressed to a no-op.
+
+### Fixed
+- **Auth & providers.** OAuth transport, PKCE state, and refresh-race hardening;
+  a ChatGPT/Codex token-rotation TOCTOU that could freeze an expired bearer for a
+  whole session; the escalation route now runs under the retry policy; retry
+  backoff observes cancellation promptly instead of waiting out the full delay.
+- **Windows.** Path resolution no longer leaks `\\?\` verbatim prefixes, and a
+  brand-new deep file path stays verbatim past MAX_PATH so writes don't fail on
+  machines without the long-path opt-in.
+- **Compaction & context.** Keep-recent is clamped to half the window on
+  small-context models; token totals are recomputed after a fold instead of
+  applying a cross-accounting delta; discovery-anchor, overview-eviction, and
+  duplicate-reasoning fixes; a fold→persist→resume round-trip is now covered by
+  tests.
+- **Debugger & language servers.** DAP pause-vs-continue locking, attach status,
+  and stale stop events; `continue_` is guarded against session replacement while
+  parked. The LSP and DAP clients now share one JSON-RPC correlation core, so the
+  drain-on-close fix lives in one place.
+- **File mutation.** BOM handling, mixed line endings, non-UTF-8 refusal, and
+  correct error propagation from `apply_patch` / result relay.
+- **Plugins.** Multi-line steering/followup messages are escaped (no longer
+  shredded); a per-process error sentinel prevents a plugin result that looks
+  like an internal error marker from being dropped; the renderer registry uses
+  the shared escaped format; deny-tools names are escaped before Janet
+  interpolation.
+- **Skills.** Create/register are transactional; archive failures are logged, not
+  swallowed; recovered file skills reactivate on re-register; a force-deleted
+  pinned skill no longer leaves a ghost active row.
+- **MCP.** The process-group guard is disarmed on the success path (pid-reuse
+  race); a delegated child is killed on cancellation instead of orphaned.
+- **Sessions, CLI & slash.** Warn on a stale resume for `-c`/`-r`; refuse to start
+  on an invalid `permission` config instead of silently dropping all rules;
+  `/issues search` treats `%`/`_` as literals; `/loop start` no longer leaks the
+  `start` verb into the prompt; `/graph` search stops leaking flags into the FTS
+  query; `/wt-merge` / `/wt-exit` handle `:` in paths; `/model` no longer
+  mislabels the provider on a same-provider swap; a forbidden `!` command hidden
+  behind a `VAR=value` prefix is caught.
+- **TUI.** Panic hook that restores the terminal; width-aware (double-width-glyph)
+  wrapping; a non-blocking plugin shortcut; the side panels no longer reserve a
+  blank right gutter at the show threshold.
+
+### Internal
+- Behavior-preserving refactors that removed duplication behind several of the
+  above fixes: one shared content-guard module, one judge-gate truncation +
+  fail-open wrapper, one agent-rebuild helper, one user-boundary cut-snapping
+  helper, a typed `SlashOutcome` replacing the `DEFER_*` error-string protocol,
+  and the shared JSON-RPC correlation layer.
+
 ## [0.16.0] - 2026-07-01
 
 ### Added
