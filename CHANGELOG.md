@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-07-04
+
 ### Added
 - `DIRGE_DUMP_REQUESTS` request-dump lines now carry the `provider` and `model`
   each request went to, plus `messages_bytes` for the conversation history —
