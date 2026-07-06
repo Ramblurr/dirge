@@ -2341,7 +2341,30 @@ pub async fn run_interactive(
                                 // rendered box so Up/Down move by wrapped display
                                 // rows (dirge-5w9v).
                                 input.set_wrap_width(renderer.input_wrap_w());
-                                if let Some(text) = input.handle_key(key) {
+
+                                // On Unix, pre-emptively suspend the TUI for the
+                                // external editor so the input reader thread is
+                                // stopped before the editor process spawns.
+                                #[cfg(unix)]
+                                let external_editor_active = input.is_external_editor_key(&key);
+                                // `None` (no /dev/tty — can't suspend) falls through to
+                                // handle_key, which reports the failure via notification.
+                                #[cfg(unix)]
+                                let _drained_stdin = if external_editor_active {
+                                    terminal::suspend_tui_for_subprocess(&user_tx)
+                                } else {
+                                    None
+                                };
+
+                                let result = input.handle_key(key);
+                                // Resume TUI after external editor exits (happens
+                                // inside handle_key → open_in_external_editor).
+                                #[cfg(unix)]
+                                if external_editor_active {
+                                    terminal::resume_tui_after_subprocess(&mut renderer, &user_tx);
+                                }
+
+                                if let Some(text) = result {
                                     // Review #4: any submission starts a new
                                     // turn — drop the expand-toggle stash so
                                     // Ctrl+O doesn't expand (or, via a stale
@@ -2604,6 +2627,14 @@ pub async fn run_interactive(
                                                 // orphan the first.
                                                 ui.is_running = true;
                                                 renderer.set_avatar_state(avatar::AvatarState::Thinking);
+                                            }
+                                            #[cfg(unix)]
+                                            Ok(SlashOutcome::DeferExternalEditor) => {
+                                                if let Some(d) = terminal::suspend_tui_for_subprocess(&user_tx) {
+                                                    input.open_in_external_editor();
+                                                    terminal::resume_tui_after_subprocess(&mut renderer, &user_tx);
+                                                    let _ = d;
+                                                }
                                             }
                                             #[cfg(feature = "git-worktree")]
                                             Ok(SlashOutcome::DeferWtMerge(m)) => {
