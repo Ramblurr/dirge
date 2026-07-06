@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-07-06
+
 ### Added
 - External editor for composing messages: `Ctrl+G` or `/edit` opens `$EDITOR`
   with the current input buffer and replaces it on save. Thanks @blob42 (#592).
