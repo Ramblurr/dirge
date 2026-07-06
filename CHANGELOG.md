@@ -4,6 +4,20 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.9] - 2026-07-06
+
+### Fixed
+- Delimiter auto-repair now handles an over-close, not just an under-close. The
+  pre-write syntax gate already appended missing closers for a trailing
+  truncation; it now also mechanically removes a trailing run of extra closing
+  delimiters (an extra `)`/`]`/`}` at EOF) and re-validates. A mid-file stray
+  closer is still rejected with its exact line:col, since removing it could
+  change what the following forms belong to. This stops the model from dropping
+  into hand-counting parentheses to fix an off-by-one imbalance. The DeepSeek
+  steering prompt also now directs the model to create/modify source with
+  `write`/`edit` (which validate and localize delimiter errors) rather than
+  assembling files in a shell here-doc (dirge-1m36).
+
 ## [0.18.8] - 2026-07-06
 
 ### Added
