@@ -17,6 +17,7 @@ What sets dirge apart from other agentic editors:
 - **Long-horizon sessions that resume where they left off.** Every conversation keeps a durable, incrementally-refreshed checkpoint, anchored to a stable identity so resuming a long, compacted session recovers its live state instead of a stale snapshot. Autonomous runs can be held to a natural-language stop condition with `--goal`. Adapted from [MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code).
 - **Code intelligence baked in.** Tree-sitter [semantic tools](docs/semantic.md) and [LSP diagnostics](docs/lsp.md) for 10+ languages, surfaced inline so the agent fixes compile errors on the same turn.
 - **Extensible at runtime.** A [Janet plugin system](docs/plugins.md) hooks the full lifecycle, and [Claude-compatible skills](docs/skills.md) load instructions on demand.
+- **Multimodal input.** Paste a clipboard image into the prompt with `Ctrl+V` and send it to a vision model; images are stored out-of-line and re-read at the provider boundary, so transcripts stay small. Gated by provider/model vision support, with a per-provider `multimodal` override for local vision models. See [docs/features.md](docs/features.md#core).
 - **Delegate to dirge from another agent.** Run `dirge mcp` to expose dirge as an [MCP server](docs/mcp-server.md): a planner agent (e.g. Claude Code) hands implementation tasks to dirge on a persistent per-project session, then reviews the summary + changed files it returns.
 
 See the full [feature catalog](docs/features.md) for everything else.

@@ -36,6 +36,7 @@ kill-subagent) are **rebindable** via the `keybindings` config — see
 | Tab | Insert 2 spaces |
 | `@<query>` | File picker (Tab/Enter select, Esc cancel) |
 | Paste (≥4 lines) | Collapses to `[N lines pasted]`; re-paste same content to expand inline |
+| Ctrl+V (image on clipboard) | Paste a clipboard image into the prompt as an `[image]` slot; sent to the model on the next turn. Only active when the provider/model supports vision (see [config `multimodal`](config.md)); with no image on the clipboard it falls back to a normal text paste. Needs a clipboard tool: built-in `osascript` (macOS) / PowerShell (Windows), or `wl-paste`/`xclip` (Linux). |
 
 ### Agent control
 

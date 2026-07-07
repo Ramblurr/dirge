@@ -4,7 +4,7 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.0] - 2026-07-07
 
 ### Added
 - Paste a clipboard image into the prompt (Ctrl+V) and send it to a
@@ -17,6 +17,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the platform's built-in scripting host — `osascript` on macOS,
   PowerShell on Windows — or `wl-paste`/`xclip` on Linux; no image on the
   clipboard falls back to a normal text paste.
+
+### Fixed
+- A caption-less image paste (image + Enter, no text) no longer aborts the
+  turn — the empty text part ahead of the image was serializing to an empty
+  text content block that Anthropic rejects with a 400. Empty text parts are
+  now dropped at the provider boundary and the seed.
+- Pasted images no longer drop out of context on continuation, interject,
+  retry, plan-review, and compaction-resume turns; those paths were replaying
+  history without the session asset dir, degrading each image to a placeholder.
+- DeepSeek vision models (`deepseek-vl*`) are no longer misclassified as
+  text-only, so the image-paste UX is offered for them.
 
 ## [0.18.13] - 2026-07-07
 
