@@ -1318,13 +1318,16 @@ pub fn config_file_path() -> PathBuf {
 }
 
 /// Project-local config, layered on top of the global
-/// `~/.config/dirge/config.json`. CWD-relative (matches `.dirge/agents`,
-/// `.dirge/plugins`, `.dirge/skills`). Fields present here override
-/// their global counterparts; absent keys fall through. Map-valued
-/// fields (`providers`, `mcp_servers`, `agents`, …) merge key-by-key
-/// rather than replacing the whole map.
+/// `~/.config/dirge/config.json`. Anchored at the project root
+/// (git-root walk-up, `DIRGE_PROJECT_ROOT` override) via `ProjectPaths`,
+/// so launching from a subdirectory loads the same `<repo>/.dirge/`
+/// config the session DB and memory already use (dirge-vpma.17). Fields
+/// present here override their global counterparts; absent keys fall
+/// through. Map-valued fields (`providers`, `mcp_servers`, `agents`, …)
+/// merge key-by-key rather than replacing the whole map.
 pub fn project_config_file_path() -> PathBuf {
-    PathBuf::from(".dirge").join("config.json")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::extras::dirge_paths::ProjectPaths::new(&cwd).project_config_file()
 }
 
 /// Read a config JSON file into a `serde_json::Value`. Returns `None`
@@ -1499,7 +1502,10 @@ pub fn update_config_file(updates: &serde_json::Value) -> anyhow::Result<()> {
 
     let mut existing: serde_json::Map<String, serde_json::Value> = if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content).unwrap_or_default()
+        serde_json::from_str(&content).map_err(|e| anyhow::anyhow!(
+            "{} is not a valid config: {e}\nFix the file or remove it before running sandbox setup.",
+            path.display()
+        ))?
     } else {
         serde_json::Map::new()
     };
@@ -1517,6 +1523,40 @@ pub fn update_config_file(updates: &serde_json::Value) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&existing)?;
     std::fs::write(&path, json)?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "sandbox-microvm"))]
+mod sandbox_config_update_tests {
+    use super::*;
+
+    #[test]
+    fn update_config_file_rejects_corrupt_config() {
+        let dir = std::env::temp_dir().join("dirge-update-config-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_json = dir.join("config.json");
+        std::fs::write(&config_json, "{ broken").unwrap();
+
+        let prev = std::env::var_os("DIRGE_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("DIRGE_CONFIG_DIR", &dir);
+        }
+
+        let result = update_config_file(&serde_json::json!({"sandbox": {"mode": "microvm"}}));
+
+        assert!(result.is_err(), "corrupt config must return error");
+        // Verify file was NOT overwritten.
+        let content = std::fs::read_to_string(&config_json).unwrap();
+        assert_eq!(content, "{ broken", "file must be unchanged");
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("DIRGE_CONFIG_DIR", v),
+                None => std::env::remove_var("DIRGE_CONFIG_DIR"),
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(all(test, feature = "lsp"))]

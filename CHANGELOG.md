@@ -4,6 +4,35 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The TODOS panel went empty after a compaction fold or a resume and did not
+  come back when the agent picked an existing issue up. It was scoped to the
+  live `session.id`, which a fold rotates, so the board query stopped matching
+  the rows it had stamped under the old id; and starting an issue created in
+  another session never pulled it onto the current board. The board is now
+  scoped by the stable lineage origin (so it survives folds/resumes), and
+  starting an issue (`issue start` / an update to `in_progress`) claims it for
+  the current conversation so a picked-up issue appears (GH #663).
+
+### Changed
+- The TODOS panel now marks the issue the agent is actively on: the
+  `in_progress` item is pinned at the top (it already sorted first) with a `▶`
+  marker and a distinct focus color, so the current task stands out from the
+  queued work. The panel still mirrors this session's live issue board; use
+  `/issues` for the full project board (GH #663).
+- Project-scoped `.dirge/plugins/`, `.dirge/config.json`, `.dirge/prompts/`,
+  and `.dirge/agents/` are now resolved at the project root — the enclosing
+  git repository, or `DIRGE_PROJECT_ROOT` when set — instead of the launch
+  directory. Previously these four looked only in `<cwd>/.dirge/`, so starting
+  dirge from a subdirectory of a repo silently loaded none of them, even
+  though the session database and per-project memory already anchored at the
+  repo root. Launching in `<repo>/sub/` now loads `<repo>/.dirge/` config,
+  plugins, prompts, and agent profiles, matching where sessions and memory
+  live. Skills already walked up the ancestor chain (merging inner-over-outer),
+  so their behavior is unchanged (dirge-vpma.17).
+
 ## [0.19.5] - 2026-07-13
 
 ### Fixed

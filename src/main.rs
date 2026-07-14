@@ -1028,10 +1028,14 @@ async fn main() -> anyhow::Result<()> {
         use std::path::PathBuf;
         // Honor DIRGE_CONFIG_DIR via the shared base, like config.json
         // (dirge-f8oe) — previously this hard-coded ~/.config/dirge, so
-        // an override moved config but left plugins behind.
+        // an override moved config but left plugins behind. The project
+        // dir is resolved via ProjectPaths (git-root walk-up /
+        // DIRGE_PROJECT_ROOT), so a subdirectory launch still finds the
+        // repo's .dirge/plugins (dirge-vpma.17).
+        let project_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let candidate_dirs: Vec<PathBuf> = vec![
             crate::session::storage::config_path().join("plugins"),
-            PathBuf::from(".dirge").join("plugins"),
+            crate::extras::dirge_paths::ProjectPaths::new(&project_cwd).plugins_dir(),
         ];
         // Silently drop missing default dirs; only surface real errors below.
         let search_dirs = plugin::filter_existing_dirs(&candidate_dirs);
@@ -1909,9 +1913,9 @@ async fn run_headless_loop(
     use crate::extras::r#loop as loop_mod;
 
     loop {
-        state.iteration += 1;
-
-        if state.should_stop() {
+        // dirge-vpma.15: next_iteration checks the max BEFORE incrementing,
+        // so --loop-max N runs exactly N iterations (was N-1).
+        if !state.next_iteration() {
             eprintln!(
                 "[loop] max iterations ({}) reached, stopping",
                 state.iteration
