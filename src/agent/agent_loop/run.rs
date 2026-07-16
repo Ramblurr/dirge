@@ -1897,7 +1897,45 @@ pub async fn run_loop(
                     for sc in &scavenge_result.calls {
                         let sig = format!("{}::{}", sc.name, canonical_json(&sc.arguments));
                         if !seen_signatures.contains(&sig) {
-                            tool_calls.push(sc.clone());
+                            // dirge-knt8: validate scavenged calls against the
+                            // tool's schema BEFORE promotion. Scavenged calls
+                            // come from hallucinated text in the model's answer,
+                            // not from the provider's native tool_calls.
+                            // If validation fails, drop the call silently —
+                            // do NOT turn it into an error tool result that
+                            // forces a continuation turn (duplicate-response
+                            // bug). Native calls are never touched here.
+                            let tool = current_context
+                                .tools
+                                .iter()
+                                .find(|t| t.name() == sc.name);
+                            if let Some(tool) = tool {
+                                match crate::agent::agent_loop::tool_input_repair::validate_and_repair(
+                                    tool.parameters(),
+                                    &sc.arguments,
+                                ) {
+                                    Ok(None) => {
+                                        // Valid — push as-is.
+                                        tool_calls.push(sc.clone());
+                                    }
+                                    Ok(Some(rr)) => {
+                                        // Repaired — push with repaired args.
+                                        let mut repaired_call = sc.clone();
+                                        repaired_call.arguments = rr.repaired;
+                                        tool_calls.push(repaired_call);
+                                    }
+                                    Err(_) => {
+                                        // Invalid scavenged call — drop silently.
+                                        // This was hallucinated text, not a real
+                                        // tool call the model intended to dispatch.
+                                    }
+                                }
+                            } else {
+                                // Defensive: tool not found — unreachable, since
+                                // allowed_names is built from this same tool set.
+                                // Preserve prior behavior and push the call as-is.
+                                tool_calls.push(sc.clone());
+                            }
                         }
                     }
                 }

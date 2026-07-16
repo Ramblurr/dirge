@@ -2988,6 +2988,268 @@ async fn dirge_ngic_end_to_end_orphan_dsml_in_text_dispatches() {
     );
 }
 
+// =====================================================================
+// dirge-knt8: scavenged calls with invalid args must be silently
+// dropped — NOT turned into error tool results that force an extra
+// turn. Reasoning models (deepseek/glm) sometimes put tool-call-
+// shaped JSON/DSML in their final answer text. The scavenger lifts
+// these into phantom tool calls, but if the args don't match the
+// tool's schema the call must be dropped, not dispatched as an
+// error. Native tool calls (provider-emitted tool_calls) keep their
+// existing error behavior.
+// =====================================================================
+
+/// Test tool with a typed schema requiring "path" (string). Used to
+/// verify that scavenged calls failing schema validation are dropped
+/// while native calls still produce error results.
+#[derive(Debug)]
+struct TypedPathTool {
+    executed: std::sync::Arc<Mutex<Vec<Value>>>,
+}
+impl TypedPathTool {
+    fn new() -> Self {
+        Self {
+            executed: std::sync::Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+impl LoopTool for TypedPathTool {
+    fn name(&self) -> &str {
+        "typed_path_tool"
+    }
+    fn description(&self) -> &str {
+        "Tool requiring a path string"
+    }
+    fn label(&self) -> &str {
+        "TypedPathTool"
+    }
+    fn parameters(&self) -> &Value {
+        static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
+            })
+        })
+    }
+    fn execute<'a>(
+        &'a self,
+        _id: &'a str,
+        args: Value,
+        _signal: AbortSignal,
+        _on_update: LoopToolUpdate,
+    ) -> Pin<Box<dyn Future<Output = Result<super::super::LoopToolResult, String>> + Send + 'a>> {
+        let executed = self.executed.clone();
+        Box::pin(async move {
+            executed.lock().unwrap().push(args.clone());
+            Ok(super::super::LoopToolResult {
+                content: vec![serde_json::json!({"type": "text", "text": "ok"})],
+                details: args,
+                terminate: None,
+            })
+        })
+    }
+}
+
+/// dirge-knt8 test 1: a scavenged DSML invoke with args that fail
+/// the tool's schema MUST be dropped silently — the tool is never
+/// executed, no error tool result is produced, and the loop does
+/// NOT force a continuation turn.
+#[tokio::test]
+async fn scavenged_call_invalid_args_dropped() {
+    let tool = std::sync::Arc::new(TypedPathTool::new());
+    let mut ctx = empty_context();
+    ctx.tools.push(tool.clone());
+
+    // DSML invoke with NO parameters — scavenger produces {} which
+    // fails schema validation (required "path" missing).
+    let dsml = r#"<|DSML|invoke name="typed_path_tool"></|DSML|invoke>"#;
+    let response = AssistantMessage::new(
+        vec![ContentBlock::Text {
+            text: dsml.to_string(),
+        }],
+        StopReason::ToolUse,
+    );
+    // Second canned response: the loop must NOT reach this because
+    // no continuation is forced after dropping the invalid scavenged
+    // call. If this appears, the bug is still present.
+    let factory = canned_factory(vec![response, text_response("BUG-still-forcing-continuation")]);
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
+    let config = build_config();
+    let messages = run_agent_loop(
+        vec![user("test")],
+        ctx,
+        config,
+        AbortSignal::new(),
+        &tx,
+        &factory,
+        None,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    // The tool must NOT have been executed.
+    let executed = tool.executed.lock().unwrap();
+    assert!(
+        executed.is_empty(),
+        "invalid scavenged call must be dropped, not dispatched; got {} executions",
+        executed.len(),
+    );
+
+    // No error tool result must exist.
+    let error_count = messages
+        .iter()
+        .filter(|m| matches!(m, LoopMessage::ToolResult(tr) if tr.is_error))
+        .count();
+    assert_eq!(
+        error_count, 0,
+        "invalid scavenged call must not produce error tool result; got {error_count}"
+    );
+
+    // The "BUG" continuation message must not appear — the loop
+    // must terminate without forcing an extra turn.
+    for msg in &messages {
+        if let LoopMessage::Assistant(a) = msg {
+            for block in &a.content {
+                if let ContentBlock::Text { text } = block {
+                    assert!(
+                        !text.contains("BUG-still-forcing-continuation"),
+                        "loop must not force continuation after dropping invalid scavenged call"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// dirge-knt8 test 2: a scavenged DSML invoke with VALID args
+/// (matching the tool's schema) still executes normally. Proves
+/// the validation gate doesn't break the valid scavenge path.
+#[tokio::test]
+async fn scavenged_call_valid_args_still_executes() {
+    let tool = std::sync::Arc::new(TypedPathTool::new());
+    let mut ctx = empty_context();
+    ctx.tools.push(tool.clone());
+
+    // DSML invoke with valid "path" parameter matching the schema.
+    let dsml = r#"<|DSML|invoke name="typed_path_tool"><|DSML|parameter name="path" string="true">/tmp/x</|DSML|parameter></|DSML|invoke>"#;
+    let response = AssistantMessage::new(
+        vec![ContentBlock::Text {
+            text: dsml.to_string(),
+        }],
+        StopReason::ToolUse,
+    );
+    let factory = canned_factory(vec![response, text_response("done")]);
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
+    let config = build_config();
+    let _messages = run_agent_loop(
+        vec![user("test")],
+        ctx,
+        config,
+        AbortSignal::new(),
+        &tx,
+        &factory,
+        None,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    // Tool must have been called once with correct args.
+    let executed = tool.executed.lock().unwrap();
+    assert_eq!(
+        executed.len(),
+        1,
+        "valid scavenged call must dispatch; got {} executions",
+        executed.len(),
+    );
+    assert_eq!(
+        executed[0]["path"], "/tmp/x",
+        "valid scavenged call args must be preserved"
+    );
+}
+
+/// dirge-knt8 test 3 (regression guard): a NATIVE tool call (from
+/// the provider's `tool_calls`, not scavenged from text) with
+/// invalid args MUST still produce an error tool result and force
+/// continuation. The fix only touches scavenged calls — native
+/// error behavior is unchanged.
+#[tokio::test]
+async fn native_call_invalid_args_still_errors() {
+    let tool = std::sync::Arc::new(TypedPathTool::new());
+    let mut ctx = empty_context();
+    ctx.tools.push(tool.clone());
+
+    // Native tool call with invalid args (missing required "path").
+    let response = AssistantMessage::new(
+        vec![ContentBlock::ToolCall {
+            id: "call_native_1".to_string(),
+            name: "typed_path_tool".to_string(),
+            arguments: serde_json::json!({"wrong_param": 1}),
+        }],
+        StopReason::ToolUse,
+    );
+    let factory = canned_factory(vec![response, text_response("loop-continued-after-error")]);
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
+    let config = build_config();
+    let messages = run_agent_loop(
+        vec![user("test")],
+        ctx,
+        config,
+        AbortSignal::new(),
+        &tx,
+        &factory,
+        None,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    // Tool must NOT have been executed (validation fails before dispatch).
+    let executed = tool.executed.lock().unwrap();
+    assert!(
+        executed.is_empty(),
+        "native call with invalid args must not execute; got {} executions",
+        executed.len(),
+    );
+
+    // Must have at least one error tool result.
+    let error_count = messages
+        .iter()
+        .filter(|m| matches!(m, LoopMessage::ToolResult(tr) if tr.is_error))
+        .count();
+    assert!(
+        error_count > 0,
+        "native invalid call must produce error tool result"
+    );
+
+    // Loop must have continued — "loop-continued-after-error" must appear.
+    let has_continuation = messages.iter().any(|msg| {
+        if let LoopMessage::Assistant(a) = msg {
+            a.content.iter().any(|b| {
+                if let ContentBlock::Text { text } = b {
+                    text.contains("loop-continued-after-error")
+                } else {
+                    false
+                }
+            })
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_continuation,
+        "loop must continue after native invalid call error"
+    );
+}
+
 /// dirge-7bwx review-fix #2: successful repair also forwards
 /// notes (without the unrecoverable prefix) so the model sees
 /// what was fixed. Reasonix parity at `repair/index.ts:106`.
