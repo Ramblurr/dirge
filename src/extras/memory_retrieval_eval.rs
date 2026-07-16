@@ -23,8 +23,6 @@
 //! the corpus/scorer are the reusable pieces a future real-embedder run wires
 //! its own `search` closure into.
 
-#![cfg(test)]
-
 use crate::extras::dirge_paths::ProjectPaths;
 use crate::extras::memory_db::{MemoryKind, SqliteMemoryStore};
 

@@ -9,7 +9,9 @@ use rig::tool::Tool;
 
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, PermCheck, ToolError, WriteArgs, require_and_resolve};
+use crate::agent::tools::{
+    AskSender, PermCheck, ToolError, ToolRoot, WriteArgs, require_and_resolve_rooted,
+};
 #[cfg(feature = "lsp")]
 use crate::lsp::diagnostic;
 #[cfg(feature = "lsp")]
@@ -25,6 +27,7 @@ pub struct WriteTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
     /// When set, the tool touches the file on the LSP server after writing
     /// and appends any resulting diagnostic block to its output. `None`
     /// reproduces the pre-LSP behaviour exactly.
@@ -39,6 +42,7 @@ impl WriteTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager: None,
         }
@@ -54,9 +58,14 @@ impl WriteTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager,
         }
+    }
+    pub fn rooted(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -94,7 +103,8 @@ impl Tool for WriteTool {
         // Audit H12: require absolute + pin file operations to the canonical
         // path the permission check ran against, so a symlink swap can't
         // redirect the write to an unauthorized target.
-        let resolved_path = require_and_resolve(
+        let resolved_path = require_and_resolve_rooted(
+            self.root.as_ref(),
             &self.permission,
             &self.ask_tx,
             "write",

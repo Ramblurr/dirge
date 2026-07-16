@@ -1,4 +1,5 @@
 #[allow(unused_imports)]
+use crate::config::SubagentDispatchStrategy;
 use crate::sync_util::LockExt;
 use indexmap::IndexMap;
 use std::collections::{HashMap, VecDeque};
@@ -79,6 +80,70 @@ struct Inner {
     /// this, subagents continued to consume API budget after their parent
     /// was gone, eventually notifying a dropped store.
     handles: HashMap<String, JoinHandle<()>>,
+    #[cfg(feature = "git-worktree")]
+    writer_worktrees: HashMap<String, crate::extras::git_worktree::WorktreeInfo>,
+    coordinator: Option<CoordinatorState>,
+}
+
+#[derive(Debug)]
+struct CoordinatorState {
+    strategy: SubagentDispatchStrategy,
+    next_generation: u64,
+    active_task_ids: Vec<String>,
+    profiles: crate::agent::tools::task::CoordinatorProfiles,
+    dispatches: IndexMap<String, CoordinatorDispatch>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoordinatorDispatchInfo {
+    pub prompt: String,
+    pub is_writer: bool,
+    pub is_isolated_writer: bool,
+    pub retry_of: Option<String>,
+    pub retried_by: Option<String>,
+    pub worktree_branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub worktree_commits: Vec<String>,
+    pub worktree_dirty: Option<bool>,
+    pub worktree_retained: Option<bool>,
+}
+
+#[derive(Debug)]
+struct CoordinatorDispatch {
+    prompt: String,
+    is_writer: bool,
+    is_isolated_writer: bool,
+    retry_of: Option<String>,
+    retried_by: Option<String>,
+    worktree_branch: Option<String>,
+    worktree_path: Option<String>,
+    worktree_commits: Vec<String>,
+    worktree_dirty: Option<bool>,
+    worktree_retained: Option<bool>,
+}
+
+/// A writer worktree that was left on disk because it contains
+/// uncommitted or dirty work. Surfaced by `cancel_all` so the user
+/// can find their salvaged work after a session swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedWorktree {
+    pub branch: Option<String>,
+    pub path: Option<String>,
+}
+
+impl CoordinatorState {
+    fn new(
+        strategy: SubagentDispatchStrategy,
+        profiles: crate::agent::tools::task::CoordinatorProfiles,
+    ) -> Self {
+        Self {
+            strategy,
+            next_generation: 1,
+            active_task_ids: Vec::new(),
+            profiles,
+            dispatches: IndexMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +151,7 @@ pub enum TaskState {
     Running,
     Completed(String),
     Failed(String),
+    Cancelled(String),
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +201,275 @@ impl BackgroundStore {
                 state: TaskState::Running,
             },
         );
+    }
+
+    #[cfg(test)]
+    pub fn enable_coordinator(&self, strategy: SubagentDispatchStrategy) {
+        self.enable_coordinator_with_profiles(strategy, Default::default());
+    }
+
+    pub fn enable_coordinator_with_profiles(
+        &self,
+        strategy: SubagentDispatchStrategy,
+        profiles: crate::agent::tools::task::CoordinatorProfiles,
+    ) {
+        if strategy == SubagentDispatchStrategy::Off {
+            return;
+        }
+        self.lock().coordinator = Some(CoordinatorState::new(strategy, profiles));
+    }
+
+    pub fn coordinator_strategy(&self) -> Option<SubagentDispatchStrategy> {
+        self.lock().coordinator.as_ref().map(|state| state.strategy)
+    }
+
+    pub fn coordinator_preamble(&self) -> Option<String> {
+        let inner = self.lock();
+        let coordinator = inner.coordinator.as_ref()?;
+        let mode = match coordinator.strategy {
+            SubagentDispatchStrategy::Optional => {
+                "Optional mode permits direct trivial work; coordinated work must follow this contract."
+            }
+            SubagentDispatchStrategy::Full => {
+                "Full mode requires substantive tier-routed work to use background dispatch."
+            }
+            SubagentDispatchStrategy::Off => return None,
+        };
+        let profiles = |items: &[crate::agent::tools::task::CoordinatorProfile]| {
+            items
+                .iter()
+                .map(|profile| match &profile.description {
+                    Some(description) => format!("- {} — {}", profile.name, description),
+                    None => format!("- {}", profile.name),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        Some(format!(
+            "Coordinator dispatch is enabled. {mode}\n\nRead-only subagent profiles:\n{}\n\nRead-write subagent profiles:\n{}\n\nDispatch at most four background subagents per wave. Reconcile completed work, failures, remaining requirements, required verification, and the next action before dispatching more work. Do not poll task_status for partial output. A failed coordinator task may be retried once with retry_of=<task-id>; then repair on the main thread. Isolated writers may run concurrently in their worktrees; shared-checkout writers are serialized. Writers must not auto-merge: report their branch, commits, tests, and salvage path for the coordinator to reconcile. Keep internal reconciliation summaries private and provide the user only a final summary. Do not combine this strategy with plugins/orchestrator.janet or plugins/delegate.janet.",
+            profiles(&coordinator.profiles.readonly),
+            profiles(&coordinator.profiles.readwrite),
+        ))
+    }
+
+    pub fn task_is_awaiting_coordinator_delivery(&self, id: &str) -> Option<u64> {
+        let inner = self.lock();
+        let coordinator = inner.coordinator.as_ref()?;
+        coordinator
+            .active_task_ids
+            .iter()
+            .any(|task_id| task_id == id)
+            .then_some(coordinator.next_generation)
+    }
+
+    pub fn coordinator_dispatch(&self, id: &str) -> Option<CoordinatorDispatchInfo> {
+        let inner = self.lock();
+        let dispatch = inner.coordinator.as_ref()?.dispatches.get(id)?;
+        Some(CoordinatorDispatchInfo {
+            prompt: dispatch.prompt.clone(),
+            is_writer: dispatch.is_writer,
+            is_isolated_writer: dispatch.is_isolated_writer,
+            retry_of: dispatch.retry_of.clone(),
+            retried_by: dispatch.retried_by.clone(),
+            worktree_branch: dispatch.worktree_branch.clone(),
+            worktree_path: dispatch.worktree_path.clone(),
+            worktree_commits: dispatch.worktree_commits.clone(),
+            worktree_dirty: dispatch.worktree_dirty,
+            worktree_retained: dispatch.worktree_retained,
+        })
+    }
+
+    pub fn set_coordinator_dispatch_isolated(
+        &self,
+        id: &str,
+        is_isolated_writer: bool,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        let coordinator = inner
+            .coordinator
+            .as_mut()
+            .ok_or_else(|| "coordinator mode is not enabled".to_string())?;
+        if !is_isolated_writer
+            && coordinator
+                .active_task_ids
+                .iter()
+                .filter(|task_id| task_id.as_str() != id)
+                .any(|task_id| {
+                    coordinator
+                        .dispatches
+                        .get(task_id)
+                        .is_some_and(|dispatch| dispatch.is_writer && !dispatch.is_isolated_writer)
+                })
+        {
+            return Err("a serialized writer is already active; wait for batch reconciliation before dispatching another writer".into());
+        }
+        let dispatch = coordinator
+            .dispatches
+            .get_mut(id)
+            .ok_or_else(|| format!("task {id} is not a coordinator dispatch"))?;
+        dispatch.is_isolated_writer = is_isolated_writer;
+        Ok(())
+    }
+
+    pub fn set_coordinator_dispatch_worktree(
+        &self,
+        id: &str,
+        branch: String,
+        worktree_path: String,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        let dispatch = inner
+            .coordinator
+            .as_mut()
+            .and_then(|coordinator| coordinator.dispatches.get_mut(id))
+            .ok_or_else(|| format!("task {id} is not a coordinator dispatch"))?;
+        dispatch.worktree_branch = Some(branch);
+        dispatch.worktree_path = Some(worktree_path);
+        Ok(())
+    }
+
+    #[cfg(feature = "git-worktree")]
+    pub fn register_writer_worktree(
+        &self,
+        id: String,
+        info: crate::extras::git_worktree::WorktreeInfo,
+    ) {
+        self.lock().writer_worktrees.insert(id, info);
+    }
+
+    #[cfg(feature = "git-worktree")]
+    pub fn unregister_writer_worktree(&self, id: &str) {
+        self.lock().writer_worktrees.remove(id);
+    }
+
+    pub fn set_coordinator_dispatch_worktree_outcome(
+        &self,
+        id: &str,
+        commits: Vec<String>,
+        dirty: bool,
+        retained: bool,
+    ) {
+        let mut inner = self.lock();
+        let Some(dispatch) = inner
+            .coordinator
+            .as_mut()
+            .and_then(|coordinator| coordinator.dispatches.get_mut(id))
+        else {
+            return;
+        };
+        dispatch.worktree_commits = commits;
+        dispatch.worktree_dirty = Some(dirty);
+        dispatch.worktree_retained = Some(retained);
+    }
+
+    pub fn insert_for_dispatch(&self, id: String) {
+        if self.coordinator_strategy().is_some() {
+            self.insert_coordinated(id);
+        } else {
+            self.insert(id);
+        }
+    }
+
+    pub fn insert_coordinator_dispatch(
+        &self,
+        id: String,
+        prompt: String,
+        is_writer: bool,
+        is_isolated_writer: bool,
+        retry_of: Option<&str>,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        if inner.coordinator.is_none() {
+            return Err("coordinator mode is not enabled".into());
+        }
+
+        if is_writer
+            && !is_isolated_writer
+            && inner.coordinator.as_ref().is_some_and(|coordinator| {
+                coordinator.active_task_ids.iter().any(|task_id| {
+                    coordinator
+                        .dispatches
+                        .get(task_id)
+                        .is_some_and(|dispatch| dispatch.is_writer && !dispatch.is_isolated_writer)
+                })
+            })
+        {
+            return Err(
+                "a serialized writer is already active; wait for batch reconciliation before dispatching another writer"
+                    .into(),
+            );
+        }
+
+        if let Some(original_id) = retry_of {
+            let failed = matches!(
+                inner.tasks.get(original_id).map(|task| &task.state),
+                Some(TaskState::Failed(_))
+            );
+            if !failed {
+                return Err(format!(
+                    "task {original_id} must have failed before it can be retried"
+                ));
+            }
+            let original = inner
+                .coordinator
+                .as_mut()
+                .and_then(|coordinator| coordinator.dispatches.get_mut(original_id))
+                .ok_or_else(|| {
+                    format!(
+                        "task {original_id} is not a coordinator dispatch and cannot be retried"
+                    )
+                })?;
+            if original.retried_by.is_some() {
+                return Err(format!(
+                    "task {original_id} has already used its coordinator retry. Reconcile and repair the work on the main thread."
+                ));
+            }
+            original.retried_by = Some(id.clone());
+        }
+
+        if !inner.tasks.contains_key(&id) && inner.tasks.len() >= STORE_CAPACITY {
+            inner.tasks.shift_remove_index(0);
+        }
+        inner.tasks.insert(
+            id.clone(),
+            BackgroundTask {
+                state: TaskState::Running,
+            },
+        );
+        let coordinator = inner.coordinator.as_mut().expect("checked above");
+        coordinator.active_task_ids.push(id.clone());
+        coordinator.dispatches.insert(
+            id,
+            CoordinatorDispatch {
+                prompt,
+                is_writer,
+                is_isolated_writer,
+                retry_of: retry_of.map(str::to_string),
+                retried_by: None,
+                worktree_branch: None,
+                worktree_path: None,
+                worktree_commits: Vec::new(),
+                worktree_dirty: None,
+                worktree_retained: None,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn insert_coordinated(&self, id: String) {
+        let mut inner = self.lock();
+        if !inner.tasks.contains_key(&id) && inner.tasks.len() >= STORE_CAPACITY {
+            inner.tasks.shift_remove_index(0);
+        }
+        inner.tasks.insert(
+            id.clone(),
+            BackgroundTask {
+                state: TaskState::Running,
+            },
+        );
+        if let Some(coordinator) = &mut inner.coordinator {
+            coordinator.active_task_ids.push(id);
+        }
     }
 
     /// Look up the current state of a task without mutating the store.
@@ -195,16 +530,53 @@ impl BackgroundStore {
         }
     }
 
+    /// Notify the task to a terminal state ONLY if it is currently
+    /// `Running`. If the task already reached a terminal state
+    /// (via explicit `notify`), this call is a no-op — it won't
+    /// clobber the real result or re-enqueue a duplicate notification.
+    /// Used by drop guards to catch panics / early-returns in spawned
+    /// closures without overwriting a successful completion.
+    pub fn notify_if_running(&self, id: &str, state: TaskState) {
+        if matches!(state, TaskState::Running) {
+            // Refuse to "transition" Running → Running.
+            return;
+        }
+        let inner = self.lock();
+        let task_is_running = inner
+            .tasks
+            .get(id)
+            .is_some_and(|t| matches!(t.state, TaskState::Running));
+        if !task_is_running {
+            return;
+        }
+        // Delegate to normal notify — it already handles truncation,
+        // handle removal, pending queue, and UI event. Since we've
+        // verified the state is still Running, this is the only path
+        // that will fire.
+        drop(inner);
+        self.notify(id, state);
+    }
+
     /// Attach the `JoinHandle` of a freshly-spawned background subagent
     /// task to its id. Called immediately after the spawn in
     /// `task.rs` so `cancel_all` has something to abort on session
-    /// switch. Re-attaching for an id whose task already completed
-    /// (handle removed by `notify`) is a no-op; re-attaching for a
-    /// still-running id replaces and drops the previous handle.
+    /// switch. Only attaches when the task is still `Running` — if the
+    /// spawned closure already finished (called `notify` from another
+    /// thread) the state is terminal and the handle is dropped.
+    /// Re-attaching for a still-running id replaces and drops the
+    /// previous handle.
     pub fn attach_handle(&self, id: &str, handle: JoinHandle<()>) {
         let mut inner = self.lock();
-        // Only keep the handle if the task is still tracked.
-        if !inner.tasks.contains_key(id) {
+        // Only keep the handle if the task is still tracked AND still
+        // Running. On a multi-thread runtime the spawned closure can
+        // race ahead and finish (notify) before we get here — the task
+        // entry lives in `tasks` even post-notify (for task_status
+        // lookup), so `contains_key` alone isn't enough.
+        let is_running = inner
+            .tasks
+            .get(id)
+            .is_some_and(|t| matches!(t.state, TaskState::Running));
+        if !is_running {
             return;
         }
         if let Some(prev) = inner.handles.insert(id.to_string(), handle) {
@@ -223,7 +595,12 @@ impl BackgroundStore {
     /// parent agent no longer sees. Drained `pending` notifications
     /// are also cleared — they belong to the previous session and
     /// would otherwise surface in the new session's first turn.
-    pub fn cancel_all(&self) {
+    ///
+    /// Returns a list of writer worktrees that were *retained* on disk
+    /// (dirty or have uncommitted work) so the caller can surface their
+    /// paths to the user — otherwise the coordinator metadata would be
+    /// lost and the user would have orphaned `dirge-task-*` worktrees.
+    pub fn cancel_all(&self) -> Vec<RetainedWorktree> {
         let mut inner = self.lock();
         // Abort handles. `abort()` is best-effort: the awaiter inside
         // the task (e.g. `model.btw_query`) gets dropped at the next
@@ -237,13 +614,46 @@ impl BackgroundStore {
         let cancelled_label = "cancelled — session switched".to_string();
         for task in inner.tasks.values_mut() {
             if matches!(task.state, TaskState::Running) {
-                task.state = TaskState::Failed(cancelled_label.clone());
+                task.state = TaskState::Cancelled(cancelled_label.clone());
             }
         }
         // Drop pending notifications. They belong to the previous
         // session; surfacing them in the next session's prompt would
         // be confusing ("you finished a task you didn't start").
         inner.pending.clear();
+        #[cfg(feature = "git-worktree")]
+        for (_, info) in std::mem::take(&mut inner.writer_worktrees) {
+            let _ = crate::extras::git_worktree::remove_worktree_if_clean(&info);
+        }
+        // Collect retained writer worktrees BEFORE dropping the
+        // coordinator so we can tell the user where their salvaged
+        // work lives. remove_worktree_if_clean leaves dirty/committed
+        // worktrees on disk — without this metadata the user gets
+        // orphaned `dirge-task-*` dirs with no report.
+        let retained = if let Some(coordinator) = &inner.coordinator {
+            let retained: Vec<RetainedWorktree> = coordinator
+                .dispatches
+                .values()
+                .filter(|d| d.is_writer && d.worktree_retained == Some(true))
+                .map(|d| RetainedWorktree {
+                    branch: d.worktree_branch.clone(),
+                    path: d.worktree_path.clone(),
+                })
+                .collect();
+            for r in &retained {
+                tracing::warn!(
+                    target: "dirge::subagent",
+                    branch = ?r.branch,
+                    path = ?r.path,
+                    "retained writer worktree after cancel — uncommitted work preserved on disk",
+                );
+            }
+            retained
+        } else {
+            Vec::new()
+        };
+        inner.coordinator = None;
+        retained
     }
 
     /// Fire a Started lifecycle event for the UI. No effect on the LLM-side
@@ -262,7 +672,61 @@ impl BackgroundStore {
     /// The payload is the state captured at notify time, so subsequent task
     /// eviction does not affect what the agent receives.
     pub fn drain_notifications(&self) -> Vec<TaskNotification> {
-        self.lock().pending.drain(..).collect()
+        let mut inner = self.lock();
+        let Some(coordinator) = inner.coordinator.as_ref() else {
+            return inner.pending.drain(..).collect();
+        };
+        let active_task_ids = coordinator.active_task_ids.clone();
+        if active_task_ids.is_empty() {
+            return inner.pending.drain(..).collect();
+        }
+        let terminal = active_task_ids.iter().all(|id| {
+            !matches!(
+                inner.tasks.get(id).map(|task| &task.state),
+                Some(TaskState::Running)
+            )
+        });
+        if !terminal {
+            let tracked: std::collections::HashSet<_> =
+                active_task_ids.iter().map(String::as_str).collect();
+            let mut deliverable = Vec::new();
+            let mut held = VecDeque::new();
+            while let Some(notification) = inner.pending.pop_front() {
+                if tracked.contains(notification.id.as_str()) {
+                    held.push_back(notification);
+                } else {
+                    deliverable.push(notification);
+                }
+            }
+            inner.pending = held;
+            return deliverable;
+        }
+
+        let coordinator = inner.coordinator.as_mut().expect("checked above");
+        let tracked_ids = std::mem::take(&mut coordinator.active_task_ids);
+        coordinator.next_generation += 1;
+        let tracked: std::collections::HashSet<_> =
+            tracked_ids.iter().map(String::as_str).collect();
+        let mut retained = VecDeque::new();
+        while let Some(notification) = inner.pending.pop_front() {
+            if !tracked.contains(notification.id.as_str()) {
+                retained.push_back(notification);
+            }
+        }
+        inner.pending = retained;
+        tracked_ids
+            .into_iter()
+            .map(|id| TaskNotification {
+                state: inner
+                    .tasks
+                    .get(&id)
+                    .map(|task| task.state.clone())
+                    .unwrap_or_else(|| {
+                        TaskState::Failed("coordinator task was evicted before delivery".into())
+                    }),
+                id,
+            })
+            .collect()
     }
 
     /// dirge-9xo: peek whether there's at least one pending
@@ -270,7 +734,29 @@ impl BackgroundStore {
     /// path to decide whether a subagent completion should kick
     /// the parent agent into a new turn.
     pub fn has_pending_notifications(&self) -> bool {
-        !self.lock().pending.is_empty()
+        let inner = self.lock();
+        let Some(coordinator) = &inner.coordinator else {
+            return !inner.pending.is_empty();
+        };
+        if coordinator.active_task_ids.is_empty() {
+            return !inner.pending.is_empty();
+        }
+        let tracked: std::collections::HashSet<_> = coordinator
+            .active_task_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let batch_terminal = coordinator.active_task_ids.iter().all(|id| {
+            !matches!(
+                inner.tasks.get(id).map(|task| &task.state),
+                Some(TaskState::Running)
+            )
+        });
+        batch_terminal
+            || inner
+                .pending
+                .iter()
+                .any(|n| !tracked.contains(n.id.as_str()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -286,6 +772,97 @@ impl BackgroundStore {
     fn pending_len(&self) -> usize {
         self.lock().pending.len()
     }
+}
+
+fn format_notifications(store: &BackgroundStore, notifications: &[TaskNotification]) -> String {
+    let coordinated = store.coordinator_strategy().is_some();
+    let mut body = String::with_capacity(256);
+    if coordinated {
+        body.push_str("Coordinator batch is complete. Reconcile completed work, failures, remaining requirements, required verification, and the next action before dispatching more work.\n\n");
+    } else {
+        body.push_str("The following background tasks finished since your last turn:\n\n");
+    }
+    for (i, notification) in notifications.iter().enumerate() {
+        if i > 0 {
+            body.push('\n');
+        }
+        if coordinated {
+            if let Some(dispatch) = store.coordinator_dispatch(&notification.id) {
+                let tier = if dispatch.is_writer {
+                    "readwrite"
+                } else {
+                    "readonly"
+                };
+                body.push_str(&format!(
+                    "[task {} ({tier})] prompt: {}\n",
+                    notification.id, dispatch.prompt
+                ));
+                if let Some(retry_of) = dispatch.retry_of {
+                    body.push_str(&format!("retry of: {retry_of}\n"));
+                }
+                if let Some(retried_by) = dispatch.retried_by {
+                    body.push_str(&format!("retry budget: exhausted by {retried_by}\n"));
+                } else if matches!(notification.state, TaskState::Failed(_)) {
+                    body.push_str("retry budget: 1/1 available\n");
+                }
+                if dispatch.is_writer {
+                    body.push_str(&format!(
+                        "writer isolation: {}\n",
+                        if dispatch.is_isolated_writer {
+                            "worktree"
+                        } else {
+                            "serialized parent checkout"
+                        }
+                    ));
+                }
+                if let Some(branch) = dispatch.worktree_branch {
+                    body.push_str(&format!("writer branch: {branch}\n"));
+                }
+                if let Some(dirty) = dispatch.worktree_dirty {
+                    body.push_str(&format!(
+                        "writer worktree: {}\n",
+                        if dirty {
+                            "dirty; retained for salvage"
+                        } else {
+                            "clean"
+                        }
+                    ));
+                }
+                if !dispatch.worktree_commits.is_empty() {
+                    body.push_str(&format!(
+                        "writer commits: {}\n",
+                        dispatch.worktree_commits.join(", ")
+                    ));
+                }
+                if let Some(path) = dispatch.worktree_path {
+                    body.push_str(&format!("writer salvage path: {path}\n"));
+                }
+                if dispatch.worktree_retained == Some(false) {
+                    body.push_str("writer worktree removed (clean with no commits)\n");
+                }
+            }
+            match &notification.state {
+                TaskState::Completed(text) => body.push_str(&format!("completed: {text}\n")),
+                TaskState::Failed(error) => body.push_str(&format!("failed: {error}\n")),
+                TaskState::Cancelled(reason) => body.push_str(&format!("cancelled: {reason}\n")),
+                TaskState::Running => {}
+            }
+        } else {
+            match &notification.state {
+                TaskState::Completed(text) => {
+                    body.push_str(&format!("[task {}] completed: {text}\n", notification.id))
+                }
+                TaskState::Failed(error) => {
+                    body.push_str(&format!("[task {}] failed: {error}\n", notification.id))
+                }
+                TaskState::Cancelled(reason) => {
+                    body.push_str(&format!("[task {}] cancelled: {reason}\n", notification.id))
+                }
+                TaskState::Running => {}
+            }
+        }
+    }
+    body
 }
 
 /// dirge-9tfq: build a `GetFollowupMessagesFn` bound to this store.
@@ -315,26 +892,10 @@ pub fn followup_from_background_store(
             if drained.is_empty() {
                 return Vec::new();
             }
-            let mut body = String::with_capacity(256);
-            body.push_str("<system-reminder>\n");
-            body.push_str("The following background tasks finished since your last turn:\n\n");
-            for (i, n) in drained.iter().enumerate() {
-                if i > 0 {
-                    body.push('\n');
-                }
-                match &n.state {
-                    TaskState::Completed(text) => {
-                        body.push_str(&format!("[task {}] completed: {}\n", n.id, text));
-                    }
-                    TaskState::Failed(err) => {
-                        body.push_str(&format!("[task {}] failed: {}\n", n.id, err));
-                    }
-                    // notify() never queues Running, defensive no-op.
-                    TaskState::Running => {}
-                }
-            }
-            body.push_str("</system-reminder>");
-            vec![LoopMessage::User(UserMessage::text(body))]
+            vec![LoopMessage::User(UserMessage::text(format!(
+                "<system-reminder>\n{}</system-reminder>",
+                format_notifications(&store, &drained)
+            )))]
         })
     })
 }
@@ -369,28 +930,10 @@ pub(crate) fn prepend_pending_notifications(
         return prompt.to_string();
     }
 
-    let mut out = String::with_capacity(prompt.len() + 256);
-    out.push_str("<system-reminder>\n");
-    out.push_str("The following background tasks finished since your last turn:\n\n");
-    for (i, n) in drained.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        match &n.state {
-            TaskState::Completed(text) => {
-                out.push_str(&format!("Task {} (completed):\n{}\n", n.id, text));
-            }
-            TaskState::Failed(err) => {
-                out.push_str(&format!("Task {} (failed):\n{}\n", n.id, err));
-            }
-            // Running is never queued for notification (notify() rejects it),
-            // but treat defensively as "no terminal info to report".
-            TaskState::Running => {}
-        }
-    }
-    out.push_str("</system-reminder>\n\n");
-    out.push_str(prompt);
-    out
+    format!(
+        "<system-reminder>\n{}</system-reminder>\n\n{prompt}",
+        format_notifications(store, &drained)
+    )
 }
 
 /// dirge-nmv5: relay large `Completed` payloads through the
@@ -420,6 +963,7 @@ fn truncate_state(state: TaskState) -> TaskState {
                 "task error",
             ))
         }
+        TaskState::Cancelled(reason) => TaskState::Cancelled(reason),
         s => s,
     }
 }
@@ -427,6 +971,119 @@ fn truncate_state(state: TaskState) -> TaskState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinator_allows_one_retry_for_a_failed_dispatch() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch("first".into(), "failed work".into(), false, false, None)
+            .unwrap();
+        store.notify("first", TaskState::Failed("boom".into()));
+        store
+            .insert_coordinator_dispatch(
+                "retry".into(),
+                "retry failed work".into(),
+                false,
+                false,
+                Some("first"),
+            )
+            .unwrap();
+
+        let error = store
+            .insert_coordinator_dispatch(
+                "second-retry".into(),
+                "retry again".into(),
+                false,
+                false,
+                Some("first"),
+            )
+            .unwrap_err();
+        assert!(error.contains("already used its coordinator retry"));
+    }
+
+    #[test]
+    fn coordinator_rejects_retry_for_cancelled_dispatch() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch(
+                "cancelled".into(),
+                "cancelled work".into(),
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+        store.notify("cancelled", TaskState::Cancelled("session switched".into()));
+
+        let error = store
+            .insert_coordinator_dispatch(
+                "retry".into(),
+                "retry cancelled work".into(),
+                false,
+                false,
+                Some("cancelled"),
+            )
+            .unwrap_err();
+        assert!(error.contains("must have failed"));
+    }
+
+    #[test]
+    fn coordinator_allows_concurrent_isolated_writers() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch("writer-one".into(), "edit one".into(), true, true, None)
+            .unwrap();
+        store
+            .insert_coordinator_dispatch("writer-two".into(), "edit two".into(), true, true, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn coordinator_serializes_writers_but_not_readers() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, false, None)
+            .unwrap();
+        store
+            .insert_coordinator_dispatch("reader".into(), "inspect code".into(), false, false, None)
+            .unwrap();
+
+        let error = store
+            .insert_coordinator_dispatch("writer-two".into(), "edit more".into(), true, false, None)
+            .unwrap_err();
+        assert!(error.contains("serialized writer"));
+    }
+
+    #[test]
+    fn coordinator_dispatch_records_worktree_metadata() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, false, None)
+            .unwrap();
+
+        store
+            .set_coordinator_dispatch_worktree(
+                "writer",
+                "dirge-task-writer".into(),
+                "/tmp/dirge-task-writer".into(),
+            )
+            .unwrap();
+
+        let dispatch = store.coordinator_dispatch("writer").unwrap();
+        assert_eq!(
+            dispatch.worktree_branch.as_deref(),
+            Some("dirge-task-writer")
+        );
+        assert_eq!(
+            dispatch.worktree_path.as_deref(),
+            Some("/tmp/dirge-task-writer")
+        );
+    }
 
     #[test]
     fn insert_then_get_returns_running() {
@@ -439,6 +1096,81 @@ mod tests {
     #[test]
     fn get_on_missing_returns_none() {
         assert!(BackgroundStore::new().get("nope").is_none());
+    }
+
+    /// C1: `attach_handle` after terminal notify must NOT leak a
+    /// phantom "running" slot into `handles` — the spawned-closure
+    /// can race ahead on a multi-thread runtime and finish (notify)
+    /// BEFORE the parent calls `attach_handle`. Only Running tasks
+    /// get their handle tracked; a terminal task drops the handle.
+    #[tokio::test]
+    async fn attach_handle_after_terminal_notify_is_noop() {
+        let store = BackgroundStore::new();
+        store.insert("t1".into());
+
+        // Simulate the spawned task finishing first.
+        store.notify("t1", TaskState::Completed("done".into()));
+        assert_eq!(store.running_count(), 0, "notify removes from handles");
+
+        // Now attach happens — task exists but is Completed, so
+        // attach must NOT insert the handle.
+        let dummy_handle = tokio::spawn(async {});
+        store.attach_handle("t1", dummy_handle);
+        assert_eq!(
+            store.running_count(),
+            0,
+            "attach_handle after terminal notify must not leak"
+        );
+
+        // Normal case: attach while Running → handle tracked.
+        store.insert("t2".into());
+        assert_eq!(store.get("t2").unwrap().state, TaskState::Running);
+        let handle2 = tokio::spawn(async {});
+        store.attach_handle("t2", handle2);
+        assert_eq!(
+            store.running_count(),
+            1,
+            "attach on Running must track handle"
+        );
+    }
+
+    /// C2: `notify_if_running` transitions a Running task to terminal
+    /// but is a no-op when the task is already terminal (so the drop
+    /// guard can't clobber a real result).
+    #[test]
+    fn notify_if_running_guards_against_clobber() {
+        let store = BackgroundStore::new();
+
+        // notify_if_running on Running task → transitions.
+        store.insert("t1".into());
+        store.notify_if_running("t1", TaskState::Failed("early exit".into()));
+        assert_eq!(
+            store.get("t1").unwrap().state,
+            TaskState::Failed("early exit".into()),
+            "notify_if_running must transition Running → Failed"
+        );
+
+        // notify_if_running on terminal task → no-op.
+        store.insert("t2".into());
+        store.notify("t2", TaskState::Completed("real result".into()));
+        store.notify_if_running("t2", TaskState::Failed("late bump".into()));
+        assert_eq!(
+            store.get("t2").unwrap().state,
+            TaskState::Completed("real result".into()),
+            "notify_if_running on terminal task must not clobber"
+        );
+
+        // notify_if_running with Running state is refused.
+        store.insert("t3".into());
+        store.notify_if_running("t3", TaskState::Running);
+        assert_eq!(
+            store.get("t3").unwrap().state,
+            TaskState::Running,
+            "notify_if_running with Running must be a no-op"
+        );
+
+        // notify_if_running on missing id → no-op (no panic).
+        store.notify_if_running("ghost", TaskState::Failed("nope".into()));
     }
 
     /// Audit C6: `cancel_all` must abort in-flight handles, mark
@@ -472,19 +1204,73 @@ mod tests {
         // Pending notifications gone.
         assert_eq!(store.pending_len(), 0, "cancel_all must clear pending");
 
-        // The still-Running task now reads as Failed("cancelled — ...").
+        // The still-Running task now reads as Cancelled("cancelled — ...").
         let t1 = store.get("t1").expect("t1 retained");
         match &t1.state {
-            TaskState::Failed(reason) => assert!(
+            TaskState::Cancelled(reason) => assert!(
                 reason.contains("cancelled"),
                 "expected cancellation reason; got {:?}",
                 reason
             ),
-            other => panic!("expected Failed cancelled, got {:?}", other),
+            other => panic!("expected Cancelled, got {:?}", other),
         }
 
         // Give the runtime a tick so the abort lands.
         tokio::task::yield_now().await;
+    }
+
+    /// C3: `cancel_all` collects and returns retained writer worktree
+    /// metadata BEFORE dropping the coordinator, so the user can find
+    /// their salvaged work instead of orphaned `dirge-task-*` dirs.
+    #[test]
+    fn cancel_all_reports_retained_worktrees() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+
+        // Seed a writer dispatch with a retained worktree.
+        store
+            .insert_coordinator_dispatch("w1".into(), "edit".into(), true, false, None)
+            .unwrap();
+        store
+            .set_coordinator_dispatch_worktree(
+                "w1",
+                "dirge-task-w1".into(),
+                "/tmp/dirge-task-w1".into(),
+            )
+            .unwrap();
+        store.set_coordinator_dispatch_worktree_outcome(
+            "w1",
+            vec!["abc123".into()],
+            true, // dirty
+            true, // retained
+        );
+
+        let retained = store.cancel_all();
+        assert_eq!(
+            retained.len(),
+            1,
+            "retained writer worktree must be reported"
+        );
+        assert_eq!(retained[0].branch.as_deref(), Some("dirge-task-w1"));
+        assert_eq!(retained[0].path.as_deref(), Some("/tmp/dirge-task-w1"));
+    }
+
+    /// C3: non-writer and non-retained dispatches must NOT appear in cancel_all output.
+    #[test]
+    fn cancel_all_omits_non_retained_and_readers() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+
+        // READER: non-writer — must not appear.
+        store
+            .insert_coordinator_dispatch("r1".into(), "read".into(), false, false, None)
+            .unwrap();
+
+        let retained = store.cancel_all();
+        assert!(
+            retained.is_empty(),
+            "non-writer dispatches must not appear in retained list"
+        );
     }
 
     // Regression: previously get() evicted completed/failed tasks. The new
@@ -733,7 +1519,7 @@ mod tests {
 
         let out = prepend_pending_notifications("user msg", Some(&store));
         assert!(out.starts_with("<system-reminder>\n"));
-        assert!(out.contains("Task t1 (completed):"));
+        assert!(out.contains("[task t1] completed: the result"));
         assert!(out.contains("the result"));
         assert!(out.contains("</system-reminder>\n\n"));
         assert!(out.ends_with("user msg"));
@@ -746,8 +1532,39 @@ mod tests {
         store.notify("t1", TaskState::Failed("kaboom".into()));
 
         let out = prepend_pending_notifications("user msg", Some(&store));
-        assert!(out.contains("Task t1 (failed):"));
+        assert!(out.contains("[task t1] failed: kaboom"));
         assert!(out.contains("kaboom"));
+    }
+
+    #[test]
+    fn coordinator_prepend_includes_reconciliation_metadata() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, true, None)
+            .unwrap();
+        store
+            .set_coordinator_dispatch_worktree(
+                "writer",
+                "dirge-task-writer".into(),
+                "/tmp/dirge-task-writer".into(),
+            )
+            .unwrap();
+        store.set_coordinator_dispatch_worktree_outcome(
+            "writer",
+            vec!["abc123".into()],
+            false,
+            true,
+        );
+        store.notify("writer", TaskState::Completed("done".into()));
+
+        let out = prepend_pending_notifications("user msg", Some(&store));
+        assert!(out.contains("prompt: edit code"));
+        assert!(out.contains("writer isolation: worktree"));
+        assert!(out.contains("writer branch: dirge-task-writer"));
+        assert!(out.contains("writer commits: abc123"));
+        assert!(out.contains("writer salvage path: /tmp/dirge-task-writer"));
+        assert!(out.contains("completed: done"));
     }
 
     // Regression: prepend MUST consume the queue. Calling it twice in
@@ -775,9 +1592,9 @@ mod tests {
         }
         let out = prepend_pending_notifications("msg", Some(&store));
         // FIFO order preserved.
-        let i0 = out.find("Task t0").unwrap();
-        let i1 = out.find("Task t1").unwrap();
-        let i2 = out.find("Task t2").unwrap();
+        let i0 = out.find("[task t0]").unwrap();
+        let i1 = out.find("[task t1]").unwrap();
+        let i2 = out.find("[task t2]").unwrap();
         assert!(i0 < i1 && i1 < i2);
     }
 
@@ -1068,6 +1885,40 @@ mod tests {
         assert_eq!(first.len(), 1);
         let second = hook().await;
         assert!(second.is_empty(), "second poll must not redeliver");
+    }
+
+    #[test]
+    fn coordinator_batch_withholds_partial_results_until_every_member_is_terminal() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store.insert_coordinated("first".into());
+        store.insert_coordinated("second".into());
+
+        store.notify("first", TaskState::Completed("one".into()));
+        assert!(store.drain_notifications().is_empty());
+        assert!(!store.has_pending_notifications());
+
+        store.notify("second", TaskState::Failed("two".into()));
+        let drained = store.drain_notifications();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].id, "first");
+        assert_eq!(drained[1].id, "second");
+        assert!(store.drain_notifications().is_empty());
+    }
+
+    #[test]
+    fn coordinator_opens_next_generation_after_delivery() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store.insert_coordinated("first".into());
+        store.notify("first", TaskState::Completed("one".into()));
+        assert_eq!(store.drain_notifications().len(), 1);
+
+        store.insert_coordinated("second".into());
+        store.notify("second", TaskState::Completed("two".into()));
+        let drained = store.drain_notifications();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, "second");
     }
 
     // Concurrency smoke: many threads inserting + notifying must not lose

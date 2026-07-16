@@ -6,12 +6,13 @@ use std::path::Path;
 
 use crate::agent::tools::MAX_FIND_RESULTS;
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm, check_perm_path};
+use crate::agent::tools::{AskSender, PermCheck, ToolError, ToolRoot, check_perm, check_perm_path};
 
 pub struct GlobTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
 }
 
 impl GlobTool {
@@ -24,6 +25,7 @@ impl GlobTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
         }
     }
 
@@ -40,7 +42,13 @@ impl GlobTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
         }
+    }
+
+    pub fn with_root(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -124,6 +132,14 @@ impl Tool for GlobTool {
     }
 
     async fn call(&self, args: GlobArgs) -> Result<String, ToolError> {
+        let path = match &self.root {
+            Some(root) => root.resolve(
+                args.path
+                    .as_deref()
+                    .unwrap_or_else(|| root.path().to_str().unwrap_or(".")),
+            )?,
+            None => args.path.as_deref().unwrap_or(".").to_string(),
+        };
         check_perm(
             &self.permission,
             &self.ask_tx,
@@ -134,18 +150,13 @@ impl Tool for GlobTool {
         // Path-side check: external_directory rules + Accept-mode
         // working-dir gating live in check_perm_path. Without this
         // a glob over `/etc` or `~/.ssh` skipped the rules entirely.
-        let perm_path = args.path.as_deref().unwrap_or(".");
-        check_perm_path(&self.permission, &self.ask_tx, "glob", perm_path).await?;
+        check_perm_path(&self.permission, &self.ask_tx, "glob", &path).await?;
 
         // LOOP-3: dir stamp catches file add/remove/rename.
-        let stamp =
-            crate::agent::tools::cache::fs_stamp_or_cwd(args.path.as_deref().unwrap_or("."));
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(&path);
         let cache_key = format!(
             "glob:{}:{}:hidden={}:{}",
-            args.pattern,
-            args.path.as_deref().unwrap_or("."),
-            args.include_hidden,
-            stamp,
+            args.pattern, path, args.include_hidden, stamp,
         );
         if let Some(ref cache) = self.cache
             && let Some(cached) = cache.get(&cache_key)
@@ -155,12 +166,7 @@ impl Tool for GlobTool {
 
         let re = glob_to_regex(&args.pattern).map_err(ToolError::Msg)?;
 
-        let root = args
-            .path
-            .as_deref()
-            .map(Path::new)
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| Path::new("."));
+        let root = Path::new(&path);
 
         let mut matches: Vec<(String, std::path::PathBuf)> = Vec::new();
 
@@ -355,6 +361,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "");
+    }
+
+    #[tokio::test]
+    async fn rooted_glob_defaults_to_root_and_rejects_escapes() {
+        let tree = TempTree::new("rooted");
+        tree.write("inside.rs", "");
+        let root = ToolRoot::new(&tree.root).unwrap();
+        let tool = GlobTool::new(None, None).with_root(root);
+
+        let out = tool
+            .call(GlobArgs {
+                pattern: "*.rs".into(),
+                path: None,
+                include_hidden: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "inside.rs");
+
+        let err = tool
+            .call(GlobArgs {
+                pattern: "*.rs".into(),
+                path: Some("..".into()),
+                include_hidden: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("path escapes ToolRoot"));
     }
 
     // Regression: mtime sort previously called metadata() on the relative path,

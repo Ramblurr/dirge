@@ -14,7 +14,16 @@ use crate::semantic::adapters::bash;
 #[allow(unused_imports)]
 use crate::sync_util::LockExt;
 
-/// dirge-sb2n: paths a bash command mutates — output-redirect targets
+#[cfg_attr(feature = "semantic-bash", allow(dead_code))]
+pub(crate) fn coarse_complex_syntax(command: &str) -> bool {
+    command.contains("$(")
+        || command.contains('`')
+        || command.contains("<(")
+        || command.contains(">(")
+        || command.contains("$'")
+        || command.contains("<<")
+}
+
 /// (`> f`, `cat > f <<'EOF'`) plus the positional args of file-mutating
 /// commands (`rm`/`mv`/`cp`/`touch`/…). Reuses the same tree-sitter
 /// extractors the permission layer runs (`extract_redirect_targets` +
@@ -241,7 +250,7 @@ pub(super) async fn check_bash_segments(
         // command-substitution / heredoc / ANSI-C quoting are checked as
         // one whole-command claim. Shared with the `/why` explainer
         // (dirge-p3vf) so enforcement and explanation can't drift.
-        let has_substitution = crate::semantic::adapters::bash::coarse_complex_syntax(command);
+        let has_substitution = coarse_complex_syntax(command);
         if has_substitution {
             claims.push(complex_cmd_claim(command));
         } else {

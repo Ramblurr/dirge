@@ -1,7 +1,7 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
-mod check;
+pub(crate) mod check;
 pub(crate) mod exec;
 use exec::spawn_streaming_shell;
 
@@ -13,12 +13,13 @@ use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, BashArgs, PermCheck, ToolError};
 
-use crate::sandbox::Sandbox;
+use crate::sandbox::{Sandbox, SandboxExecutionRoot};
 
 pub struct BashTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub sandbox: Sandbox,
+    execution_root: Option<SandboxExecutionRoot>,
     cache: Option<ToolCache>,
     /// Shared background-shell registry. When present, `background: true`
     /// runs the command detached (unbounded) and tracks it here so the
@@ -35,6 +36,7 @@ impl BashTool {
             permission,
             ask_tx,
             sandbox,
+            execution_root: None,
             cache: None,
             shell_store: None,
         }
@@ -50,9 +52,15 @@ impl BashTool {
             permission,
             ask_tx,
             sandbox,
+            execution_root: None,
             cache: Some(cache),
             shell_store: None,
         }
+    }
+
+    pub fn with_execution_root(mut self, execution_root: Option<SandboxExecutionRoot>) -> Self {
+        self.execution_root = execution_root;
+        self
     }
 
     /// Inject the shared background-shell registry so `background: true`
@@ -150,7 +158,11 @@ impl Tool for BashTool {
             if let Some(ref cache) = self.cache {
                 cache.clear();
             }
-            let wrapped = self.sandbox.wrap_command(&command);
+            let wrapped = if let Some(root) = &self.execution_root {
+                self.sandbox.wrap_command_in(&command, root)
+            } else {
+                self.sandbox.wrap_command(&command)
+            };
             let handle = spawn_streaming_shell(wrapped, store.clone(), id.clone(), args.timeout);
             store.attach_handle(&id, handle);
             let timeout_note = match args.timeout {
@@ -172,7 +184,11 @@ impl Tool for BashTool {
             return Err(ToolError::Msg("timeout must be > 0".to_string()));
         }
 
-        let output = self.sandbox.exec(&command, secs).await?;
+        let output = if let Some(root) = &self.execution_root {
+            self.sandbox.exec_in(&command, secs, root).await?
+        } else {
+            self.sandbox.exec(&command, secs).await?
+        };
 
         // F12: `merged` already contains stdout + stderr in arrival
         // order. Previously we concatenated stdout then stderr,

@@ -481,6 +481,49 @@ impl AnyAgent {
         (loop_runner.into_agent_runner(), review_cache)
     }
 
+    /// Fork a subagent using a freshly built, isolated tool registry.
+    pub fn spawn_subagent_runner_with_tools(
+        &self,
+        prompt: String,
+        system_prompt: String,
+        tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>>,
+        child_session_id: &str,
+        max_turns: usize,
+        model_override: Option<&AnyModel>,
+    ) -> crate::agent::runner::AgentRunner {
+        use crate::agent::agent_loop::{LoopSpawnConfig, retrying_stream_fn, spawn_loop_runner};
+        use crate::agent::recovery::RecoveryPolicy;
+
+        let tool_defs = Self::tool_defs_for(&tools);
+        let provider = model_override
+            .map(AnyModel::provider_name)
+            .unwrap_or_else(|| self.provider_name())
+            .to_string();
+        let inner_stream_fn = match model_override {
+            Some(model) => model.build_stream_fn_with_filter(
+                tool_defs,
+                self.chunk_timeout,
+                Some(provider.clone()),
+                None,
+            ),
+            None => self.build_stream_fn(tool_defs),
+        };
+        let mut cfg = LoopSpawnConfig::minimal(
+            retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default()),
+            prompt,
+        );
+        cfg.system_prompt = system_prompt;
+        cfg.tools = tools;
+        cfg.provider_name = Some(provider);
+        cfg.model_name = match model_override {
+            Some(model) => Some(model.name()),
+            None => Self::model_name_opt(&self.model_name),
+        };
+        cfg.session_id = Some(child_session_id.to_string());
+        cfg.max_turns = Some(max_turns);
+        spawn_loop_runner(cfg).into_agent_runner()
+    }
+
     /// Fork a filtered runner for a tooled subagent. Thin sibling of
     /// [`spawn_filtered_runner_with_cache`]: an isolated `ToolCache`, NO
     /// transcript (isolated child scope — the subagent sees only its prompt),
@@ -506,43 +549,16 @@ impl AnyAgent {
         // from the live agent (the parent's filtered registry).
         model_override: Option<&AnyModel>,
     ) -> crate::agent::runner::AgentRunner {
-        use crate::agent::agent_loop::{LoopSpawnConfig, retrying_stream_fn, spawn_loop_runner};
-        use crate::agent::recovery::RecoveryPolicy;
-
         let names: Vec<&str> = allowed.iter().map(String::as_str).collect();
         let tools = filter_loop_tools(&self.loop_tools, &names);
-        let tool_defs = Self::tool_defs_for(&tools);
-        let provider = model_override
-            .map(AnyModel::provider_name)
-            .unwrap_or_else(|| self.provider_name())
-            .to_string();
-        let inner_stream_fn = match model_override {
-            Some(m) => m.build_stream_fn_with_filter(
-                tool_defs,
-                self.chunk_timeout,
-                Some(provider.clone()),
-                None,
-            ),
-            None => self.build_stream_fn(tool_defs),
-        };
-        let stream_fn = retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default());
-
-        let mut cfg = LoopSpawnConfig::minimal(stream_fn, prompt);
-        cfg.system_prompt = system_prompt;
-        cfg.tools = tools;
-        cfg.provider_name = Some(provider);
-        cfg.model_name = match model_override {
-            Some(m) => Some(m.name()),
-            None => Self::model_name_opt(&self.model_name),
-        };
-        // Forward-safe: a fresh child id, parent-linked in spirit. Inert in v1
-        // — every tool that would consume a session id is force-excluded from
-        // `allowed`, so the id attributes nothing until the dirge-mifq audit
-        // opens those tools in a later tier.
-        cfg.session_id = Some(child_session_id.to_string());
-        cfg.max_turns = Some(max_turns);
-
-        spawn_loop_runner(cfg).into_agent_runner()
+        self.spawn_subagent_runner_with_tools(
+            prompt,
+            system_prompt,
+            tools,
+            child_session_id,
+            max_turns,
+            model_override,
+        )
     }
 
     /// Phase 4.5h-2: produce a `StreamFn` from this agent's

@@ -145,6 +145,9 @@ pub async fn build_agent(
             let question_tx_for_loop = question_tx.clone();
             let plan_tx_for_loop = plan_tx.clone();
             let bg_store_for_loop = bg_store.clone();
+            let coordinator_preamble = bg_store_for_loop
+                .as_ref()
+                .and_then(crate::agent::tools::background::BackgroundStore::coordinator_preamble);
             let sandbox_for_loop = sandbox.clone();
             // dirge-nw25: the loop's TaskTool gets the subagent-routed model
             // (subagent_provider when set, else the main model).
@@ -205,6 +208,12 @@ pub async fn build_agent(
                     preamble.push_str("\n\n");
                 }
                 preamble.push_str(crate::agent::prompt::DYNAMIC_TOOL_SEARCH_PROMPT);
+            }
+            if let Some(coordinator_preamble) = &coordinator_preamble {
+                if !preamble.is_empty() {
+                    preamble.push_str("\n\n");
+                }
+                preamble.push_str(&coordinator_preamble);
             }
 
             let mut agent = AnyAgent::new(

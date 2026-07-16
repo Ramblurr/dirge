@@ -652,6 +652,22 @@ impl<'de> Deserialize<'de> for SandboxConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubagentDispatchStrategy {
+    #[default]
+    Off,
+    Optional,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubagentWriteIsolation {
+    #[default]
+    Auto,
+    Worktree,
+    Serialize,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -771,6 +787,11 @@ pub struct Config {
     pub incremental_checkpoint: Option<bool>,
     /// Optional provider for sub-agents (`task` tool).
     pub subagent_provider: Option<String>,
+    /// Coordinator policy for tiered subagent dispatch. Missing, empty, and
+    /// unknown values keep the legacy uncoordinated behavior.
+    pub subagent_dispatch_strategy: Option<String>,
+    /// Writer isolation policy for coordinated read-write subagents.
+    pub subagent_write_isolation: Option<String>,
     /// Optional provider for the F6 in-loop critic (tier 3). When set,
     /// the verifier escalates to a bounded LLM critique at finalization
     /// on substantive runs. Unset (default) = no critic, no cost.
@@ -987,6 +1008,50 @@ impl Config {
             return Some((alias, ProviderEntry::default()));
         }
         None
+    }
+
+    pub fn resolve_subagent_dispatch_strategy(&self) -> SubagentDispatchStrategy {
+        match self
+            .subagent_dispatch_strategy
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("") | Some("off") => SubagentDispatchStrategy::Off,
+            Some("optional") => SubagentDispatchStrategy::Optional,
+            Some("full") => SubagentDispatchStrategy::Full,
+            Some(other) => {
+                tracing::warn!(
+                    target: "dirge::config",
+                    strategy = %other,
+                    "unknown subagent_dispatch_strategy; disabling coordinator mode"
+                );
+                SubagentDispatchStrategy::Off
+            }
+        }
+    }
+
+    pub fn resolve_subagent_write_isolation(&self) -> SubagentWriteIsolation {
+        match self
+            .subagent_write_isolation
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("") | Some("auto") => SubagentWriteIsolation::Auto,
+            Some("worktree") => SubagentWriteIsolation::Worktree,
+            Some("serialize") => SubagentWriteIsolation::Serialize,
+            Some(other) => {
+                tracing::warn!(
+                    target: "dirge::config",
+                    isolation = %other,
+                    "unknown subagent_write_isolation; using auto"
+                );
+                SubagentWriteIsolation::Auto
+            }
+        }
     }
 
     /// Resolve the critic's system preamble: the config override when set,
@@ -1676,6 +1741,49 @@ mod tests {
         assert_eq!(cfg.resolve_code_review_mode(), CodeReviewMode::Advisory);
         let cfg: Config = serde_json::from_str(r#"{ "code_review": "   " }"#).unwrap();
         assert_eq!(cfg.resolve_code_review_mode(), CodeReviewMode::Advisory);
+    }
+
+    #[test]
+    fn resolves_subagent_dispatch_strategy_tolerantly() {
+        let resolve = |value: Option<&str>| {
+            Config {
+                subagent_dispatch_strategy: value.map(str::to_string),
+                ..Default::default()
+            }
+            .resolve_subagent_dispatch_strategy()
+        };
+
+        assert_eq!(resolve(None), SubagentDispatchStrategy::Off);
+        assert_eq!(
+            resolve(Some("  OPTIONAL ")),
+            SubagentDispatchStrategy::Optional
+        );
+        assert_eq!(resolve(Some("full")), SubagentDispatchStrategy::Full);
+        assert_eq!(resolve(Some("")), SubagentDispatchStrategy::Off);
+        assert_eq!(resolve(Some("unknown")), SubagentDispatchStrategy::Off);
+    }
+
+    #[test]
+    fn resolves_subagent_write_isolation_tolerantly() {
+        let resolve = |value: Option<&str>| {
+            Config {
+                subagent_write_isolation: value.map(str::to_string),
+                ..Default::default()
+            }
+            .resolve_subagent_write_isolation()
+        };
+
+        assert_eq!(resolve(None), SubagentWriteIsolation::Auto);
+        assert_eq!(
+            resolve(Some(" worktree ")),
+            SubagentWriteIsolation::Worktree
+        );
+        assert_eq!(
+            resolve(Some("SERIALIZE")),
+            SubagentWriteIsolation::Serialize
+        );
+        assert_eq!(resolve(Some("")), SubagentWriteIsolation::Auto);
+        assert_eq!(resolve(Some("unknown")), SubagentWriteIsolation::Auto);
     }
 
     #[test]

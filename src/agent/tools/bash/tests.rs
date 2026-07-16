@@ -109,7 +109,79 @@ async fn background_bash_registers_shell_and_streams_output() {
     assert_eq!(store.running_count(), 0);
 }
 
-/// Test helper: build a single op-based rule (tool-agnostic).
+/// A rooted foreground BashTool executes from the supplied worktree.
+#[tokio::test]
+async fn rooted_foreground_bash_uses_worktree() {
+    use crate::agent::tools::BashArgs;
+    use crate::sandbox::{Sandbox, SandboxExecutionRoot, SandboxMode};
+
+    let worktree = std::env::temp_dir().join(format!("dirge-bash-root-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&worktree).unwrap();
+    let tool = BashTool::new(None, None, Sandbox::new(SandboxMode::Off)).with_execution_root(Some(
+        SandboxExecutionRoot {
+            worktree: worktree.clone(),
+            main_git_dir: worktree.join(".git"),
+        },
+    ));
+    let output = tool
+        .call(BashArgs {
+            command: "pwd".to_string(),
+            timeout: Some(5),
+            background: None,
+        })
+        .await
+        .unwrap();
+    assert!(output.contains(&*worktree.to_string_lossy()));
+    std::fs::remove_dir_all(worktree).unwrap();
+}
+
+/// A rooted background BashTool applies the execution root before spawning.
+#[tokio::test]
+async fn rooted_background_bash_uses_worktree() {
+    use crate::agent::tools::BashArgs;
+    use crate::agent::tools::bg_shell::BackgroundShellStore;
+    use crate::sandbox::{Sandbox, SandboxExecutionRoot, SandboxMode};
+
+    let worktree =
+        std::env::temp_dir().join(format!("dirge-bash-bg-root-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&worktree).unwrap();
+    let store = BackgroundShellStore::new();
+    let tool = BashTool::new(None, None, Sandbox::new(SandboxMode::Off))
+        .with_execution_root(Some(SandboxExecutionRoot {
+            worktree: worktree.clone(),
+            main_git_dir: worktree.join(".git"),
+        }))
+        .with_shell_store(Some(store.clone()));
+    let response = tool
+        .call(BashArgs {
+            command: "pwd".to_string(),
+            timeout: None,
+            background: Some(true),
+        })
+        .await
+        .unwrap();
+    let id = response
+        .split("id: ")
+        .nth(1)
+        .and_then(|s| s.split(['(', ' ']).next())
+        .unwrap();
+    let mut output = String::new();
+    for _ in 0..200 {
+        if let Some((chunk, status)) = store.read_new(id) {
+            output.push_str(&chunk);
+            if !status.is_running() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        output.contains(&*worktree.to_string_lossy()),
+        "got: {output}"
+    );
+    std::fs::remove_dir_all(worktree).unwrap();
+}
+
 #[cfg(feature = "semantic-bash")]
 fn rule(
     op: crate::permission::OpSpec,

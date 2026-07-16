@@ -4,7 +4,9 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm_path_resolve};
+use crate::agent::tools::{
+    AskSender, PermCheck, ToolError, ToolRoot, check_perm_path_resolve, resolve_tool_path,
+};
 
 /// Max content size for a single create op (1 MiB). Audit L5 noted
 /// the dual cap with the shared `text_io::MAX_EDIT_BYTES` (100 MiB) — both
@@ -36,6 +38,7 @@ pub struct ApplyPatchTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
 }
 
 impl ApplyPatchTool {
@@ -45,6 +48,7 @@ impl ApplyPatchTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
         }
     }
 
@@ -57,7 +61,13 @@ impl ApplyPatchTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
         }
+    }
+
+    pub fn with_root(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -269,17 +279,17 @@ impl Tool for ApplyPatchTool {
                 | PatchOp::Delete { path }
                 | PatchOp::Rename { path, .. } => path,
             };
-            // Shared absolute-path guard (the schema requires absolute
-            // paths for both fields).
-            crate::agent::tools::require_absolute_path(op_path, "the apply_patch path")
-                .map_err(ToolError::Msg)?;
-            if let PatchOp::Rename { new_path, .. } = op {
-                crate::agent::tools::require_absolute_path(
+            let resolved_op_path =
+                resolve_tool_path(self.root.as_ref(), op_path, "the apply_patch path")?;
+            let resolved_op_new_path = if let PatchOp::Rename { new_path, .. } = op {
+                Some(resolve_tool_path(
+                    self.root.as_ref(),
                     new_path,
                     "the apply_patch rename target",
-                )
-                .map_err(ToolError::Msg)?;
-            }
+                )?)
+            } else {
+                None
+            };
 
             // C1 (audit fix): resolve the path THROUGH the permission
             // checker so symlinks are pinned to their canonical target.
@@ -289,23 +299,30 @@ impl Tool for ApplyPatchTool {
             // check-time and open-time. Matches the H12 pattern
             // already applied to read/write/edit.
             let resolved_path = match op {
-                PatchOp::Create { path, .. }
-                | PatchOp::Update { path, .. }
-                | PatchOp::Delete { path }
-                | PatchOp::Rename { path, .. } => {
-                    check_perm_path_resolve(&self.permission, &self.ask_tx, "apply_patch", path)
-                        .await?
+                PatchOp::Create { .. }
+                | PatchOp::Update { .. }
+                | PatchOp::Delete { .. }
+                | PatchOp::Rename { .. } => {
+                    check_perm_path_resolve(
+                        &self.permission,
+                        &self.ask_tx,
+                        "apply_patch",
+                        &resolved_op_path,
+                    )
+                    .await?
                 }
             };
             // Rename also requires permission on the new path; pin
             // its canonical form too.
-            let resolved_new_path = if let PatchOp::Rename { new_path, .. } = op {
+            let resolved_new_path = if let PatchOp::Rename { .. } = op {
                 Some(
                     check_perm_path_resolve(
                         &self.permission,
                         &self.ask_tx,
                         "apply_patch",
-                        new_path,
+                        resolved_op_new_path
+                            .as_deref()
+                            .expect("resolved_op_new_path set for Rename"),
                     )
                     .await?,
                 )

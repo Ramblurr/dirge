@@ -6,7 +6,9 @@ use rig::tool::Tool;
 
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, EditArgs, PermCheck, ToolError, require_and_resolve};
+use crate::agent::tools::{
+    AskSender, EditArgs, PermCheck, ToolError, ToolRoot, require_and_resolve_rooted,
+};
 #[cfg(feature = "lsp")]
 use crate::lsp::manager::LspManager;
 
@@ -14,6 +16,7 @@ pub struct EditTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
     /// When set, the tool touches the edited file on the LSP server and
     /// appends any diagnostic block to its output. `None` reproduces the
     /// pre-LSP behaviour.
@@ -28,6 +31,7 @@ impl EditTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager: None,
         }
@@ -43,9 +47,15 @@ impl EditTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager,
         }
+    }
+
+    pub fn rooted(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 
     pub(crate) fn show_diff(
@@ -136,7 +146,8 @@ impl Tool for EditTool {
         // (shared guard; the schema requires an absolute path).
         // Audit H12: require absolute + pin file operations to the canonical
         // path the permission check resolved.
-        let resolved_path = require_and_resolve(
+        let resolved_path = require_and_resolve_rooted(
+            self.root.as_ref(),
             &self.permission,
             &self.ask_tx,
             "edit",
@@ -842,6 +853,7 @@ mod read_gate_tests {
             permission: None,
             ask_tx: None,
             cache: Some(cache),
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager: None,
         }

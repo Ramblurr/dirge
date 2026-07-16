@@ -26,8 +26,6 @@
 //! the `AnyAgent::spawn_runner` integration is highly likely
 //! to work too because it composes the same pieces.
 
-#![cfg(test)]
-
 use std::sync::Arc;
 
 use crate::agent::agent_loop::{

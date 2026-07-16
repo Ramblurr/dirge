@@ -9,6 +9,11 @@ use crate::permission::{PermissionConfig, SecurityMode};
 
 pub type PermCheck = Arc<Mutex<PermissionChecker>>;
 
+pub fn rooted_perm_check(checker: &PermCheck, working_dir: std::path::PathBuf) -> PermCheck {
+    let checker = checker.lock().unwrap().for_working_dir(working_dir);
+    Arc::new(Mutex::new(checker))
+}
+
 /// Synchronous decision result. A `CheckResult`-returning query API
 /// over the engine, used by the test oracle (`check`/`check_path`
 /// exercise the engine across ~1700 assertions). No production caller
@@ -64,6 +69,7 @@ fn effect_to_result(decision: engine::types::Decision) -> CheckResult {
 /// engine; the checker just normalizes inputs, holds the working
 /// directory + mode, and keeps a display copy of the session allowlist.
 pub struct PermissionChecker {
+    config: PermissionConfig,
     working_dir: String,
     /// Cached canonical form of `working_dir`. Used by
     /// `is_external_path` (a live API consumed by the MCP tool) to
@@ -111,6 +117,7 @@ impl PermissionChecker {
         let engine = engine::Engine::from_config(config);
 
         PermissionChecker {
+            config: config.clone(),
             working_dir,
             working_dir_canonical,
             session_allowlist: Vec::new(),
@@ -119,6 +126,17 @@ impl PermissionChecker {
             approval_fn: None,
             engine,
         }
+    }
+
+    /// Build a fresh checker for an isolated worktree without sharing mutable
+    /// session grants or retry counters with the parent session.
+    pub fn for_working_dir(&self, working_dir: std::path::PathBuf) -> Self {
+        let mut checker = Self::new(&self.config, self.mode, Some(working_dir));
+        checker.set_prompt_deny_tools(self.prompt_deny_tools.clone());
+        if let Some(approval_fn) = self.approval_fn() {
+            checker.set_approval_fn(approval_fn);
+        }
+        checker
     }
 
     /// dirge-0g6i: install the LLM auto-approval evaluator (built from
@@ -219,7 +237,11 @@ impl PermissionChecker {
                 // complex command as a prompt — not a head-rule allow — and
                 // never disagrees with enforcement (it used to miss heredocs).
                 "bash" | "shell" => {
-                    if crate::semantic::adapters::bash::command_is_complex(input) {
+                    #[cfg(feature = "semantic-bash")]
+                    let complex = crate::semantic::adapters::bash::command_is_complex(input);
+                    #[cfg(not(feature = "semantic-bash"))]
+                    let complex = crate::agent::tools::bash::check::coarse_complex_syntax(input);
+                    if complex {
                         Resource::command_complex(input)
                     } else {
                         Resource::command(input)

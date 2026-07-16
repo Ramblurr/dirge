@@ -6,14 +6,15 @@ use rig::tool::Tool;
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
-    AskSender, FindFilesArgs, MAX_FIND_RESULTS, PermCheck, ToolError, check_perm, check_perm_path,
-    is_skip_dir,
+    AskSender, FindFilesArgs, MAX_FIND_RESULTS, PermCheck, ToolError, ToolRoot, check_perm,
+    check_perm_path, is_skip_dir,
 };
 
 pub struct FindFilesTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
 }
 
 impl FindFilesTool {
@@ -23,6 +24,7 @@ impl FindFilesTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
         }
     }
 
@@ -35,7 +37,13 @@ impl FindFilesTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
         }
+    }
+
+    pub fn with_root(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -76,22 +84,25 @@ impl Tool for FindFilesTool {
     }
 
     async fn call(&self, args: FindFilesArgs) -> Result<String, ToolError> {
+        let path = match &self.root {
+            Some(root) => root.resolve(
+                args.path
+                    .as_deref()
+                    .unwrap_or_else(|| root.path().to_str().unwrap_or(".")),
+            )?,
+            None => args.path.as_deref().unwrap_or(".").to_string(),
+        };
         check_perm(&self.permission, &self.ask_tx, "find_files", &args.pattern).await?;
         // Path-side check: external_directory rules + Accept-mode
         // gating live in check_perm_path. Without this find_files
         // over `/etc` skipped the rules entirely.
-        let perm_path = args.path.as_deref().unwrap_or(".");
-        check_perm_path(&self.permission, &self.ask_tx, "find_files", perm_path).await?;
+        check_perm_path(&self.permission, &self.ask_tx, "find_files", &path).await?;
 
         // LOOP-3: dir stamp catches file add/remove/rename.
-        let stamp =
-            crate::agent::tools::cache::fs_stamp_or_cwd(args.path.as_deref().unwrap_or("."));
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(&path);
         let cache_key = format!(
             "find_files:{}:{}:hidden={}:{}",
-            args.pattern,
-            args.path.as_deref().unwrap_or("."),
-            args.include_hidden,
-            stamp,
+            args.pattern, path, args.include_hidden, stamp,
         );
 
         if let Some(ref cache) = self.cache
@@ -103,7 +114,7 @@ impl Tool for FindFilesTool {
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex: {}", e)))?;
 
-        let search_path = args.path.as_deref().unwrap_or(".");
+        let search_path = &path;
 
         // `WalkBuilder::hidden(true)` means SKIP hidden entries.
         // Default behavior (`include_hidden = false`) hides

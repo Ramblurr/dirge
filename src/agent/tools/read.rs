@@ -7,7 +7,9 @@ use rig::tool::Tool;
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::agent_loop::types::InjectionScanMode;
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, PermCheck, ReadArgs, ToolError, require_and_resolve};
+use crate::agent::tools::{
+    AskSender, PermCheck, ReadArgs, ToolError, ToolRoot, require_and_resolve_rooted,
+};
 use crate::extras::content_guard::guard_untrusted_result;
 #[cfg(feature = "lsp")]
 use crate::lsp::manager::{LspManager, TouchMode};
@@ -98,6 +100,7 @@ pub struct ReadTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
     /// When set, the tool fires off a `touch_file` to warm the LSP server
     /// so subsequent edits surface diagnostics quickly. Fire-and-forget:
     /// the read tool does not wait or surface diagnostics in its output.
@@ -114,6 +117,7 @@ impl ReadTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager: None,
             injection_scan_mode: InjectionScanMode::default(),
@@ -130,10 +134,16 @@ impl ReadTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager,
             injection_scan_mode: InjectionScanMode::default(),
         }
+    }
+
+    pub fn rooted(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 
     /// Set the injection scan mode (dirge-5ig9). Chain after construction.
@@ -198,7 +208,8 @@ impl Tool for ReadTool {
         // same canonical form the permission check ran against, so a symlink
         // swap between check and open can't land us on a different file than
         // the user authorized.
-        let resolved_path = require_and_resolve(
+        let resolved_path = require_and_resolve_rooted(
+            self.root.as_ref(),
             &self.permission,
             &self.ask_tx,
             "read",

@@ -4426,6 +4426,10 @@ pub async fn run_interactive(
                                         let head = sanitize_single_line(err, 80);
                                         (format!("[task {} failed: {}]", short, head), c_error())
                                     }
+                                    TS::Cancelled(reason) => {
+                                        let head = sanitize_single_line(reason, 80);
+                                        (format!("[task {} cancelled: {}]", short, head), c_tool())
+                                    }
                                     // Running is never queued for notification.
                                     TS::Running => continue,
                                 }

@@ -82,9 +82,100 @@ pub use webfetch::WebFetchTool;
 pub use websearch::WebSearchTool;
 pub use write::WriteTool;
 
+/// Canonical filesystem boundary for a set of rooted tools.
+///
+/// A root must exist when it is configured; targets may not, provided their
+/// nearest existing ancestor remains inside this root.
+#[derive(Clone, Debug)]
+pub struct ToolRoot(PathBuf);
+
+impl ToolRoot {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, ToolError> {
+        let root = std::fs::canonicalize(path.as_ref()).map_err(ToolError::from)?;
+        if !root.is_dir() {
+            return Err(ToolError::Msg(format!(
+                "ToolRoot is not a directory: {}",
+                root.display()
+            )));
+        }
+        Ok(Self(root))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Resolve `path` beneath this root, following existing symlinks and
+    /// allowing a missing suffix only below an in-root existing ancestor.
+    pub fn resolve(&self, path: &str) -> Result<String, ToolError> {
+        let input = Path::new(path);
+        let joined = if input.is_absolute() {
+            input.to_path_buf()
+        } else {
+            self.0.join(input)
+        };
+        let normalized = normalize_path(&joined)?;
+        let mut ancestor = normalized.as_path();
+        while !ancestor.exists() {
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| ToolError::Msg(format!("path escapes ToolRoot: {path}")))?;
+        }
+        let canonical_ancestor = std::fs::canonicalize(ancestor)?;
+        if !canonical_ancestor.starts_with(&self.0) {
+            return Err(ToolError::Msg(format!("path escapes ToolRoot: {path}")));
+        }
+        let suffix = normalized
+            .strip_prefix(ancestor)
+            .map_err(|_| ToolError::Msg(format!("path escapes ToolRoot: {path}")))?;
+        Ok(canonical_ancestor
+            .join(suffix)
+            .to_string_lossy()
+            .into_owned())
+    }
+}
+
+fn normalize_path(path: &Path) -> Result<PathBuf, ToolError> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => out.push(part),
+            Component::ParentDir => {
+                if !out.pop() {
+                    return Err(ToolError::Msg(format!(
+                        "path escapes ToolRoot: {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a path for an optionally rooted tool. Rootless tools preserve their
+/// historical absolute-path contract.
+pub fn resolve_tool_path(
+    root: Option<&ToolRoot>,
+    path: &str,
+    subject: &str,
+) -> Result<String, ToolError> {
+    match root {
+        Some(root) => root.resolve(path),
+        None => {
+            require_absolute_path(path, subject).map_err(ToolError::Msg)?;
+            Ok(path.to_string())
+        }
+    }
+}
+
 #[allow(unused_imports)]
 use crate::sync_util::LockExt;
 use std::io;
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -725,6 +816,20 @@ pub async fn check_perm_path_resolve(
     path: &str,
 ) -> Result<String, ToolError> {
     enforce(permission, ask_tx, tool, Scope::PathResolve(path)).await
+}
+
+/// Rooted path-tool preamble. Confinement always happens before permission
+/// checks, so an allow rule cannot authorize an escape.
+pub async fn require_and_resolve_rooted(
+    root: Option<&ToolRoot>,
+    permission: &Option<PermCheck>,
+    ask_tx: &Option<AskSender>,
+    tool: &str,
+    path: &str,
+    subject: &str,
+) -> Result<String, ToolError> {
+    let path = resolve_tool_path(root, path, subject)?;
+    check_perm_path_resolve(permission, ask_tx, tool, &path).await
 }
 
 /// The path-tool call preamble, in one place: require `path` be absolute, then

@@ -122,6 +122,7 @@ pub struct SubagentToolPolicy {
     pub allow: Vec<String>,
     pub deny: Vec<String>,
     pub max_turns: Option<usize>,
+    pub timeout_secs: Option<u64>,
 }
 
 /// `config.json` `agents.<name>.subagent` block (serde). Mirrors the `.md`
@@ -134,6 +135,7 @@ pub struct SubagentConfig {
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
     pub max_turns: Option<usize>,
+    pub timeout_secs: Option<u64>,
 }
 
 /// Map a tier name to its enum. Tolerant: known names map to variants,
@@ -248,6 +250,7 @@ impl AgentConfig {
                 allow: s.allow.unwrap_or_default(),
                 deny: s.deny.unwrap_or_default(),
                 max_turns: s.max_turns,
+                timeout_secs: s.timeout_secs,
             },
             source,
         }
@@ -386,6 +389,7 @@ pub(crate) fn parse_agent_md(name: &str, raw: &str, source: AgentSource) -> Agen
     let mut sub_allow: Option<Vec<String>> = None;
     let mut sub_deny: Option<Vec<String>> = None;
     let mut sub_max_turns: Option<usize> = None;
+    let mut sub_timeout_secs: Option<u64> = None;
     for line in front.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -404,6 +408,7 @@ pub(crate) fn parse_agent_md(name: &str, raw: &str, source: AgentSource) -> Agen
             "allow_tools" => allow = Some(parse_inline_list(value)),
             "subagent_tools" if !value.is_empty() => sub_tier = Some(value.to_string()),
             "subagent_max_turns" => sub_max_turns = value.parse::<usize>().ok(),
+            "subagent_timeout_secs" => sub_timeout_secs = value.parse::<u64>().ok(),
             "subagent_allow" => sub_allow = Some(parse_inline_list(value)),
             "subagent_deny" => sub_deny = Some(parse_inline_list(value)),
             _ => {}
@@ -418,6 +423,7 @@ pub(crate) fn parse_agent_md(name: &str, raw: &str, source: AgentSource) -> Agen
         allow: sub_allow.unwrap_or_default(),
         deny: sub_deny.unwrap_or_default(),
         max_turns: sub_max_turns,
+        timeout_secs: sub_timeout_secs,
     };
     def
 }

@@ -24,7 +24,9 @@ use rig::tool::Tool;
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::line_hash::line_hash;
-use crate::agent::tools::{AskSender, EditLinesArgs, PermCheck, ToolError, require_and_resolve};
+use crate::agent::tools::{
+    AskSender, EditLinesArgs, PermCheck, ToolError, ToolRoot, require_and_resolve_rooted,
+};
 #[cfg(feature = "lsp")]
 use crate::lsp::manager::LspManager;
 
@@ -32,6 +34,7 @@ pub struct EditLinesTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
     #[cfg(feature = "lsp")]
     #[allow(dead_code)]
     lsp_manager: Option<Arc<LspManager>>,
@@ -44,6 +47,7 @@ impl EditLinesTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager: None,
         }
@@ -59,9 +63,15 @@ impl EditLinesTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
             #[cfg(feature = "lsp")]
             lsp_manager,
         }
+    }
+
+    pub fn rooted(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -187,7 +197,8 @@ impl Tool for EditLinesTool {
     }
 
     async fn call(&self, args: EditLinesArgs) -> Result<String, ToolError> {
-        let resolved_path = require_and_resolve(
+        let resolved_path = require_and_resolve_rooted(
+            self.root.as_ref(),
             &self.permission,
             &self.ask_tx,
             "edit",

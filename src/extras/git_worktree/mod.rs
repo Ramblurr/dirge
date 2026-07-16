@@ -128,6 +128,94 @@ fn validate_branch_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_component(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "directory name {name:?} must be a safe single path component"
+        ));
+    }
+    Ok(())
+}
+
+pub fn create_at(
+    main_repo: &Path,
+    parent_dir: &Path,
+    branch: &str,
+    directory_name: &str,
+) -> Result<WorktreeInfo, String> {
+    validate_branch_name(branch)?;
+    validate_component(directory_name)?;
+    let main_repo = main_repo
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve main repository: {e}"))?;
+    let parent_dir = parent_dir
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve worktree parent: {e}"))?;
+    let worktree_path = parent_dir.join(directory_name);
+    let output = Command::new("git")
+        .current_dir(&main_repo)
+        .arg("-C")
+        .arg(&main_repo)
+        .args(["worktree", "add", "-b", branch, "--"])
+        .arg(&worktree_path)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let worktree_path = worktree_path.canonicalize().map_err(|e| {
+        let _ = remove_worktree(&main_repo, &worktree_path);
+        format!("failed to resolve worktree path: {e}")
+    })?;
+    Ok(WorktreeInfo {
+        branch: branch.to_string(),
+        worktree_path,
+        main_repo_path: main_repo,
+    })
+}
+
+pub fn repo_is_dirty(repo: &Path) -> Result<bool, String> {
+    is_dirty(repo)
+}
+
+#[allow(dead_code)]
+pub fn head_commit(repo: &Path) -> Result<String, String> {
+    git_in(repo, &["rev-parse", "HEAD"])
+}
+
+#[allow(dead_code)]
+pub fn worktree_is_dirty(info: &WorktreeInfo) -> Result<bool, String> {
+    is_dirty(&info.worktree_path)
+}
+
+#[allow(dead_code)]
+pub fn worktree_commits_since(info: &WorktreeInfo, base: &str) -> Result<Vec<String>, String> {
+    validate_branch_name(base)?;
+    let output = git_in(
+        &info.worktree_path,
+        &["log", "--format=%H", &format!("{base}..HEAD")],
+    )?;
+    Ok(output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+#[allow(dead_code)]
+pub fn remove_worktree_if_clean(info: &WorktreeInfo) -> Result<bool, String> {
+    if worktree_is_dirty(info)?
+        || !worktree_commits_since(info, &head_commit(&info.main_repo_path)?)?.is_empty()
+    {
+        return Ok(false);
+    }
+    remove_worktree(&info.main_repo_path, &info.worktree_path)?;
+    Ok(true)
+}
+
 pub fn create(name: &str) -> Result<(PathBuf, WorktreeInfo), String> {
     validate_branch_name(name)?;
     let target = format!("../{}", name);
@@ -432,6 +520,24 @@ mod merge_tests {
         assert!(
             err.contains("uncommitted"),
             "error names the dirty state: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn committed_worktree_is_retained_by_clean_only_removal() {
+        let (info, root) = setup();
+        write(&info.worktree_path.join("committed.txt"), "retain me\n");
+        git(&info.worktree_path, &["add", "."]);
+        git(&info.worktree_path, &["commit", "-m", "retain worktree"]);
+
+        assert!(
+            !remove_worktree_if_clean(&info).expect("retention check succeeds"),
+            "committed worktree must remain available for salvage"
+        );
+        assert!(
+            info.worktree_path.exists(),
+            "committed checkout is retained"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

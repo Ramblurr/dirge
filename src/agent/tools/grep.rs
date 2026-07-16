@@ -6,14 +6,15 @@ use rig::tool::Tool;
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
-    AskSender, GrepArgs, MAX_GREP_RESULTS, PermCheck, ToolError, check_perm, check_perm_path,
-    is_skip_dir,
+    AskSender, GrepArgs, MAX_GREP_RESULTS, PermCheck, ToolError, ToolRoot, check_perm,
+    check_perm_path, is_skip_dir,
 };
 
 pub struct GrepTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
 }
 
 impl GrepTool {
@@ -23,6 +24,7 @@ impl GrepTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
         }
     }
 
@@ -35,7 +37,13 @@ impl GrepTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
         }
+    }
+
+    pub fn with_root(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 
     fn glob_to_regex(glob: &str) -> String {
@@ -113,14 +121,21 @@ impl Tool for GrepTool {
     }
 
     async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
+        let path = match &self.root {
+            Some(root) => root.resolve(
+                args.path
+                    .as_deref()
+                    .unwrap_or_else(|| root.path().to_str().unwrap_or(".")),
+            )?,
+            None => args.path.as_deref().unwrap_or(".").to_string(),
+        };
         check_perm(&self.permission, &self.ask_tx, "grep", &args.pattern).await?;
         // Path-side check: previously grep accepted any path
         // (`grep("x", "/etc")`) because only the pattern was
         // permission-checked. external_directory rules + the
         // working-dir Accept-mode logic live in check_perm_path,
         // so an extra call here closes the bypass.
-        let perm_path = args.path.as_deref().unwrap_or(".");
-        check_perm_path(&self.permission, &self.ask_tx, "grep", perm_path).await?;
+        check_perm_path(&self.permission, &self.ask_tx, "grep", &path).await?;
 
         // LOOP-3: include dir stamp so external file additions /
         // mtime changes within the search root invalidate the
@@ -129,12 +144,11 @@ impl Tool for GrepTool {
         // filesystem), so the cache may still go stale for in-
         // place edits within the dir — but the common case
         // (file add/remove/rename) is caught.
-        let stamp =
-            crate::agent::tools::cache::fs_stamp_or_cwd(args.path.as_deref().unwrap_or("."));
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(&path);
         let cache_key = format!(
             "grep:{}:{}:{}:{}:hidden={}:{}",
             args.pattern,
-            args.path.as_deref().unwrap_or("."),
+            path,
             args.include.as_deref().unwrap_or(""),
             args.context_lines.unwrap_or(0),
             args.include_hidden,
@@ -150,7 +164,7 @@ impl Tool for GrepTool {
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex pattern: {}", e)))?;
 
-        let search_path = args.path.as_deref().unwrap_or(".");
+        let search_path = &path;
         let context = args.context_lines.unwrap_or(0);
 
         // Validate the include glob and surface compile errors

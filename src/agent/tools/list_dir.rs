@@ -7,7 +7,7 @@ use rig::tool::Tool;
 use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
-    AskSender, ListDirArgs, PermCheck, ToolError, check_perm_path, is_skip_dir,
+    AskSender, ListDirArgs, PermCheck, ToolError, ToolRoot, check_perm_path, is_skip_dir,
 };
 
 fn format_size(bytes: u64) -> String {
@@ -35,6 +35,7 @@ pub struct ListDirTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
 }
 
 impl ListDirTool {
@@ -44,6 +45,7 @@ impl ListDirTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
         }
     }
 
@@ -56,7 +58,13 @@ impl ListDirTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
         }
+    }
+
+    pub fn with_root(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -92,11 +100,18 @@ impl Tool for ListDirTool {
     }
 
     async fn call(&self, args: ListDirArgs) -> Result<String, ToolError> {
-        let path = args.path.as_deref().unwrap_or(".");
-        check_perm_path(&self.permission, &self.ask_tx, "list_dir", path).await?;
+        let path = match &self.root {
+            Some(root) => root.resolve(
+                args.path
+                    .as_deref()
+                    .unwrap_or_else(|| root.path().to_str().unwrap_or(".")),
+            )?,
+            None => args.path.as_deref().unwrap_or(".").to_string(),
+        };
+        check_perm_path(&self.permission, &self.ask_tx, "list_dir", &path).await?;
 
         // LOOP-3: dir stamp invalidates the cache on external mtime changes.
-        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(path);
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(&path);
         let cache_key = format!("list_dir:{}:hidden={}:{}", path, args.include_hidden, stamp,);
 
         if let Some(ref cache) = self.cache

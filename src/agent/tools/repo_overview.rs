@@ -6,7 +6,7 @@ use rig::tool::Tool;
 use serde::Deserialize;
 
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm_path};
+use crate::agent::tools::{AskSender, PermCheck, ToolError, ToolRoot, check_perm_path};
 
 /// Maximum repo_overview tree nodes (dirs + files) emitted. Bound so
 /// a sprawling monorepo doesn't dump a 50 000-line tree at the LLM.
@@ -38,6 +38,7 @@ pub struct RepoOverviewTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     cache: Option<ToolCache>,
+    root: Option<ToolRoot>,
 }
 
 impl RepoOverviewTool {
@@ -47,6 +48,7 @@ impl RepoOverviewTool {
             permission,
             ask_tx,
             cache: None,
+            root: None,
         }
     }
 
@@ -59,7 +61,13 @@ impl RepoOverviewTool {
             permission,
             ask_tx,
             cache: Some(cache),
+            root: None,
         }
+    }
+
+    pub fn with_root(mut self, root: ToolRoot) -> Self {
+        self.root = Some(root);
+        self
     }
 }
 
@@ -96,8 +104,15 @@ impl Tool for RepoOverviewTool {
     }
 
     async fn call(&self, args: RepoOverviewArgs) -> Result<String, ToolError> {
-        let path = args.path.as_deref().unwrap_or(".");
-        check_perm_path(&self.permission, &self.ask_tx, "repo_overview", path).await?;
+        let path = match &self.root {
+            Some(root) => root.resolve(
+                args.path
+                    .as_deref()
+                    .unwrap_or_else(|| root.path().to_str().unwrap_or(".")),
+            )?,
+            None => args.path.as_deref().unwrap_or(".").to_string(),
+        };
+        check_perm_path(&self.permission, &self.ask_tx, "repo_overview", &path).await?;
 
         let depth = args
             .max_depth
@@ -106,7 +121,7 @@ impl Tool for RepoOverviewTool {
         let want_lines = args.include_line_counts.unwrap_or(false);
 
         // LOOP-3: include root-dir stamp so external edits invalidate.
-        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(path);
+        let stamp = crate::agent::tools::cache::fs_stamp_or_cwd(&path);
         let cache_key = format!("repo_overview:{}:{}:{}:{}", path, depth, want_lines, stamp,);
         if let Some(ref cache) = self.cache
             && let Some(cached) = cache.get(&cache_key)
@@ -114,7 +129,7 @@ impl Tool for RepoOverviewTool {
             return Ok(cached);
         }
 
-        let root = PathBuf::from(path);
+        let root = PathBuf::from(&path);
         if !root.exists() {
             return Err(ToolError::Msg(format!("path does not exist: {}", path)));
         }

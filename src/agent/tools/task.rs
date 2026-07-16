@@ -20,7 +20,80 @@ use uuid::Uuid;
 use crate::agent::agent_loop::tool::AbortSignal;
 use crate::agent::tools::background::{BackgroundStore, TaskState};
 use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm};
+use crate::config::SubagentWriteIsolation;
 use crate::provider::AnyModel;
+use crate::sandbox::Sandbox;
+
+#[cfg(feature = "git-worktree")]
+type WriterWorktree = crate::extras::git_worktree::WorktreeInfo;
+
+#[cfg(not(feature = "git-worktree"))]
+#[allow(dead_code)]
+#[derive(Clone)]
+struct WriterWorktree {
+    branch: String,
+    worktree_path: std::path::PathBuf,
+    main_repo_path: std::path::PathBuf,
+}
+
+fn writer_worktree_enabled(
+    is_writer: bool,
+    isolation: SubagentWriteIsolation,
+    is_microvm: bool,
+    sandbox_confines_writes: bool,
+) -> Result<bool, &'static str> {
+    if !is_writer || isolation == SubagentWriteIsolation::Serialize {
+        return Ok(false);
+    }
+    if is_microvm {
+        return match isolation {
+            SubagentWriteIsolation::Worktree => {
+                Err("worktree write isolation is unavailable in microVM sandbox mode")
+            }
+            SubagentWriteIsolation::Auto => Ok(false),
+            SubagentWriteIsolation::Serialize => Ok(false),
+        };
+    }
+    if !sandbox_confines_writes {
+        return match isolation {
+            SubagentWriteIsolation::Worktree => Err(
+                "worktree write isolation requires a confining sandbox; run dirge with a Linux bwrap sandbox, or the writer's shell could escape the worktree",
+            ),
+            SubagentWriteIsolation::Auto => Ok(false),
+            SubagentWriteIsolation::Serialize => unreachable!(),
+        };
+    }
+    Ok(true)
+}
+
+/// Check whether the process's current directory (the parent checkout)
+/// is dirty. Returns `Err` when we're not in a git repo at all — the
+/// caller should treat that as "no uncommitted work to clobber."
+fn current_repo_is_dirty() -> Result<bool, String> {
+    let repo = std::env::current_dir()
+        .map_err(|e| format!("failed to resolve current directory: {e}"))?
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize repository: {e}"))?;
+    crate::extras::git_worktree::repo_is_dirty(&repo)
+}
+
+#[cfg(feature = "git-worktree")]
+fn create_writer_worktree(
+    task_id: &str,
+) -> Result<crate::extras::git_worktree::WorktreeInfo, String> {
+    let repo = std::env::current_dir()
+        .map_err(|e| format!("failed to resolve current directory: {e}"))?
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize current repository: {e}"))?;
+    if crate::extras::git_worktree::repo_is_dirty(&repo)? {
+        return Err("current repository has uncommitted changes".to_string());
+    }
+    let parent = repo
+        .parent()
+        .ok_or_else(|| "current repository has no parent directory".to_string())?;
+    let name = format!("dirge-task-{task_id}");
+    crate::extras::git_worktree::create_at(&repo, parent, &name, &name)
+}
 
 /// dirge-ov2 Phase D: subagent chat-window event. Sent by `TaskTool`
 /// when it spawns / completes a subagent so the UI loop can surface
@@ -191,6 +264,10 @@ fn spawn_abort_watcher(
 struct SubagentCleanup {
     id: String,
     watcher: Option<tokio::task::JoinHandle<()>>,
+    /// When set, `Drop` calls `notify_if_running` with a Failed state so a
+    /// panic / early-return in the spawned closure doesn't leave the task
+    /// stuck Running forever (which would stall the coordinator batch barrier).
+    store: Option<BackgroundStore>,
 }
 
 impl SubagentCleanup {
@@ -198,6 +275,30 @@ impl SubagentCleanup {
         Self {
             id,
             watcher: Some(watcher),
+            store: None,
+        }
+    }
+
+    fn with_store(
+        id: String,
+        watcher: tokio::task::JoinHandle<()>,
+        store: BackgroundStore,
+    ) -> Self {
+        Self {
+            id,
+            watcher: Some(watcher),
+            store: Some(store),
+        }
+    }
+
+    /// Drop-guard for a spawned closure that has no abort-watcher.
+    /// Only carries the store so `Drop` can call `notify_if_running`
+    /// on a panic / early-return.
+    fn from_store(id: String, store: BackgroundStore) -> Self {
+        Self {
+            id,
+            watcher: None,
+            store: Some(store),
         }
     }
 }
@@ -208,6 +309,12 @@ impl Drop for SubagentCleanup {
             watcher.abort();
         }
         unregister_subagent_abort(&self.id);
+        if let Some(store) = &self.store {
+            store.notify_if_running(
+                &self.id,
+                TaskState::Failed("subagent exited without producing a result".into()),
+            );
+        }
     }
 }
 
@@ -296,6 +403,22 @@ pub const SUBAGENT_DEFAULT_MAX_TURNS: usize = 25;
 /// and the task is the user message.
 const SUBAGENT_DEFAULT_PREAMBLE: &str = "You are a subagent working on a specific subtask. Complete it thoroughly using the tools available to you. You cannot spawn further subagents.";
 
+fn writer_preamble(
+    route_preamble: Option<&str>,
+    worktree: &std::path::Path,
+    branch: &str,
+) -> String {
+    let mut preamble = route_preamble
+        .unwrap_or(SUBAGENT_DEFAULT_PREAMBLE)
+        .to_string();
+    preamble.push_str(&format!(
+        "\n\nYou are an isolated writer. Your root is {} on branch {}. Do not modify the parent checkout. Inspect git status, stage intended changes, make one descriptive commit, and report the commit hash, changed files, tests run, and unresolved issues.",
+        worktree.display(),
+        branch,
+    ));
+    preamble
+}
+
 /// Resolve a profile's subagent policy into the exact allow-list for the
 /// tooled fork.
 ///
@@ -342,6 +465,26 @@ pub fn resolve_subagent_max_turns(p: &crate::context::agent_defs::SubagentToolPo
     p.max_turns.unwrap_or(SUBAGENT_DEFAULT_MAX_TURNS)
 }
 
+/// Per-subagent timeout honoring profile configuration, clamped to a bounded
+/// interval so a typo cannot create either immediate failures or stuck tasks.
+pub fn resolve_subagent_timeout(
+    p: &crate::context::agent_defs::SubagentToolPolicy,
+) -> std::time::Duration {
+    const DEFAULT_SECS: u64 = 600;
+    const MIN_SECS: u64 = 30;
+    const MAX_SECS: u64 = 3600;
+    let raw = p.timeout_secs.unwrap_or(DEFAULT_SECS);
+    let secs = raw.clamp(MIN_SECS, MAX_SECS);
+    if secs != raw {
+        tracing::warn!(
+            timeout_secs = raw,
+            resolved_timeout_secs = secs,
+            "subagent timeout is outside the supported range; clamping"
+        );
+    }
+    std::time::Duration::from_secs(secs)
+}
+
 /// dirge-ykeu Phase 4: a pre-resolved subagent routing for one agent profile.
 /// Built once at startup (in `main`, where the client + config + registry are
 /// all available) so `TaskTool` needs neither the client nor the config to
@@ -361,6 +504,44 @@ pub struct SubagentRoute {
     /// Per-subagent turn cap. Honors a profile `subagent.max_turns` override
     /// else [`SUBAGENT_DEFAULT_MAX_TURNS`]. Only consumed on the tooled path.
     pub max_turns: usize,
+    pub timeout: std::time::Duration,
+    pub tier: crate::context::agent_defs::SubagentToolTier,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoordinatorProfile {
+    pub name: String,
+    pub description: Option<String>,
+    pub tier: crate::context::agent_defs::SubagentToolTier,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CoordinatorProfiles {
+    pub readonly: Vec<CoordinatorProfile>,
+    pub readwrite: Vec<CoordinatorProfile>,
+}
+
+pub fn resolve_coordinator_profiles(
+    agent_defs: &crate::context::agent_defs::AgentRegistry,
+) -> CoordinatorProfiles {
+    let mut profiles = CoordinatorProfiles::default();
+    for definition in agent_defs.iter() {
+        let profile = CoordinatorProfile {
+            name: definition.name.clone(),
+            description: definition.description.clone(),
+            tier: definition.subagent.tier.clone(),
+        };
+        match &profile.tier {
+            crate::context::agent_defs::SubagentToolTier::Readonly => {
+                profiles.readonly.push(profile)
+            }
+            crate::context::agent_defs::SubagentToolTier::ReadWrite => {
+                profiles.readwrite.push(profile)
+            }
+            crate::context::agent_defs::SubagentToolTier::Toolless => {}
+        }
+    }
+    profiles
 }
 
 /// Process-global map of profile name → routing. Set once at interactive
@@ -585,6 +766,8 @@ pub struct TaskTool {
     pub ask_tx: Option<AskSender>,
     model: AnyModel,
     bg_store: BackgroundStore,
+    sandbox: Sandbox,
+    write_isolation: SubagentWriteIsolation,
     /// dirge-ov2: send-side of the subagent-chat-event channel.
     /// `Option` so `--no-tools` paths / tests can omit the UI sink
     /// without forcing every TaskTool builder to manufacture one.
@@ -597,12 +780,16 @@ impl TaskTool {
         ask_tx: Option<AskSender>,
         model: AnyModel,
         bg_store: BackgroundStore,
+        sandbox: Sandbox,
+        write_isolation: SubagentWriteIsolation,
     ) -> Self {
         Self {
             permission,
             ask_tx,
             model,
             bg_store,
+            sandbox,
+            write_isolation,
             chat_sink: None,
         }
     }
@@ -650,7 +837,10 @@ impl TaskTool {
         route_preamble: Option<String>,
         allowed: Vec<String>,
         max_turns: usize,
+        timeout: std::time::Duration,
         background: bool,
+        is_writer: bool,
+        retry_of: Option<String>,
         prompt: String,
         agent_name: Option<String>,
     ) -> Result<String, ToolError> {
@@ -674,7 +864,137 @@ impl TaskTool {
                 )));
             }
             let task_id = Uuid::new_v4().to_string();
-            self.bg_store.insert(task_id.clone());
+            let coordinator_dispatch = self.bg_store.coordinator_strategy().is_some();
+            let attempts_isolated_writer = coordinator_dispatch
+                && writer_worktree_enabled(
+                    is_writer,
+                    self.write_isolation,
+                    self.sandbox.is_microvm(),
+                    self.sandbox.confines_writes(),
+                )
+                .map_err(|error| ToolError::Msg(error.to_string()))?;
+            if coordinator_dispatch {
+                self.bg_store
+                    .insert_coordinator_dispatch(
+                        task_id.clone(),
+                        prompt.clone(),
+                        is_writer,
+                        attempts_isolated_writer,
+                        retry_of.as_deref(),
+                    )
+                    .map_err(ToolError::Msg)?;
+            } else {
+                self.bg_store.insert_for_dispatch(task_id.clone());
+            }
+
+            // Coordinator ReadWrite agents may be rooted in a dedicated
+            // worktree. Auto preserves serialization when any prerequisite is
+            // unavailable; explicit Worktree reports that failure.
+            let rooted_worktree: Option<(WriterWorktree, std::path::PathBuf, String)> =
+                if attempts_isolated_writer {
+                    #[cfg(feature = "git-worktree")]
+                    match create_writer_worktree(&task_id) {
+                        Ok(info) => {
+                            let main_git_dir = info.main_repo_path.join(".git");
+                            let base_commit = match crate::extras::git_worktree::head_commit(
+                                &info.main_repo_path,
+                            ) {
+                                Ok(commit) => commit,
+                                Err(error) => {
+                                    let _ = crate::extras::git_worktree::remove_worktree_if_clean(
+                                        &info,
+                                    );
+                                    self.bg_store
+                                        .notify(&task_id, TaskState::Failed(error.clone()));
+                                    return Err(ToolError::Msg(error));
+                                }
+                            };
+                            if let Err(error) = self.bg_store.set_coordinator_dispatch_worktree(
+                                &task_id,
+                                info.branch.clone(),
+                                info.worktree_path.display().to_string(),
+                            ) {
+                                let _ =
+                                    crate::extras::git_worktree::remove_worktree_if_clean(&info);
+                                self.bg_store
+                                    .notify(&task_id, TaskState::Failed(error.clone()));
+                                return Err(ToolError::Msg(error));
+                            }
+                            self.bg_store
+                                .register_writer_worktree(task_id.clone(), info.clone());
+                            Some((info, main_git_dir, base_commit))
+                        }
+                        Err(_) if self.write_isolation == SubagentWriteIsolation::Auto => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                "worktree writer isolation unavailable; falling back to serialized parent checkout"
+                            );
+                            if let Err(error) = self
+                                .bg_store
+                                .set_coordinator_dispatch_isolated(&task_id, false)
+                            {
+                                self.bg_store
+                                    .notify(&task_id, TaskState::Failed(error.clone()));
+                                return Err(ToolError::Msg(error));
+                            }
+                            None
+                        }
+                        Err(error) => {
+                            self.bg_store
+                                .notify(&task_id, TaskState::Failed(error.clone()));
+                            return Err(ToolError::Msg(error));
+                        }
+                    }
+                    #[cfg(not(feature = "git-worktree"))]
+                    {
+                        if self.write_isolation == SubagentWriteIsolation::Auto {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                "git-worktree support is unavailable; falling back to serialized parent checkout"
+                            );
+                            if let Err(error) = self
+                                .bg_store
+                                .set_coordinator_dispatch_isolated(&task_id, false)
+                            {
+                                self.bg_store
+                                    .notify(&task_id, TaskState::Failed(error.clone()));
+                                return Err(ToolError::Msg(error));
+                            }
+                            None
+                        } else {
+                            let error =
+                                "worktree write isolation requires the git-worktree feature"
+                                    .to_string();
+                            self.bg_store
+                                .notify(&task_id, TaskState::Failed(error.clone()));
+                            return Err(ToolError::Msg(error));
+                        }
+                    }
+                } else {
+                    None
+                };
+            // A read-write subagent without worktree isolation runs in the
+            // parent checkout. Refuse to do this when the parent is dirty —
+            // the writer's edits and `git add -A` + `git commit` would
+            // clobber uncommitted work (data loss). This fires for BOTH the
+            // attempts_isolated_writer=false path AND the auto-fallback after
+            // a failed worktree creation.
+            if is_writer && rooted_worktree.is_none() {
+                match current_repo_is_dirty() {
+                    Ok(true) => {
+                        let error = "cannot run a read-write subagent in a dirty parent \
+                                     checkout without worktree isolation — commit or \
+                                     stash your changes, or run under a Linux bwrap \
+                                     sandbox for isolated worktrees"
+                            .to_string();
+                        self.bg_store
+                            .notify(&task_id, TaskState::Failed(error.clone()));
+                        return Err(ToolError::Msg(error));
+                    }
+                    Ok(false) => { /* clean — safe to proceed */ }
+                    Err(_) => { /* not a git repo — no uncommitted work to clobber */ }
+                }
+            }
             self.bg_store.notify_started(&task_id);
             self.emit_chat(SubagentChatEvent::Spawn {
                 id: task_id.clone(),
@@ -691,29 +1011,100 @@ impl TaskTool {
             let allowed_for_task = allowed.clone();
             let model_for_task = route_model.clone();
             let abort_for_task = abort.clone();
+            let permission_for_task = self.permission.clone();
+            let ask_tx_for_task = self.ask_tx.clone();
+            let sandbox_for_task = self.sandbox.clone();
+            let rooted_worktree_for_task = rooted_worktree.clone();
 
-            const SUBAGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+            let route_timeout = timeout;
             let store_for_task = store.clone();
             let handle = tokio::spawn(async move {
                 let child_sid = format!("sub-{}", crate::agent::runner::uuid_v4_simple());
-                let system_prompt = preamble_for_task
-                    .as_deref()
-                    .unwrap_or(SUBAGENT_DEFAULT_PREAMBLE)
-                    .to_string();
-                let runner = agent.spawn_subagent_runner(
-                    prompt.clone(),
-                    system_prompt,
-                    &allowed_for_task,
-                    &child_sid,
-                    max_turns,
-                    model_for_task.as_ref(),
-                );
+                let system_prompt = if let Some((info, _, _)) = rooted_worktree_for_task.as_ref() {
+                    writer_preamble(
+                        preamble_for_task.as_deref(),
+                        &info.worktree_path,
+                        &info.branch,
+                    )
+                } else {
+                    preamble_for_task
+                        .as_deref()
+                        .unwrap_or(SUBAGENT_DEFAULT_PREAMBLE)
+                        .to_string()
+                };
+                let runner = if let Some((info, main_git_dir, base_commit)) =
+                    rooted_worktree_for_task.as_ref()
+                {
+                    let worktree = info.worktree_path.clone();
+                    let root = match crate::agent::tools::ToolRoot::new(&worktree) {
+                        Ok(root) => root,
+                        Err(error) => {
+                            let state = TaskState::Failed(error.to_string());
+                            #[cfg(feature = "git-worktree")]
+                            {
+                                let commits = crate::extras::git_worktree::worktree_commits_since(
+                                    info,
+                                    base_commit,
+                                )
+                                .unwrap_or_default();
+                                let dirty = crate::extras::git_worktree::worktree_is_dirty(info)
+                                    .unwrap_or(true);
+                                let retained = dirty || !commits.is_empty();
+                                if !retained {
+                                    let _ =
+                                        crate::extras::git_worktree::remove_worktree_if_clean(info);
+                                }
+                                store_for_task.set_coordinator_dispatch_worktree_outcome(
+                                    &tid_for_task,
+                                    commits,
+                                    dirty,
+                                    retained,
+                                );
+                                store_for_task.unregister_writer_worktree(&tid_for_task);
+                            }
+                            store_for_task.notify(&tid_for_task, state);
+                            return;
+                        }
+                    };
+                    let tools = crate::agent::builder::build_rooted_writer_tools(
+                        root,
+                        permission_for_task,
+                        ask_tx_for_task,
+                        sandbox_for_task,
+                        crate::sandbox::SandboxExecutionRoot {
+                            worktree,
+                            main_git_dir: main_git_dir.clone(),
+                        },
+                    )
+                    .await;
+                    agent.spawn_subagent_runner_with_tools(
+                        prompt.clone(),
+                        system_prompt,
+                        tools,
+                        &child_sid,
+                        max_turns,
+                        model_for_task.as_ref(),
+                    )
+                } else {
+                    agent.spawn_subagent_runner(
+                        prompt.clone(),
+                        system_prompt,
+                        &allowed_for_task,
+                        &child_sid,
+                        max_turns,
+                        model_for_task.as_ref(),
+                    )
+                };
                 let abort_watcher = spawn_abort_watcher(
                     abort_for_task.clone(),
                     runner.task.abort_handle(),
                     runner.cancel_tx.clone(),
                 );
-                let _cleanup = SubagentCleanup::new(tid_for_task.clone(), abort_watcher);
+                let _cleanup = SubagentCleanup::with_store(
+                    tid_for_task.clone(),
+                    abort_watcher,
+                    store_for_task.clone(),
+                );
                 let chat_sink_drain = chat_sink.clone();
                 let emit = move |ev: SubagentChatEvent| {
                     if let Some(sink) = &chat_sink_drain {
@@ -723,7 +1114,7 @@ impl TaskTool {
                     }
                 };
                 let drained = drain_subagent_runner(runner, &tid_for_task, emit);
-                let outer = tokio::time::timeout(SUBAGENT_TIMEOUT, drained).await;
+                let outer = tokio::time::timeout(route_timeout, drained).await;
                 let aborted = abort_for_task.is_cancelled();
                 let (state, chat_event) = match outer {
                     Ok(Ok(text)) => (TaskState::Completed(text), None),
@@ -731,7 +1122,7 @@ impl TaskTool {
                         let aborted_msg = "aborted by user".to_string();
                         if aborted {
                             (
-                                TaskState::Failed(aborted_msg.clone()),
+                                TaskState::Cancelled(aborted_msg.clone()),
                                 Some(SubagentChatEvent::Aborted {
                                     id: tid_for_task.clone(),
                                 }),
@@ -747,8 +1138,7 @@ impl TaskTool {
                         }
                     }
                     Err(_) => {
-                        let msg =
-                            format!("subagent timed out after {}s", SUBAGENT_TIMEOUT.as_secs());
+                        let msg = format!("subagent timed out after {}s", route_timeout.as_secs());
                         (
                             TaskState::Failed(msg.clone()),
                             Some(SubagentChatEvent::Failed {
@@ -764,6 +1154,25 @@ impl TaskTool {
                     } else if let Some(sink) = subagent_chat_sink() {
                         let _ = sink.try_send(chat_event);
                     }
+                }
+                #[cfg(feature = "git-worktree")]
+                if let Some((info, _, base_commit)) = rooted_worktree_for_task.as_ref() {
+                    let commits =
+                        crate::extras::git_worktree::worktree_commits_since(info, base_commit)
+                            .unwrap_or_default();
+                    let dirty =
+                        crate::extras::git_worktree::worktree_is_dirty(info).unwrap_or(true);
+                    let retained = dirty || !commits.is_empty();
+                    if !retained {
+                        let _ = crate::extras::git_worktree::remove_worktree_if_clean(info);
+                    }
+                    store_for_task.set_coordinator_dispatch_worktree_outcome(
+                        &tid_for_task,
+                        commits,
+                        dirty,
+                        retained,
+                    );
+                    store_for_task.unregister_writer_worktree(&tid_for_task);
                 }
                 store_for_task.notify(&tid_for_task, state);
             });
@@ -807,15 +1216,19 @@ impl TaskTool {
 
             let _cleanup = SubagentCleanup::new(task_id.clone(), abort_watcher);
 
-            let result = drain_subagent_runner(runner, &task_id, |ev| self.emit_chat(ev)).await;
+            let result = tokio::time::timeout(
+                timeout,
+                drain_subagent_runner(runner, &task_id, |ev| self.emit_chat(ev)),
+            )
+            .await;
             let aborted = abort.is_cancelled();
             match result {
-                Ok(text) => {
+                Ok(Ok(text)) => {
                     let outcome =
                         crate::agent::tools::output_relay::relay_if_large("task", text, "");
                     Ok(outcome.text)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     if aborted {
                         self.emit_chat(SubagentChatEvent::Aborted { id: task_id });
                         Err(ToolError::Msg("Subagent aborted by user".to_string()))
@@ -826,6 +1239,14 @@ impl TaskTool {
                         });
                         Err(ToolError::Msg(format!("Subagent error: {e}")))
                     }
+                }
+                Err(_) => {
+                    let message = format!("Subagent timed out after {}s", timeout.as_secs());
+                    self.emit_chat(SubagentChatEvent::Failed {
+                        id: task_id,
+                        error: message.clone(),
+                    });
+                    Err(ToolError::Msg(message))
                 }
             }
         }
@@ -842,6 +1263,8 @@ pub struct Args {
     /// or `config.json` `agents`). Omit for the default subagent.
     #[serde(default)]
     pub agent: Option<String>,
+    #[serde(default)]
+    pub retry_of: Option<String>,
 }
 
 impl Tool for TaskTool {
@@ -865,6 +1288,10 @@ impl Tool for TaskTool {
                 "background": {
                     "type": "boolean",
                     "description": "Run asynchronously (default: false). When true, returns a task_id immediately. The result is delivered automatically as a <system-reminder> on your next turn — do NOT poll task_status."
+                },
+                "retry_of": {
+                    "type": "string",
+                    "description": "Coordinator-only: retry one failed background task once."
                 }
             },
             "required": ["prompt"]
@@ -939,8 +1366,18 @@ impl Tool for TaskTool {
         // the model asked for a specific persona). `tool_allow` is `Some`
         // when the profile opted its subagent into tools (v1: readonly tier);
         // that selects the tooled fork below instead of the tool-less one-shot.
-        let (route_model, route_preamble, tool_allow, max_turns) = match args.agent.as_deref() {
-            None => (None, None, None, SUBAGENT_DEFAULT_MAX_TURNS),
+        let (route_model, route_preamble, tool_allow, max_turns, timeout, tier) = match args
+            .agent
+            .as_deref()
+        {
+            None => (
+                None,
+                None,
+                None,
+                SUBAGENT_DEFAULT_MAX_TURNS,
+                std::time::Duration::from_secs(600),
+                crate::context::agent_defs::SubagentToolTier::Toolless,
+            ),
             Some(name) => {
                 if !subagent_routes_available() {
                     return Err(ToolError::Msg(format!(
@@ -949,7 +1386,14 @@ impl Tool for TaskTool {
                     )));
                 }
                 match subagent_route(name) {
-                    Some(r) => (r.model, r.preamble, r.tool_allow, r.max_turns),
+                    Some(r) => (
+                        r.model,
+                        r.preamble,
+                        r.tool_allow,
+                        r.max_turns,
+                        r.timeout,
+                        r.tier,
+                    ),
                     None => {
                         return Err(ToolError::Msg(format!(
                             "unknown agent profile '{}'. Available: {}.",
@@ -961,6 +1405,31 @@ impl Tool for TaskTool {
             }
         };
 
+        let background = args.background.unwrap_or(false);
+        let is_writer = matches!(
+            tier,
+            crate::context::agent_defs::SubagentToolTier::ReadWrite
+        );
+        if args.retry_of.is_some() && !background {
+            return Err(ToolError::Msg("retry_of requires background=true".into()));
+        }
+        if self.bg_store.coordinator_strategy().is_some() && !background && is_writer {
+            return Err(ToolError::Msg(
+                "coordinator writer subagents require background=true so writer isolation can be enforced"
+                    .into(),
+            ));
+        }
+        if self.bg_store.coordinator_strategy()
+            == Some(crate::config::SubagentDispatchStrategy::Full)
+            && !background
+            && !matches!(tier, crate::context::agent_defs::SubagentToolTier::Toolless)
+        {
+            return Err(ToolError::Msg(
+                "full coordinator mode requires tier-routed subagents to use background=true"
+                    .into(),
+            ));
+        }
+
         // Tooled subagent (v1 readonly tier): fork a filtered runner off the
         // live agent. Everything below this branch is the unchanged tool-less
         // `btw_query` path, so the dirge-mifq regression stays green.
@@ -971,7 +1440,10 @@ impl Tool for TaskTool {
                     route_preamble,
                     allowed,
                     max_turns,
-                    args.background.unwrap_or(false),
+                    timeout,
+                    background,
+                    is_writer,
+                    args.retry_of,
                     args.prompt,
                     args.agent,
                 )
@@ -997,7 +1469,19 @@ impl Tool for TaskTool {
                 )));
             }
             let task_id = Uuid::new_v4().to_string();
-            self.bg_store.insert(task_id.clone());
+            if self.bg_store.coordinator_strategy().is_some() {
+                self.bg_store
+                    .insert_coordinator_dispatch(
+                        task_id.clone(),
+                        args.prompt.clone(),
+                        is_writer,
+                        false,
+                        args.retry_of.as_deref(),
+                    )
+                    .map_err(ToolError::Msg)?;
+            } else {
+                self.bg_store.insert_for_dispatch(task_id.clone());
+            }
             self.bg_store.notify_started(&task_id);
 
             // dirge-ov2 Phase D: announce the subagent so the UI
@@ -1022,18 +1506,12 @@ impl Tool for TaskTool {
             let abort_for_task = abort.clone();
             let preamble_for_task = route_preamble.clone();
 
-            // Cap the background subagent at 10 minutes. Without a
-            // timeout, a stuck subagent (provider hang, runaway
-            // multi-turn) would keep the task in `Running` state
-            // forever, hold its model/network handle open, and
-            // never deliver a system-reminder to the next turn.
-            // 10 min matches the rough upper bound for a coherent
-            // single-prompt LLM task; anything longer is the
-            // subagent loop misbehaving.
-            const SUBAGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+            let route_timeout = timeout;
             let store_for_task = store.clone();
             let tid_for_task = tid.clone();
             let handle = tokio::spawn(async move {
+                let _cleanup =
+                    SubagentCleanup::from_store(tid_for_task.clone(), store_for_task.clone());
                 let fut = model.btw_query_with(
                     format!(
                         "You are a subagent working on a specific subtask. Complete it thoroughly.\n\nTask: {}",
@@ -1059,7 +1537,7 @@ impl Tool for TaskTool {
                         }
                     }
                 };
-                let outer = tokio::time::timeout(SUBAGENT_TIMEOUT, raced).await;
+                let outer = tokio::time::timeout(route_timeout, raced).await;
                 let (state, chat_event) = match outer {
                     Ok(Ok(Ok(text))) => (
                         TaskState::Completed(text.clone()),
@@ -1082,15 +1560,14 @@ impl Tool for TaskTool {
                         // dirge-781c: aborted via /kill.
                         let msg = "aborted by user".to_string();
                         (
-                            TaskState::Failed(msg.clone()),
+                            TaskState::Cancelled(msg.clone()),
                             SubagentChatEvent::Aborted {
                                 id: tid_for_task.clone(),
                             },
                         )
                     }
                     Err(_) => {
-                        let msg =
-                            format!("subagent timed out after {}s", SUBAGENT_TIMEOUT.as_secs(),);
+                        let msg = format!("subagent timed out after {}s", route_timeout.as_secs(),);
                         (
                             TaskState::Failed(msg.clone()),
                             SubagentChatEvent::Failed {
@@ -1245,7 +1722,64 @@ mod tests {
             None,
             AnyModel::OpenRouter(model),
             BackgroundStore::new(),
+            Sandbox::new(crate::sandbox::SandboxMode::Off),
+            SubagentWriteIsolation::Serialize,
         )
+    }
+
+    #[test]
+    fn isolated_writer_preamble_requires_commit_and_report() {
+        let preamble = writer_preamble(
+            None,
+            std::path::Path::new("/tmp/dirge-task-writer"),
+            "dirge-task-writer",
+        );
+        assert!(preamble.contains("stage intended changes"));
+        assert!(preamble.contains("one descriptive commit"));
+        assert!(preamble.contains("commit hash"));
+        assert!(preamble.contains("/tmp/dirge-task-writer"));
+    }
+
+    #[test]
+    fn writer_worktree_policy_respects_mode_and_sandbox() {
+        // Non-writer: always false regardless of isolation/sandbox.
+        assert_eq!(
+            writer_worktree_enabled(false, SubagentWriteIsolation::Worktree, false, false),
+            Ok(false)
+        );
+        // Serialize: always false.
+        assert_eq!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Serialize, false, false),
+            Ok(false)
+        );
+        // Writer + Auto + confining sandbox → worktree allowed.
+        assert_eq!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Auto, false, true),
+            Ok(true)
+        );
+        // Writer + Auto + no confining sandbox (Off) → worktree disabled,
+        // fall back to serialized parent (safe when parent is clean).
+        assert_eq!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Auto, false, false),
+            Ok(false)
+        );
+        // Writer + Worktree + no confining sandbox → error (false isolation).
+        assert!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Worktree, false, false).is_err()
+        );
+        // Writer + Worktree + confining sandbox → allowed.
+        assert_eq!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Worktree, false, true),
+            Ok(true)
+        );
+        // MicroVM: Auto → false, Worktree → error (unchanged).
+        assert_eq!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Auto, true, true),
+            Ok(false)
+        );
+        assert!(
+            writer_worktree_enabled(true, SubagentWriteIsolation::Worktree, true, true).is_err()
+        );
     }
 
     #[test]
@@ -1435,6 +1969,7 @@ mod tests {
                 allow: leaky.iter().map(|s| s.to_string()).collect(), // try to smuggle
                 deny: Vec::new(),
                 max_turns: None,
+                timeout_secs: None,
             };
             let resolved = resolve_subagent_allow(&policy)
                 .unwrap_or_else(|| panic!("{tier:?} should yield a tool set"));
@@ -1719,6 +2254,8 @@ mod tests {
                 preamble: Some("You are a reviewer.".to_string()),
                 tool_allow: None,
                 max_turns: SUBAGENT_DEFAULT_MAX_TURNS,
+                timeout: std::time::Duration::from_secs(600),
+                tier: crate::context::agent_defs::SubagentToolTier::Toolless,
             },
         );
         set_subagent_routes(routes);

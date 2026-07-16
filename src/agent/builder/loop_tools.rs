@@ -235,6 +235,163 @@ fn resolve_embedder(
     crate::extras::memory_hybrid::api_embedder(url, model, api_key)
 }
 
+/// Build an isolated registry for a writer working in a worktree.
+///
+/// This deliberately constructs new tool instances rather than filtering the
+/// parent's registry: the cache, permission grants, filesystem root, and bash
+/// execution directory must all belong to the worktree. Search tools use their
+/// native `ToolRoot` support; this function does not duplicate their path
+/// resolution logic.
+pub async fn build_rooted_writer_tools(
+    root: tools::ToolRoot,
+    parent_permission: Option<PermCheck>,
+    ask_tx: Option<AskSender>,
+    sandbox: Sandbox,
+    execution_root: crate::sandbox::SandboxExecutionRoot,
+) -> Vec<Arc<dyn crate::agent::agent_loop::LoopTool>> {
+    use crate::agent::agent_loop::types::ToolExecutionMode;
+    use crate::agent::agent_loop::{LoopTool, RigToolAdapter};
+
+    let permission = parent_permission.as_ref().map(|parent| {
+        crate::permission::checker::rooted_perm_check(parent, root.path().to_path_buf())
+    });
+
+    async fn wrap<T>(inner: T, mode: Option<ToolExecutionMode>) -> Arc<dyn LoopTool>
+    where
+        T: rig::tool::ToolDyn + 'static,
+    {
+        let adapter = RigToolAdapter::new(Box::new(inner)).await;
+        Arc::new(match mode {
+            Some(mode) => adapter.with_execution_mode(mode),
+            None => adapter,
+        })
+    }
+
+    let cache = ToolCache::new();
+    let shell_store = tools::bg_shell::BackgroundShellStore::new();
+    let mut writer_tools: Vec<Arc<dyn LoopTool>> = Vec::new();
+
+    writer_tools.push(
+        wrap(
+            tools::ReadTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+                #[cfg(feature = "lsp")]
+                None,
+            )
+            .rooted(root.clone()),
+            None,
+        )
+        .await,
+    );
+    // The rooted search tools keep investigation inside the worktree. Their
+    // own ToolRoot handling remains the single implementation of search-root
+    // resolution.
+    writer_tools.push(
+        wrap(
+            tools::GrepTool::with_cache(permission.clone(), ask_tx.clone(), cache.clone())
+                .with_root(root.clone()),
+            None,
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::FindFilesTool::new(permission.clone(), ask_tx.clone()).with_root(root.clone()),
+            None,
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::GlobTool::with_cache(permission.clone(), ask_tx.clone(), cache.clone())
+                .with_root(root.clone()),
+            None,
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::ListDirTool::new(permission.clone(), ask_tx.clone()).with_root(root.clone()),
+            None,
+        )
+        .await,
+    );
+
+    writer_tools.push(
+        wrap(
+            tools::RepoOverviewTool::with_cache(permission.clone(), ask_tx.clone(), cache.clone())
+                .with_root(root.clone()),
+            None,
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::WriteTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+                #[cfg(feature = "lsp")]
+                None,
+            )
+            .rooted(root.clone()),
+            Some(ToolExecutionMode::Sequential),
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::EditTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+                #[cfg(feature = "lsp")]
+                None,
+            )
+            .rooted(root.clone()),
+            Some(ToolExecutionMode::Sequential),
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::EditLinesTool::with_cache(
+                permission.clone(),
+                ask_tx.clone(),
+                cache.clone(),
+                #[cfg(feature = "lsp")]
+                None,
+            )
+            .rooted(root.clone()),
+            Some(ToolExecutionMode::Sequential),
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::ApplyPatchTool::with_cache(permission.clone(), ask_tx.clone(), cache.clone())
+                .with_root(root.clone()),
+            Some(ToolExecutionMode::Sequential),
+        )
+        .await,
+    );
+    writer_tools.push(
+        wrap(
+            tools::BashTool::with_cache(permission, ask_tx, sandbox, cache)
+                .with_execution_root(Some(execution_root))
+                .with_shell_store(Some(shell_store.clone())),
+            Some(ToolExecutionMode::Sequential),
+        )
+        .await,
+    );
+    writer_tools.push(wrap(tools::BashOutputTool::new(shell_store.clone()), None).await);
+    writer_tools.push(wrap(tools::KillShellTool::new(shell_store), None).await);
+
+    writer_tools
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn build_loop_tools(
     cache: ToolCache,
@@ -680,7 +837,14 @@ pub async fn build_loop_tools(
     if let (Some(pm), Some(store)) = (parent_model, bg_store) {
         tools.push(
             wrap(
-                tools::TaskTool::new(permission.clone(), ask_tx.clone(), pm, store.clone()),
+                tools::TaskTool::new(
+                    permission.clone(),
+                    ask_tx.clone(),
+                    pm,
+                    store.clone(),
+                    sandbox.clone(),
+                    cfg.resolve_subagent_write_isolation(),
+                ),
                 Some(ToolExecutionMode::Sequential),
             )
             .await,
