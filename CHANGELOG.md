@@ -4,6 +4,35 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.10] - 2026-07-16
+
+### Changed
+- The post-turn code reviewer is now folded into the completeness critic as a
+  single finalization judge. One judge call both checks the task is done and
+  reviews the run's diff for defects, then re-enters the loop with one
+  consolidated follow-up the agent acts on. Previously the default `advisory`
+  mode ran detached and surfaced findings — even high-severity ones — as a
+  display-only notice the model never saw, so a review that flagged a real bug
+  right after the agent said "done" changed nothing. Now any finding re-enters
+  (high/critical as must-fix, medium/low as optional notes); `advisory`
+  re-enters once, `blocking` persists until the diff is clean, `off` reviews
+  completeness only.
+
+### Fixed
+- `/model <id>` now routes a free-form model id to the right provider. It used
+  to switch the live client only on an exact match against another provider's
+  pinned `model`; any other id (a version bump, a typo, `glm-4.6`) was renamed
+  on the active client and its next turn hit the wrong endpoint. Ids are now
+  matched by family (`glm-*`, `deepseek*`, `claude-*`, `gemini-*`, `gpt-*`) and
+  routed to a configured provider of that kind; an id whose family has no
+  provider is refused with a warning instead of silently mis-routing. The
+  session banner also reads the live provider/model instead of re-resolving
+  from CLI/config, so a switch or resume is reflected.
+- A plugin `prepare-next-run` model swap can now hop providers. The swap builds
+  and installs the target provider's client in place, so a follow-up turn
+  actually runs there; it no longer clobbers `session.provider` on a
+  same-client rename.
+
 ## [0.19.9] - 2026-07-16
 
 ### Added
