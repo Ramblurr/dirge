@@ -443,6 +443,113 @@ async fn any_model_filtered_stream_fn_hides_unloaded_dynamic_tools() {
     assert!(!tool_names.contains(&"mcp_hidden"));
 }
 
+mod cerebras_alias_stream_tests {
+    use crate::agent::agent_loop::stream::{LlmContext, StreamOptions};
+    use crate::agent::agent_loop::tool::AbortSignal;
+    use crate::agent::agent_loop::types::ThinkingLevel;
+    use crate::provider::AnyModel;
+    use futures::StreamExt;
+    use rig::client::CompletionClient;
+    use rig::providers::openai;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    async fn capture_aliased_cerebras_request(reasoning: ThinkingLevel) -> serde_json::Value {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let body_start = loop {
+                let mut chunk = [0u8; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending request headers");
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(end) = header_end(&buf) {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..body_start]);
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap();
+            while buf.len() < body_start + content_length {
+                let mut chunk = [0u8; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending full request body");
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice::<serde_json::Value>(
+                &buf[body_start..body_start + content_length],
+            )
+            .unwrap();
+            body_tx.send(body).ok();
+            socket
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = openai::CompletionsClient::builder()
+            .http_client(crate::provider::compressing_http::CompressingHttpClient::default())
+            .api_key("test-cerebras-key")
+            .base_url(&base_url)
+            .build()
+            .unwrap();
+        let model = AnyModel::Cerebras(client.completion_model("gemma-4-31b"));
+        let stream_fn = model.build_stream_fn(
+            Vec::new(),
+            std::time::Duration::from_secs(5),
+            Some("review-fast".to_string()),
+        );
+        let mut options = StreamOptions::from_signal(AbortSignal::new());
+        options.reasoning = Some(reasoning);
+        let mut stream = stream_fn(
+            LlmContext {
+                system_prompt: String::new(),
+                messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
+                asset_dir: None,
+            },
+            options,
+        );
+        while stream.next().await.is_some() {}
+
+        let body = body_rx.await.unwrap();
+        server.await.unwrap();
+        body
+    }
+
+    #[tokio::test]
+    async fn aliased_cerebras_streamed_role_uses_top_level_high_effort() {
+        let body = capture_aliased_cerebras_request(ThinkingLevel::High).await;
+
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("reasoning_level").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[tokio::test]
+    async fn aliased_cerebras_streamed_role_omits_reasoning_when_off() {
+        let body = capture_aliased_cerebras_request(ThinkingLevel::Off).await;
+
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("reasoning_level").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+}
+
 // --- dirge-7ls: review-runner cache isolation regression --------
 
 /// Phase 4 background review runner must NOT share the
