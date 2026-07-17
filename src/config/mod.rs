@@ -853,6 +853,13 @@ pub struct Config {
     /// Each entry binds a chord to a command (see `KeybindingConfig`);
     /// applied over the built-in defaults by `ui::keymap`.
     pub keybindings: Option<Vec<KeybindingConfig>>,
+    /// Enable the terminal's enhanced keyboard (kitty) protocol so distinct
+    /// chords like Shift+Enter reach the input editor (Shift+Enter inserts a
+    /// newline instead of submitting). Only takes effect on terminals that
+    /// advertise support — kitty, Ghostty, WezTerm, foot, rio, … — and is a
+    /// harmless no-op elsewhere (use Alt+Enter or Ctrl+J there). Absent =
+    /// enabled; set `false` to disable if it misbehaves on your terminal.
+    pub keyboard_enhancement: Option<bool>,
     /// dirge-5kkx.1: auto-cancel an in-progress emacs-style chord sequence
     /// (e.g. after `ctrl-x` of `ctrl-x ctrl-s`) when no continuing key
     /// arrives within this many milliseconds. Absent = wait indefinitely

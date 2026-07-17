@@ -485,6 +485,10 @@ pub enum InputAction {
     Undo,
     /// Open current buffer in $EDITOR
     ExternalEditor,
+    /// Insert a literal newline at the cursor (multi-line input) instead of
+    /// submitting the prompt. Enter itself stays intrinsic (submit); this is
+    /// the rebindable "add a line" gesture.
+    InsertNewline,
 }
 
 impl Command for InputAction {
@@ -613,6 +617,19 @@ impl Command for InputAction {
             InputAction::ExternalEditor,
             "external_editor",
             &[(KeyCode::Char('g'), KeyModifiers::CONTROL)],
+        ),
+        (
+            // Shift+Enter only reaches the app when the terminal reports it
+            // distinctly (the enhanced keyboard protocol — see the
+            // `keyboard_enhancement` config); Alt+Enter and Ctrl+J are the
+            // portable fallbacks that work everywhere.
+            InputAction::InsertNewline,
+            "insert_newline",
+            &[
+                (KeyCode::Enter, KeyModifiers::SHIFT),
+                (KeyCode::Enter, KeyModifiers::ALT),
+                (KeyCode::Char('j'), KeyModifiers::CONTROL),
+            ],
         ),
     ];
 }
@@ -1118,6 +1135,42 @@ mod tests {
         ] {
             assert_eq!(km.resolve(&ev(code, mods)), None, "{code:?}");
         }
+    }
+
+    #[test]
+    fn insert_newline_default_chords_and_plain_enter_still_submits() {
+        let km = InputKeymap::defaults();
+        // Shift+Enter, Alt+Enter, and Ctrl+J all insert a newline.
+        for (code, mods) in [
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                km.resolve(&ev(code, mods)),
+                Some(InputAction::InsertNewline),
+                "{code:?}+{mods:?}",
+            );
+        }
+        // Plain Enter stays intrinsic (submit) — NOT a newline.
+        assert_eq!(km.resolve(&ev(KeyCode::Enter, KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn insert_newline_is_config_rebindable() {
+        // The whole point: users can remap "add a line" from config. Bind it
+        // to Ctrl+O and confirm it routes to the input editor.
+        let (kms, warns) = Keymaps::from_config(Some(&[cfg("ctrl-o", "insert_newline")]));
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(
+            kms.input
+                .resolve(&ev(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Some(InputAction::InsertNewline)
+        );
+        assert_eq!(
+            InputAction::from_command("insert_newline"),
+            Some(InputAction::InsertNewline)
+        );
     }
 
     #[test]

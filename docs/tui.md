@@ -31,7 +31,7 @@ kill-subagent) are **rebindable** via the `keybindings` config — see
 | Ctrl+N / Down | History next (multi-line: next logical line, history at boundary) |
 | Ctrl+P / Up | History previous (multi-line: previous logical line, history at boundary) |
 | Ctrl+F | Reverse-i-search through history (bash-style): type to narrow, Ctrl+F to cycle, Enter to accept, Esc to cancel |
-| Shift+Enter / Meta+Enter / Ctrl+J | Insert newline (input box expands; Ctrl+J works in any terminal) |
+| Shift+Enter / Alt+Enter / Ctrl+J | Insert newline instead of submitting (`insert_newline`; rebindable). Shift+Enter needs a terminal that reports it — see `keyboard_enhancement` in config.md; Alt+Enter and Ctrl+J work in any terminal |
 | Ctrl+G / `/edit` | Open the input buffer in `$EDITOR` (spawns temp file; replaces buffer on save) |
 | Tab | Insert 2 spaces |
 | `@<query>` | File picker (Tab/Enter select, Esc cancel) |

@@ -1470,6 +1470,18 @@ impl InputEditor {
                     None
                 }
             }
+            InputAction::InsertNewline => {
+                // Add a line instead of submitting. Skip while a completion
+                // picker is open — there Enter/newline drives the picker, not
+                // the buffer (mirrors the old hardcoded Ctrl+J guard).
+                if !self.picker.as_ref().is_some_and(|p| p.active) {
+                    self.buffer.insert(self.cursor, '\n');
+                    self.cursor += 1;
+                    self.history_pos = None;
+                    self.reset_kill_accumulation();
+                }
+                None
+            }
         }
     }
 
@@ -1549,23 +1561,12 @@ impl InputEditor {
     fn handle_key_inner(&mut self, key: KeyEvent) -> Option<CompactString> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-        // Ctrl+J is a portable newline trigger — many terminals never send
-        // Shift+Enter as a distinct keystroke, but Ctrl+J always arrives.
-        // Handled here before the Enter arm so it works even when the
-        // terminal collapses Ctrl+J onto KeyCode::Enter. NOT in reverse-i-search
-        // — there `self.buffer` holds the displayed match, so inserting a raw
-        // `\n` would corrupt it and desync the search; let search-mode handle it.
-        if ctrl && matches!(key.code, KeyCode::Char('j')) && !self.search_mode {
-            if !self.picker.as_ref().is_some_and(|p| p.active) {
-                self.buffer.insert(self.cursor, '\n');
-                self.cursor += 1;
-                self.history_pos = None;
-                self.reset_kill_accumulation();
-            }
-            return None;
-        }
+        // Newline insertion (Shift/Alt+Enter, Ctrl+J) is a rebindable
+        // `InputAction::InsertNewline` resolved through the keymap below, NOT a
+        // hardcoded arm. Search mode is dispatched first, so a newline chord
+        // there is handled by the search handler (inserting a raw `\n` would
+        // corrupt the displayed match and desync the search).
 
         // ── search-mode dispatch ───────────────────────────
         if self.search_mode {
@@ -1585,13 +1586,9 @@ impl InputEditor {
                 if self.picker.as_ref().is_some_and(|p| p.active) {
                     return None;
                 }
-                // Meta+Enter or Shift+Enter inserts newline
-                if has_shift || alt {
-                    self.buffer.insert(self.cursor, '\n');
-                    self.cursor += 1;
-                    self.history_pos = None;
-                    return None;
-                }
+                // Shift/Alt+Enter newline insertion is handled above via the
+                // keymap (`InputAction::InsertNewline`); a bare Enter reaching
+                // here always submits.
                 // Plain Enter → submit. Expand any paste placeholders so the
                 // agent receives the original text. Store the expanded form in
                 // history too — history navigation can't rely on paste-index
@@ -2355,6 +2352,54 @@ mod tests {
         e.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(e.cursor, 1);
         assert_eq!(e.buffer.as_str(), "hello");
+    }
+
+    #[test]
+    fn newline_chords_insert_newline_and_do_not_submit() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Shift+Enter, Alt+Enter, and Ctrl+J each add a line rather than
+        // submitting (dirge InsertNewline). Plain Enter still submits.
+        for (code, mods) in [
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ] {
+            let mut e = InputEditor::new();
+            e.insert_str("foo");
+            let out = e.handle_key(KeyEvent::new(code, mods));
+            assert!(out.is_none(), "{code:?}+{mods:?} must not submit");
+            e.insert_str("bar");
+            assert_eq!(
+                e.buffer.as_str(),
+                "foo\nbar",
+                "{code:?}+{mods:?} must insert a newline",
+            );
+        }
+    }
+
+    #[test]
+    fn plain_enter_submits() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut e = InputEditor::new();
+        e.insert_str("send me");
+        let out = e.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out.as_deref(), Some("send me"));
+    }
+
+    #[test]
+    fn home_end_move_within_the_current_logical_line() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut e = InputEditor::new();
+        e.insert_str("first\nsecond line\nthird");
+        // Put the cursor in the middle of the SECOND line ("seco|nd line").
+        let second_start = "first\n".len();
+        e.cursor = second_start + 4;
+        // Home → start of the second line, not the whole buffer.
+        e.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(e.cursor, second_start);
+        // End → end of the second line, before the next '\n'.
+        e.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(e.cursor, second_start + "second line".len());
     }
 
     #[test]

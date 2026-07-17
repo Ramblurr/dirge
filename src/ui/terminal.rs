@@ -5,8 +5,13 @@ use std::time::Duration;
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::Hide;
-use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen};
+use crossterm::event::{
+    EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal::{
+    self, Clear, ClearType, EnterAlternateScreen, supports_keyboard_enhancement,
+};
 
 /// A handle to `/dev/tty` opened once by `TerminalGuard::new` and
 /// read by `Renderer::new` so ratatui's backend writes directly to
@@ -39,7 +44,10 @@ pub fn set_log_path(path: Option<std::path::PathBuf>) {
 /// disable mouse + bracketed paste, clear title, leave the alternate
 /// screen, show the cursor. Same modes `new` sets, in reverse — matches
 /// the suspend path's sequence with a trailing cursor-show.
-const PANIC_RESET_SEQ: &[u8] = b"\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b]0;\x1b\\\x1b[?1049l\x1b[?25h";
+// `\x1b[<1u` pops any enhanced-keyboard (kitty) flags we may have pushed; a
+// pop with an empty stack is a no-op and unsupported terminals ignore the
+// unknown CSI, so it's safe to emit unconditionally here on the panic path.
+const PANIC_RESET_SEQ: &[u8] = b"\x1b[<1u\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b]0;\x1b\\\x1b[?1049l\x1b[?25h";
 
 /// Set once `install_panic_hook` has chained onto the process hook, so
 /// repeated `TerminalGuard::new` calls (tests, embedded use) don't stack
@@ -210,10 +218,17 @@ pub struct TerminalGuard {
     /// Original stderr (fd 2), same treatment.
     #[cfg(unix)]
     saved_stderr_fd: Option<libc::c_int>,
+    /// True when we pushed the enhanced-keyboard (kitty) protocol flags at
+    /// startup, so `drop` pops exactly what it pushed.
+    kbd_flags_pushed: bool,
 }
 
 impl TerminalGuard {
-    pub fn new() -> std::io::Result<Self> {
+    /// `keyboard_enhancement` opts into the terminal's enhanced keyboard
+    /// (kitty) protocol so distinct chords like Shift+Enter reach the input
+    /// editor. It's applied ONLY when the terminal advertises support
+    /// (`supports_keyboard_enhancement`), so it's a safe no-op elsewhere.
+    pub fn new(keyboard_enhancement: bool) -> std::io::Result<Self> {
         // Reset the flags in case the binary previously held a
         // guard in the same process (test harness, embedded use).
         EVENT_READER_SHUTDOWN.store(false, Ordering::Relaxed);
@@ -263,6 +278,22 @@ impl TerminalGuard {
         // positioning it at the input prompt.
         tty_writer.execute(Hide)?;
         terminal::enable_raw_mode()?;
+        // dirge: enable the terminal's enhanced keyboard (kitty) protocol so
+        // distinct chords like Shift+Enter are reported instead of collapsing
+        // onto plain Enter. Only pushed when the terminal actually supports it
+        // (a no-op query elsewhere), and only DISAMBIGUATE_ESCAPE_CODES — the
+        // mildest flag, which leaves ordinary text keys untouched and just
+        // disambiguates the previously-ambiguous ones. The background event
+        // reader already filters non-Press events, so no release-event spam.
+        // `supports_keyboard_enhancement` needs raw mode (it reads the reply),
+        // so it runs here, after `enable_raw_mode`.
+        let kbd_flags_pushed = keyboard_enhancement
+            && matches!(supports_keyboard_enhancement(), Ok(true))
+            && tty_writer
+                .execute(PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                ))
+                .is_ok();
         // Flush the setup writes to /dev/tty BEFORE redirecting fd 1.
         let _ = tty_writer.flush();
         drop(tty_writer);
@@ -290,9 +321,10 @@ impl TerminalGuard {
         return Ok(TerminalGuard {
             saved_stdout_fd,
             saved_stderr_fd,
+            kbd_flags_pushed,
         });
         #[cfg(not(unix))]
-        return Ok(TerminalGuard {});
+        return Ok(TerminalGuard { kbd_flags_pushed });
     }
 }
 
@@ -437,6 +469,12 @@ impl Drop for TerminalGuard {
         let stdout = &mut tty_writer;
 
         // === Phase 1: tell the terminal to stop reporting things ===
+        // Pop the enhanced-keyboard (kitty) flags we pushed at startup, so the
+        // shell that follows gets its plain key reporting back. `\x1b[<1u` is
+        // the kitty "pop one entry" sequence.
+        if self.kbd_flags_pushed {
+            let _ = stdout.write_all(b"\x1b[<1u");
+        }
         // Explicit DECRST for every mode we might have touched.
         // Mouse capture is enabled in `TerminalGuard::new` for wheel
         // scrolling — the DECRST sequences below take it back down.

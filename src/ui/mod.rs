@@ -278,7 +278,7 @@ pub async fn run_interactive(
     // background; read at panel paint time. Cheap clone (Arc bump).
     sysload: crate::ui::sysload::SharedSysLoad,
 ) -> anyhow::Result<()> {
-    let _guard = TerminalGuard::new()?;
+    let _guard = TerminalGuard::new(cfg.keyboard_enhancement.unwrap_or(true))?;
 
     let mut renderer = Renderer::new()?;
     renderer.set_animations_enabled(cfg.animations_enabled.unwrap_or(true));

@@ -110,6 +110,7 @@ Accepted top-level keys:
 | `show_edit_diff`          | boolean | Show colorized diff output for `edit` tool results (`-` red, `+` green, `@@` cyan). Default: `true`.                                                                        |
 | `animations_enabled`      | boolean | Enable TUI animations (avatar face toggling, spinner repaint timer). Default: `true`. Set to `false` to reduce terminal flicker and CPU usage; the avatar freezes to a static face. |
 | `show_reasoning`          | boolean | Show the model's thinking/reasoning by default, instead of having to press `Ctrl+O` each turn. Default: `false`.                                                            |
+| `keyboard_enhancement`    | boolean | Enable the terminal's enhanced keyboard (kitty) protocol so distinct chords like `Shift+Enter` reach the input editor (Shift+Enter then inserts a newline via `insert_newline` instead of submitting). Only takes effect on terminals that advertise support (kitty, Ghostty, WezTerm, foot, rio, …); a harmless no-op elsewhere — use `Alt+Enter` or `Ctrl+J` there. Default: `true`. Set `false` to disable if your terminal misbehaves. |
 | `desktop_notifications`   | object  | Optional OS-level desktop notifications. Off when absent. Set `{ "enabled": true }` to notify on completed runs and prompts waiting for input. Backed by `notify-rust` on macOS, Linux, and Windows. |
 | `max_sessions`            | integer | How many of the most-recent prior sessions in the same project (same working dir) to mine for Up-arrow / Ctrl+F command history, seeded ahead of the current session's prompts. Default: `3`. Set `0` to keep recall to the current session only. See [Command history](#command-history-cross-session-recall). |
 | `display`                 | string  | Preferred startup pane layout: a `\|`/`,`/space-separated subset of `left`, `main`, `right` (e.g. `"main\|right"`, `"main"`). The main pane is always shown; this picks which side panels appear. Override at runtime with `/display`. Default: automatic (side panels shown at ≥152 cols). |
@@ -730,6 +731,13 @@ routes to the right one by its command name.
 | `line_up` | `up` | Up one line (then history) |
 | `line_down` | `down` | Down one line (then history) |
 | `undo` | `ctrl-z` | Undo the last edit |
+| `external_editor` | `ctrl-g` | Open the current buffer in `$EDITOR` |
+| `insert_newline` | `shift-enter`, `alt-enter`, `ctrl-j` | Add a line instead of submitting |
+
+`insert_newline` is how you write a multi-line prompt. `shift-enter` only
+reaches dirge on terminals that report it distinctly (see the
+`keyboard_enhancement` option above), while `alt-enter` and `ctrl-j` work
+everywhere. Plain `enter` always submits and is not rebindable.
 
 Some chords serve both contexts (e.g. `ctrl-k` is `kill_subagent` *and*
 `kill_to_line_end`, `ctrl-n` is `next_chat` *and* `history_next`). The
