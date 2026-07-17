@@ -102,6 +102,8 @@ pub fn parse_provider(name: &str) -> Option<ProviderKind> {
 /// Local / self-hosted names (`llama3`, `vibe-thinker:latest`, a bare custom
 /// alias) are intentionally `None` — they carry no reliable provider signal,
 /// so the caller keeps the current client rather than guessing wrong.
+/// Open-weight `gpt-oss-*` ids are also intentionally unclassified: OpenAI
+/// authorship does not imply that the OpenAI API hosts a particular deployment.
 /// OpenRouter's `vendor/model` ids resolve to the vendor's family (the slash
 /// prefix is stripped) so e.g. `deepseek/deepseek-v4` still reads as DeepSeek.
 pub fn model_family(model: &str) -> Option<ProviderKind> {
@@ -117,7 +119,7 @@ pub fn model_family(model: &str) -> Option<ProviderKind> {
         Some(ProviderKind::Anthropic)
     } else if bare.starts_with("gemini-") {
         Some(ProviderKind::Gemini)
-    } else if bare.starts_with("gpt-")
+    } else if (bare.starts_with("gpt-") && !bare.starts_with("gpt-oss-"))
         || bare.starts_with("chatgpt")
         || bare.starts_with("codex")
         || is_openai_o_series(bare)
@@ -933,6 +935,40 @@ mod resolve_model_switch_tests {
         assert_eq!(default_model_for("cerebras"), "gemma-4-31b");
         assert_eq!(
             resolve_model_switch(&HashMap::new(), "cerebras", "gemma-4-31b"),
+            ModelSwitch::Keep,
+        );
+    }
+
+    #[test]
+    fn cerebras_zero_config_gpt_oss_keeps_the_active_client() {
+        assert_eq!(
+            resolve_model_switch(&HashMap::new(), "cerebras", "gpt-oss-120b"),
+            ModelSwitch::Keep,
+        );
+    }
+
+    #[test]
+    fn cerebras_unpinned_alias_gpt_oss_keeps_the_active_client() {
+        let providers =
+            HashMap::from([("fast-cerebras".to_string(), typed_entry("cerebras", None))]);
+
+        assert_eq!(
+            resolve_model_switch(&providers, "fast-cerebras", "gpt-oss-120b"),
+            ModelSwitch::Keep,
+        );
+    }
+
+    #[test]
+    fn gpt_oss_is_host_dependent_away_from_cerebras() {
+        for model in ["gpt-oss-120b", "gpt-oss-20b"] {
+            assert_eq!(
+                model_family(model),
+                None,
+                "{model} is open-weight and does not imply an OpenAI API endpoint",
+            );
+        }
+        assert_eq!(
+            resolve_model_switch(&HashMap::new(), "deepseek", "gpt-oss-120b"),
             ModelSwitch::Keep,
         );
     }
