@@ -373,23 +373,22 @@ pub fn markdown_to_styled(text: &str, max_width: usize, base_color: Color) -> Ve
     for event in parser {
         match event {
             Event::Start(tag) => match tag {
-                Tag::Paragraph => {
-                    // A blank `>` line between two quoted blocks: render a bare
-                    // blank between them so they read as separate blocks. Gate on
-                    // blockquote state (not a `│` prefix) — a quoted block may end
-                    // in a list item (`  ┊ ` prefix) or heading, and a non-quote
-                    // line that happens to start with `│` must not inject a blank.
-                    // Skip when the previous line is already blank.
+                // A blank `>` line between two quoted blocks: render a bare
+                // blank between them so they read as separate blocks. Gate on
+                // blockquote state (not a `│` prefix) — a quoted block may end
+                // in a list item (`  ┊ ` prefix) or heading, and a non-quote
+                // line that happens to start with `│` must not inject a blank.
+                // Skip when the previous line is already blank.
+                Tag::Paragraph
                     if in_blockquote
                         && result
                             .last()
-                            .is_some_and(|e: &LineEntry| !e.text.is_empty())
-                    {
-                        result.push(LineEntry {
-                            text: CompactString::new(""),
-                            color: crate::ui::theme::dim(),
-                        });
-                    }
+                            .is_some_and(|e: &LineEntry| !e.text.is_empty()) =>
+                {
+                    result.push(LineEntry {
+                        text: CompactString::new(""),
+                        color: crate::ui::theme::dim(),
+                    });
                 }
                 Tag::Heading { level, .. } => {
                     flush_acc(&acc, base_color, max_width, &mut result);

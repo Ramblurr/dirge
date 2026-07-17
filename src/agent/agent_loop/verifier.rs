@@ -96,10 +96,8 @@ impl VerifierGate {
             // without it here, an agent that edits only via edit_minified
             // never sets `edited_code` and the verify-before-done gate stays
             // silent on unverified changes.
-            "write" | "edit" | "apply_patch" | "edit_minified" => {
-                if touches_code_file(args) {
-                    inner.edited_code = true;
-                }
+            "write" | "edit" | "apply_patch" | "edit_minified" if touches_code_file(args) => {
+                inner.edited_code = true;
             }
             "bash" => {
                 let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");

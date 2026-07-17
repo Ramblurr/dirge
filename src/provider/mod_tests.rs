@@ -90,9 +90,7 @@ fn cerebras_auto_detects_from_its_key_in_isolation() {
 #[test]
 fn cerebras_empty_key_is_skipped_before_ollama() {
     assert!(
-        PROVIDER_AUTODETECT_ORDER
-            .iter()
-            .any(|entry| *entry == ("CEREBRAS_API_KEY", "cerebras")),
+        PROVIDER_AUTODETECT_ORDER.contains(&("CEREBRAS_API_KEY", "cerebras")),
         "Cerebras must participate in autodetection",
     );
     let env = mock_env(&[
