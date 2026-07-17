@@ -11,7 +11,7 @@ What sets dirge apart from other agentic editors:
 - **Tiny and fast.** Roughly 8 MB RAM idle, 15 MB working, 36 MB binary (approximate, measured on a Linux release build: `opt-level=3` + LTO) — versus ~300 MB for JS-based agents. Native Rust, no runtime.
 - **Built to keep weaker/cheaper models on the rails.** A [robust agent loop](docs/features.md#robust-agent-loop) repairs malformed tool calls, validates every write through tree-sitter *before* it touches disk, escalates to a stronger model on repeated failure, and trips circuit breakers on non-progressing loops.
 - **One explainable permission engine.** All authorization flows through a single Policy Decision Point with four modes, op-based rules, session allowlists, and a `/why` command that traces exactly which policy decided and why. See [docs/permissions.md](docs/permissions.md).
-- **Role-based multi-provider routing.** Point the main loop, review, escalation, summarization, and subagent roles at different models — mix DeepSeek, GLM, Anthropic, OpenAI, Ollama, and any OpenAI-compatible endpoint in one session. Define your own opt-in [agent profiles](docs/agents.md) (a named model + prompt + tool-policy bundle) and switch personas mid-session with `/agent`.
+- **Role-based multi-provider routing.** Point the main loop, review, escalation, summarization, and subagent roles at different models — mix Cerebras, DeepSeek, GLM, Anthropic, OpenAI, Ollama, and any OpenAI-compatible endpoint in one session. Define your own opt-in [agent profiles](docs/agents.md) (a named model + prompt + tool-policy bundle) and switch personas mid-session with `/agent`.
 - **Self-improving project memory.** Persistent per-project memory (plus a global cross-project tier for durable user preferences) and a post-session orchestrator that extracts learnings and curates memory + skills.
 - **A built-in issue board.** A persistent, agent-facing kanban in the session DB — the harness surfaces the top open issues at the start of every turn, so the agent works its backlog without polling a tracker. The `issue` tool manages it; `/issues` views it. See [docs/issues.md](docs/issues.md).
 - **Long-horizon sessions that resume where they left off.** Every conversation keeps a durable, incrementally-refreshed checkpoint, anchored to a stable identity so resuming a long, compacted session recovers its live state instead of a stale snapshot. Autonomous runs can be held to a natural-language stop condition with `--goal`. Adapted from [MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code).
@@ -231,12 +231,15 @@ dirge mcp
 # Explicit provider/model
 dirge --provider openrouter --model openai/gpt-4o
 
-# DeepSeek and GLM are first-class providers
+# DeepSeek, GLM, and Cerebras are first-class providers
 export DEEPSEEK_API_KEY="sk-..."
 dirge --provider deepseek  # defaults to deepseek-v4-pro
 
 export GLM_API_KEY="..."
 dirge --provider glm       # defaults to glm-5.2
+
+export CEREBRAS_API_KEY="..."
+dirge --provider cerebras  # defaults to gemma-4-31b
 
 # Verbose mode — debug-level dirge logs + warn-level plugin hook errors
 dirge --verbose
@@ -343,7 +346,7 @@ thereafter.)
 ## Supported providers
 
 OpenRouter (default), OpenAI, Anthropic, Gemini, DeepSeek, GLM (ZhipuAI),
-Ollama, and any custom OpenAI-compatible endpoint.
+Cerebras, OpenCode, Ollama, and any custom OpenAI-compatible endpoint.
 
 Providers are declared once in `$XDG_CONFIG_HOME/dirge/config.json` and
 referenced by alias from role-assignment keys (`provider`, `review_provider`,
@@ -428,9 +431,9 @@ back to `provider` when unset; `critic_provider`/`approval_provider` are off
 entirely unless you name one. Each value is an **alias** into `providers`.
 
 **Provider aliases.** Each `providers` entry is keyed by an alias you choose.
-`provider_type` is the actual backend (`openai`, `anthropic`, `gemini`,
-`deepseek`, `glm`, `ollama`, `openrouter`, or omit it to default to a custom
-OpenAI-compatible endpoint) — and it **defaults to the alias** when omitted, which
+`provider_type` is the actual backend (`openai`, `anthropic`, `cerebras`,
+`deepseek`, `gemini`, `glm`, `ollama`, `opencode`, `openrouter`, or `custom`).
+It **defaults to the alias** when omitted, which
 is why `"deepseek": { "model": "…" }` needs no `provider_type` but the second
 DeepSeek route must spell it out as a distinct alias (`deepseek-flash`). Point an
 alias at any OpenAI-compatible server with `base_url` (here a local Ollama and

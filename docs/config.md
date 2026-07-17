@@ -73,7 +73,7 @@ Accepted top-level keys:
 
 | Key                       | Type    | Description                                                                                                                                                                 |
 | ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`                | string  | Active provider alias. Built-ins are `openrouter`, `openai`, `anthropic`, `gemini`/`google`, `deepseek`, `glm`/`zhipu`, `opencode`, and `ollama`; any alias declared in `providers` is also accepted. Default: `openrouter`. See [Providers and roles](#providers-and-roles). |
+| `provider`                | string  | Active provider alias. Built-ins are `openrouter`, `openai`, `anthropic`, `gemini`/`google`, `deepseek`, `glm`/`zhipu`, `cerebras`, `opencode`, and `ollama`; any alias declared in `providers` is also accepted. Default: `openrouter`. See [Providers and roles](#providers-and-roles). |
 | `auth`                    | string  | Default authentication source for providers that don't set their own `providers.<name>.auth`: `api-key` (the implicit default), `chatgpt` (Codex/OpenAI login tokens), or `anthropic` / `claude-code` (Anthropic Claude Code OAuth). See [Providers and roles](#providers-and-roles). |
 | `providers`               | object  | Map of provider alias → entry. The active model lives in `providers.<active-provider>.model`. Each role key below points at one of these aliases. See [Providers and roles](#providers-and-roles). |
 | `review_provider`         | string  | Provider alias for the background session-review pass. Falls back to `provider`. |
@@ -267,7 +267,7 @@ Each `providers` entry accepts:
 
 | Field | Description |
 |-------|-------------|
-| `provider_type` | Built-in provider type to speak. Optional — defaults to the entry's alias when that alias matches a built-in name. |
+| `provider_type` | Built-in backend to use: `openrouter`, `openai`, `anthropic`, `gemini`, `deepseek`, `glm`, `cerebras`, `opencode`, `ollama`, or `custom`. Optional — defaults to the entry's alias when that alias matches a built-in name. |
 | `base_url` | Endpoint base URL (for custom / self-hosted endpoints). |
 | `model` | Model name for this provider. |
 | `api_key` | Literal key or `${ENV_VAR}` interpolation. Takes precedence over `api_key_env`. |
@@ -280,6 +280,40 @@ Each `providers` entry accepts:
 
 The aliases on the left of the map become the values you write in
 role-assignment keys.
+
+### Cerebras
+
+Cerebras needs no `providers` entry. Export its API key and select the built-in:
+
+```bash
+export CEREBRAS_API_KEY="..."
+dirge --provider cerebras  # defaults to gemma-4-31b
+```
+
+The built-in sends OpenAI-compatible Chat Completions requests to
+`https://api.cerebras.ai/v1`. To pin another Cerebras model, add only the
+model override; keep the secret in `CEREBRAS_API_KEY`:
+
+```json
+{
+  "provider": "cerebras",
+  "providers": {
+    "cerebras": {
+      "model": "gpt-oss-120b"
+    }
+  }
+}
+```
+
+Set `providers.cerebras.base_url` to an HTTPS proxy or custom Cerebras
+endpoint. Dirge does not read a separate `CEREBRAS_BASE_URL` variable.
+
+Reasoning and image support depend on the model. For `gemma-4-31b`, Dirge
+sends top-level `reasoning_effort` values (`low`, `medium`, or `high`) and
+accepts image input. It clamps lower and higher Dirge reasoning levels to that
+three-value set and omits the field when reasoning is off. Dirge treats
+`gpt-oss-120b` and `zai-glm-4.7` as text-only. This integration does not expose
+other Cerebras-specific request options.
 
 ### OpenAI browser / device-code auth
 
