@@ -1,8 +1,8 @@
 //! Provider client construction.
 //!
-//! Contains `create_client` — the 8-backend dispatch that builds
-//! rig clients (OpenAI, Anthropic, Gemini, DeepSeek, GLM, Ollama,
-//! OpenRouter, Custom). Extracted from `provider/mod.rs` to keep
+//! Contains `create_client` — the dispatch that builds concrete Rig clients
+//! for Dirge's built-in and configured providers. Extracted from
+//! `provider/mod.rs` to keep
 //! the provider module focused on type definitions + agent
 //! construction.
 
@@ -208,6 +208,7 @@ fn resolve_provider_base_url(
             Some("GLM_BASE_URL"),
             Some("https://open.bigmodel.cn/api/coding/paas/v4"),
         ),
+        ProviderKind::Cerebras => (None, Some("https://api.cerebras.ai/v1")),
         ProviderKind::Custom => (Some("CUSTOM_BASE_URL"), None),
         _ => (None, None),
     };
@@ -265,7 +266,7 @@ where
 {
     let info = resolve_provider_info(provider_name, providers).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: {}. Supported providers: openrouter, openai, anthropic, gemini, deepseek, glm, ollama, custom",
+            "Unknown provider: {}. Supported providers: openrouter, openai, anthropic, gemini, deepseek, glm, cerebras, opencode, ollama, custom",
             provider_name
         )
     })?;
@@ -534,6 +535,22 @@ where
                         .unwrap_or("https://open.bigmodel.cn/api/coding/paas/v4"),
                 );
             Ok(AnyClient::Glm(b.build()?))
+        }
+        ProviderKind::Cerebras => {
+            let b = openai::CompletionsClient::builder()
+                .http_client(
+                    crate::provider::compressing_http::CompressingHttpClient::new(
+                        reqwest::Client::new(),
+                        crate::llmtrim::ir::ProviderKind::OpenAi,
+                        std::sync::Arc::new(crate::compression::config_for_preset(
+                            &resolve_compression_preset(),
+                        )),
+                        resolve_compression_enabled(),
+                    ),
+                )
+                .api_key(&key)
+                .base_url(base_url.as_deref().unwrap_or("https://api.cerebras.ai/v1"));
+            Ok(AnyClient::Cerebras(b.build()?))
         }
         ProviderKind::OpenCode => {
             let b = openai::CompletionsClient::builder()
@@ -1775,5 +1792,69 @@ mod tests {
         };
 
         assert!(err.contains("no ChatGPT account id was found"));
+    }
+
+    fn parsed_cerebras_kind() -> ProviderKind {
+        crate::provider::parse_provider("cerebras")
+            .expect("cerebras should resolve through the production parser")
+    }
+
+    #[test]
+    fn cerebras_default_base_url_is_api_v1() {
+        let got = resolve_provider_base_url(parsed_cerebras_kind(), None, no_env)
+            .expect("Cerebras default URL should resolve");
+
+        assert_eq!(got.as_deref(), Some("https://api.cerebras.ai/v1"));
+    }
+
+    #[test]
+    fn cerebras_configured_https_base_url_overrides_default() {
+        let got = resolve_provider_base_url(
+            parsed_cerebras_kind(),
+            Some("https://cerebras-proxy.invalid/v1".to_string()),
+            no_env,
+        )
+        .expect("configured Cerebras URL should resolve");
+
+        assert_eq!(got.as_deref(), Some("https://cerebras-proxy.invalid/v1"));
+    }
+
+    #[test]
+    fn cerebras_client_builds_from_only_cerebras_api_key() {
+        let client = create_client_with(
+            "cerebras",
+            None,
+            &HashMap::new(),
+            |name| (name == "CEREBRAS_API_KEY").then(|| "test-cerebras-key".to_string()),
+            || Ok(None),
+        )
+        .expect("Cerebras client should build from its standard environment key");
+        let model = client.completion_model("gemma-4-31b");
+
+        assert_eq!(
+            (model.provider_name(), model.name()),
+            ("cerebras", "gemma-4-31b".to_string()),
+        );
+    }
+
+    #[test]
+    fn cerebras_missing_key_names_only_cerebras_api_key() {
+        let result = create_client_with(
+            "cerebras",
+            None,
+            &HashMap::new(),
+            |name| (name == "OPENAI_API_KEY").then(|| "test-openai-key-must-not-leak".to_string()),
+            || Ok(None),
+        );
+        let message = match result {
+            Ok(_) => panic!("Cerebras must not accept an OpenAI key"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(
+            message.contains("CEREBRAS_API_KEY"),
+            "unexpected error: {message}"
+        );
+        assert!(!message.contains("test-openai-key-must-not-leak"));
     }
 }

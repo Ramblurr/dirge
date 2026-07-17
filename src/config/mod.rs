@@ -16,8 +16,8 @@ use crate::extras::acp::config::AcpServerConfig;
 /// config (and `provider`, `review_provider`, etc.) refers to.
 ///
 /// `provider_type` is optional: when the alias matches a built-in
-/// (anthropic, deepseek, glm, openai, openrouter, gemini, ollama),
-/// it's inferred from the key. Set it explicitly only when aliasing
+/// (anthropic, cerebras, deepseek, gemini, glm, ollama, openai, opencode,
+/// openrouter, or custom), it is inferred from the key. Set it only when aliasing
 /// a built-in backend under a different name — e.g.
 /// `"ollama": { "provider_type": "openai", "base_url": "..." }`
 /// aliases the OpenAI-compatible backend under the alias `ollama`.
@@ -129,6 +129,8 @@ fn model_image_support(model: &str) -> ImageSupport {
         || m.starts_with("gpt-4-0314")
         || m.starts_with("o1-mini")
         || m.starts_with("o1-preview")
+        || m == "gpt-oss-120b"
+        || m == "zai-glm-4.7"
         // Text-only DeepSeek, but not the vision variants (deepseek-vl*),
         // which must fall through to the `-vl`/`vision` checks below.
         || (m.starts_with("deepseek") && !m.contains("-vl") && !m.contains("vision"))
@@ -153,6 +155,7 @@ fn model_image_support(model: &str) -> ImageSupport {
         || m.contains("vision")
         || m.contains("llava")
         || m.contains("pixtral")
+        || m == "gemma-4-31b"
         || m.starts_with("glm-4v");
     if yes {
         ImageSupport::Yes
@@ -274,6 +277,23 @@ mod image_support_tests {
             None
         ));
         assert!(supports_images(Some("ollama"), Some("qwen2.5"), Some(true)));
+    }
+
+    #[test]
+    fn cerebras_image_support_is_model_specific() {
+        let cases = [
+            ("gemma-4-31b", true),
+            ("gpt-oss-120b", false),
+            ("zai-glm-4.7", false),
+        ];
+
+        for (model, expected) in cases {
+            assert_eq!(
+                supports_images(Some("cerebras"), Some(model), None),
+                expected,
+                "unexpected image capability for Cerebras model {model}",
+            );
+        }
     }
 }
 
@@ -1545,8 +1565,8 @@ pub fn load() -> Config {
                 eprintln!(
                     "error: provider {:?} has invalid provider_type {:?}.\n\
                      Either the alias must match a built-in (openrouter, openai,\n\
-                     anthropic, gemini, deepseek, glm, ollama, custom) or set\n\
-                     `provider_type` explicitly to one of those.",
+                     anthropic, gemini, deepseek, glm, cerebras, opencode, ollama,\n\
+                     custom) or set `provider_type` explicitly to one of those.",
                     name, ptype,
                 );
                 std::process::exit(1);
@@ -2248,6 +2268,18 @@ mod provider_role_tests {
         let (name, entry) = cfg.resolve_role(ConfigRole::Review).unwrap();
         assert_eq!(name, "glm");
         assert_eq!(entry.model.as_deref(), Some("glm-4.6"));
+    }
+
+    #[test]
+    fn cerebras_bare_builtin_alias_resolves_without_provider_entry() {
+        let cfg = cfg_with_providers(r#"{ "provider": "cerebras" }"#);
+        let (name, entry) = cfg
+            .resolve_role(ConfigRole::Default)
+            .expect("bare Cerebras built-in should resolve");
+
+        assert_eq!(name, "cerebras");
+        assert!(entry.provider_type.is_none());
+        assert!(entry.model.is_none());
     }
 
     #[test]

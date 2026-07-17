@@ -253,6 +253,13 @@ pub(crate) enum AnyAgentInner {
             >,
         >,
     ),
+    Cerebras(
+        Agent<
+            openai::completion::CompletionModel<
+                compressing_http::CompressingHttpClient<reqwest::Client>,
+            >,
+        >,
+    ),
     OpenCode(
         Agent<
             openai::completion::CompletionModel<
@@ -560,11 +567,10 @@ impl AnyAgent {
     ///
     /// Returns immediately with `AgentRunner`; the loop runs on
     /// a spawned tokio task.
-    /// Return the provider name as a static string (matches the
-    /// CLI / config naming: "openai", "anthropic", ..., "glm",
-    /// "ollama", "openrouter", "custom"). Used to populate
-    /// `LoopConfig.provider_name` so the `getApiKey` hook
-    /// receives the canonical name (code review #2).
+    /// Return the provider name as a static string. Used to populate
+    /// `LoopConfig.provider_name` so the `getApiKey` hook receives the
+    /// canonical built-in identity rather than a configured alias.
+    ///
     pub fn provider_name(&self) -> &'static str {
         match &self.inner {
             AnyAgentInner::OpenRouter(_) => "openrouter",
@@ -576,6 +582,7 @@ impl AnyAgent {
             AnyAgentInner::Gemini(_) => "gemini",
             AnyAgentInner::DeepSeek(_) => "deepseek",
             AnyAgentInner::Glm(_) => "glm",
+            AnyAgentInner::Cerebras(_) => "cerebras",
             AnyAgentInner::OpenCode(_) => "opencode",
             AnyAgentInner::Ollama(_) => "ollama",
             AnyAgentInner::Custom(_) => "custom",

@@ -37,6 +37,9 @@ pub enum AnyClient {
         openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>,
     ),
     Glm(openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>),
+    Cerebras(
+        openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>,
+    ),
     OpenCode(
         openai::CompletionsClient<super::compressing_http::CompressingHttpClient<reqwest::Client>>,
     ),
@@ -72,6 +75,7 @@ impl AnyClient {
             AnyClient::Gemini(c) => AnyModel::Gemini(c.completion_model(name)),
             AnyClient::DeepSeek(c) => AnyModel::DeepSeek(c.completion_model(name)),
             AnyClient::Glm(c) => AnyModel::Glm(c.completion_model(name)),
+            AnyClient::Cerebras(c) => AnyModel::Cerebras(c.completion_model(name)),
             AnyClient::OpenCode(c) => AnyModel::OpenCode(c.completion_model(name)),
             AnyClient::Ollama(c) => AnyModel::Ollama(c.completion_model(name)),
             AnyClient::Custom(c) => AnyModel::Custom(c.completion_model(name)),
@@ -362,6 +366,11 @@ pub enum AnyModel {
             super::compressing_http::CompressingHttpClient<reqwest::Client>,
         >,
     ),
+    Cerebras(
+        openai::completion::CompletionModel<
+            super::compressing_http::CompressingHttpClient<reqwest::Client>,
+        >,
+    ),
     OpenCode(
         openai::completion::CompletionModel<
             super::compressing_http::CompressingHttpClient<reqwest::Client>,
@@ -428,6 +437,7 @@ impl AnyModel {
             AnyModel::Gemini(m) => one_shot!(m),
             AnyModel::DeepSeek(m) => one_shot!(m),
             AnyModel::Glm(m) => one_shot!(m),
+            AnyModel::Cerebras(m) => one_shot!(m),
             AnyModel::OpenCode(m) => one_shot!(m),
             AnyModel::Ollama(m) => one_shot!(m),
             AnyModel::Custom(m) => one_shot!(m),
@@ -484,6 +494,7 @@ impl AnyModel {
             AnyModel::Gemini(_) => "gemini",
             AnyModel::DeepSeek(_) => "deepseek",
             AnyModel::Glm(_) => "glm",
+            AnyModel::Cerebras(_) => "cerebras",
             AnyModel::OpenCode(_) => "opencode",
             AnyModel::Ollama(_) => "ollama",
             AnyModel::Custom(_) => "custom",
@@ -506,6 +517,7 @@ impl AnyModel {
             AnyModel::Gemini(m) => m.model.clone(),
             AnyModel::DeepSeek(m) => m.model.clone(),
             AnyModel::Glm(m) => m.model.clone(),
+            AnyModel::Cerebras(m) => m.model.clone(),
             AnyModel::OpenCode(m) => m.model.clone(),
             AnyModel::Ollama(m) => m.model.clone(),
             AnyModel::Custom(m) => m.model.clone(),

@@ -80,12 +80,10 @@ pub(crate) async fn summarize_with_model(
 
 /// Generic one-shot LLM call over any `AnyModel` variant with a caller-
 /// supplied system preamble. Factored out of `summarize_with_model` so
-/// every side-LLM role (summarizer, critic, approval evaluator) shares
-/// the same dispatch + retry/stream-drain path instead of duplicating
-/// the 8-arm variant match. `label` keeps each role distinct in
-/// retry/backoff telemetry (`run_with_retry`). The summarizer-sized
-/// prompt budget is applied here too (a no-op for the tiny
-/// approval/critic prompts).
+/// every side-LLM role shares the same exhaustive provider dispatch and
+/// retry/stream-drain path. `label` keeps each role distinct in telemetry.
+/// The summarizer-sized prompt budget is a no-op for tiny approval/critic
+/// prompts.
 pub(crate) async fn oneshot_with_model(
     model: super::AnyModel,
     label: &'static str,
@@ -120,6 +118,7 @@ pub(crate) async fn oneshot_with_model(
         super::AnyModel::Gemini(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::DeepSeek(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::Glm(m) => run_oneshot(m, label, preamble, prompt, disable).await,
+        super::AnyModel::Cerebras(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::OpenCode(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::Ollama(m) => run_oneshot(m, label, preamble, prompt, disable).await,
         super::AnyModel::Custom(m) => run_oneshot(m, label, preamble, prompt, disable).await,
@@ -282,6 +281,7 @@ mod tests {
         // untouched.
         assert_eq!(reasoning_disable_for_kind("anthropic"), None);
         assert_eq!(reasoning_disable_for_kind("openai"), None);
+        assert_eq!(reasoning_disable_for_kind("cerebras"), None);
     }
 
     #[test]

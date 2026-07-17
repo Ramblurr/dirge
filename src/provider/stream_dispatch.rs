@@ -2,12 +2,10 @@
 //! (dirge-iy20).
 //!
 //! `AnyAgent::build_stream_fn_with_filter` (matching `AnyAgentInner`)
-//! and `AnyModel::build_stream_fn` (matching `AnyModel`) both
-//! enumerate the same eight providers and call the same
-//! `rig_stream_fn_from_model_with_filter` helper. They were two
-//! parallel 8-arm matches: adding a provider meant editing both, and
-//! the compiler couldn't catch a missed arm (each match was already
-//! exhaustive over its own enum). This macro is the single list.
+//! and `AnyModel::build_stream_fn` (matching `AnyModel`) dispatch through
+//! this shared provider list and call the same
+//! `rig_stream_fn_from_model_with_filter` helper. Adding a provider here
+//! updates both paths, while each enum match remains exhaustive.
 
 /// Dispatch over a provider enum to build a `StreamFn`.
 ///
@@ -78,6 +76,9 @@ macro_rules! dispatch_stream_fn {
                 __stream_fn($model, $tools, $timeout, $provider, $model_name, $filter)
             }
             $enum::Glm($bind) => {
+                __stream_fn($model, $tools, $timeout, $provider, $model_name, $filter)
+            }
+            $enum::Cerebras($bind) => {
                 __stream_fn($model, $tools, $timeout, $provider, $model_name, $filter)
             }
             $enum::OpenCode($bind) => {

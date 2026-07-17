@@ -81,6 +81,105 @@ fn auto_detect_glm_api_key_wins_over_zhipu_when_both_set() {
     assert_eq!(auto_detect_provider_from(env), Some("glm"));
 }
 
+#[test]
+fn cerebras_auto_detects_from_its_key_in_isolation() {
+    let env = mock_env(&[("CEREBRAS_API_KEY", "test-cerebras-key")]);
+    assert_eq!(auto_detect_provider_from(env), Some("cerebras"));
+}
+
+#[test]
+fn cerebras_empty_key_is_skipped_before_ollama() {
+    assert!(
+        PROVIDER_AUTODETECT_ORDER
+            .iter()
+            .any(|entry| *entry == ("CEREBRAS_API_KEY", "cerebras")),
+        "Cerebras must participate in autodetection",
+    );
+    let env = mock_env(&[
+        ("CEREBRAS_API_KEY", ""),
+        ("OLLAMA_API_KEY", "test-ollama-key"),
+    ]);
+    assert_eq!(auto_detect_provider_from(env), Some("ollama"));
+}
+
+#[test]
+fn cerebras_autodetect_preserves_existing_precedence() {
+    let without_cerebras: Vec<_> = PROVIDER_AUTODETECT_ORDER
+        .iter()
+        .copied()
+        .filter(|(env_var, _)| *env_var != "CEREBRAS_API_KEY")
+        .collect();
+    assert_eq!(
+        without_cerebras,
+        vec![
+            ("DEEPSEEK_API_KEY", "deepseek"),
+            ("OPENAI_API_KEY", "openai"),
+            ("ANTHROPIC_API_KEY", "anthropic"),
+            ("GEMINI_API_KEY", "gemini"),
+            ("GLM_API_KEY", "glm"),
+            ("ZHIPU_API_KEY", "glm"),
+            ("OPENCODE_API_KEY", "opencode"),
+            ("OLLAMA_API_KEY", "ollama"),
+            ("OPENROUTER_API_KEY", "openrouter"),
+        ],
+    );
+
+    let position = |env_var: &str| {
+        PROVIDER_AUTODETECT_ORDER
+            .iter()
+            .position(|(candidate, _)| *candidate == env_var)
+            .unwrap_or_else(|| panic!("missing autodetect entry for {env_var}"))
+    };
+    assert!(position("OPENCODE_API_KEY") < position("CEREBRAS_API_KEY"));
+    assert!(position("CEREBRAS_API_KEY") < position("OLLAMA_API_KEY"));
+    assert!(position("CEREBRAS_API_KEY") < position("OPENROUTER_API_KEY"));
+}
+
+#[test]
+fn cerebras_standard_key_lookup_uses_only_cerebras_api_key() {
+    let kind = parse_provider("cerebras").expect("cerebras should be a built-in provider");
+    let key = resolve_api_key_from(
+        kind,
+        None,
+        None,
+        mock_env(&[("CEREBRAS_API_KEY", "test-cerebras-key")]),
+    )
+    .expect("standard Cerebras key should resolve");
+
+    assert_eq!(key, "test-cerebras-key");
+    assert!(provider_env_var_fallbacks(kind).is_empty());
+}
+
+#[test]
+fn cerebras_standard_key_lookup_never_falls_back_to_openai() {
+    let kind = parse_provider("cerebras").expect("cerebras should be a built-in provider");
+    let err = resolve_api_key_from(
+        kind,
+        None,
+        None,
+        mock_env(&[("OPENAI_API_KEY", "test-openai-key-must-not-leak")]),
+    )
+    .expect_err("an OpenAI key must not authenticate Cerebras");
+    let message = err.to_string();
+
+    assert!(
+        message.contains("CEREBRAS_API_KEY"),
+        "unexpected error: {message}"
+    );
+    assert!(!message.contains("test-openai-key-must-not-leak"));
+}
+
+#[test]
+fn cerebras_builtin_name_is_protected_from_plugin_shadowing() {
+    let err = validate_custom_provider("CEREBRAS", "https://interceptor.invalid/v1", false, true)
+        .expect_err("plugins must not shadow the Cerebras built-in");
+
+    assert!(
+        err.contains("collides with built-in"),
+        "unexpected error: {err}"
+    );
+}
+
 /// No stored `dirge auth` login → no provider implied, so the
 /// caller falls through to the openrouter default.
 #[test]
@@ -1244,4 +1343,59 @@ fn injected_tool_is_gated_then_visible_then_dispatchable() {
         agent.loop_tools.iter().any(|t| t.name() == "mcp_demo"),
         "dispatch must find the tool by name"
     );
+}
+
+#[tokio::test]
+async fn cerebras_identity_survives_client_model_and_agent_construction() {
+    use clap::Parser;
+
+    let client =
+        create_client_with_auth("cerebras", Some("test-cerebras-key"), &HashMap::new(), None)
+            .expect("Cerebras client should build without network access");
+    let model = client.completion_model(default_model_for("cerebras"));
+    assert_eq!(
+        (model.provider_name(), model.name()),
+        ("cerebras", "gemma-4-31b".to_string()),
+    );
+
+    let cli = crate::cli::Cli::parse_from(["dirge", "--provider", "cerebras", "--no-tools"]);
+    let cfg = crate::config::Config {
+        provider: Some("cerebras".to_string()),
+        no_tools: Some(true),
+        ..Default::default()
+    };
+    let context = crate::context::ContextFiles {
+        agents: None,
+        prompts: HashMap::new(),
+        agent_defs: Default::default(),
+        current_agent: None,
+        current_prompt: None,
+        current_prompt_name: None,
+        current_prompt_deny_tools: Vec::new(),
+        prompt_layer: None,
+        agent_layer: None,
+        model_before_agent: None,
+    };
+    let agent = build_agent(
+        model,
+        &cli,
+        &cfg,
+        &context,
+        None,
+        None,
+        None,
+        None,
+        None,
+        #[cfg(feature = "lsp")]
+        None,
+        crate::sandbox::Sandbox::new(crate::sandbox::SandboxMode::Off),
+        #[cfg(feature = "mcp")]
+        None,
+        #[cfg(feature = "semantic")]
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(agent.provider_name(), "cerebras");
 }

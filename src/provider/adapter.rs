@@ -22,6 +22,9 @@ pub enum EffortWire {
     /// Top-level `{"reasoning_effort":"low"|"medium"|"high"|"max"}` — hosted
     /// DeepSeek honors this (not the nested form) and supports the "max" tier.
     TopLevelEffort,
+    /// Top-level `{"reasoning_effort":"low"|"medium"|"high"}` with
+    /// unsupported extreme levels clamped to the standard three-value set.
+    TopLevelStandardEffort,
     /// `{"thinking":{"type":"enabled","budget_tokens":N}}` — Anthropic (budget).
     AnthropicBudget,
     /// `{"thinking_config":{"thinking_budget":N}}` — Gemini (budget).
@@ -72,6 +75,10 @@ pub fn reasoning_profile(provider: Option<&str>) -> ReasoningProfile {
         Some("glm") => ReasoningProfile {
             effort: EffortWire::NestedEffort,
             disable: DisableWire::ThinkingToggle,
+        },
+        Some("cerebras") => ReasoningProfile {
+            effort: EffortWire::TopLevelStandardEffort,
+            disable: DisableWire::None,
         },
         Some("openai") => ReasoningProfile {
             effort: EffortWire::NestedEffort,
@@ -169,6 +176,8 @@ impl ReasoningProfile {
                 .map(|e| serde_json::json!({ "reasoning": { "effort": e } })),
             EffortWire::TopLevelEffort => thinking_level_to_deepseek_effort(level)
                 .map(|e| serde_json::json!({ "reasoning_effort": e })),
+            EffortWire::TopLevelStandardEffort => thinking_level_to_openai_effort(level)
+                .map(|effort| serde_json::json!({ "reasoning_effort": effort })),
             EffortWire::AnthropicBudget => {
                 let b = budget_for_level(level, budgets);
                 (b > 0).then(
@@ -225,6 +234,11 @@ mod tests {
                 DisableWire::ThinkingToggle,
             ),
             ("glm", EffortWire::NestedEffort, DisableWire::ThinkingToggle),
+            (
+                "cerebras",
+                EffortWire::TopLevelStandardEffort,
+                DisableWire::None,
+            ),
             ("openai", EffortWire::NestedEffort, DisableWire::None),
             (
                 "custom",
@@ -425,5 +439,31 @@ mod tests {
             thinking_level_to_deepseek_effort(ThinkingLevel::Xhigh),
             Some("max")
         );
+    }
+
+    #[test]
+    fn cerebras_uses_standard_top_level_effort_without_max_or_disable_knob() {
+        let profile = reasoning_profile(Some("cerebras"));
+        for (level, expected) in [
+            (ThinkingLevel::Minimal, "low"),
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::Xhigh, "high"),
+        ] {
+            let params = profile
+                .effort_params(level, None)
+                .expect("enabled Cerebras reasoning should produce params");
+            assert_eq!(
+                params,
+                serde_json::json!({ "reasoning_effort": expected }),
+                "unexpected Cerebras params for {level:?}",
+            );
+            assert_ne!(params["reasoning_effort"], "max");
+            assert!(params.get("reasoning_level").is_none());
+        }
+
+        assert_eq!(profile.effort_params(ThinkingLevel::Off, None), None);
+        assert_eq!(profile.disable_params(), None);
     }
 }

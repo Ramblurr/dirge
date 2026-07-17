@@ -99,6 +99,7 @@ fn build_stream_fn() -> Option<crate::agent::agent_loop::StreamFn> {
         AnyModel::Gemini(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
         AnyModel::DeepSeek(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
         AnyModel::Glm(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
+        AnyModel::Cerebras(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
         AnyModel::OpenCode(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
         AnyModel::Ollama(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
         AnyModel::Custom(m) => rig_stream_fn_from_model(m, vec![], chunk_timeout),
@@ -909,6 +910,213 @@ async fn h7_glm_scenario_3_tool_dispatch() {
     assert!(
         final_resp.to_lowercase().contains("pineapple"),
         "expected 'pineapple' in final response; got: {final_resp:?}"
+    );
+}
+
+// =====================================================================
+// Cerebras scenarios
+// =====================================================================
+
+fn cerebras_model(model_name: &str) -> Option<crate::provider::AnyModel> {
+    use rig::client::CompletionClient;
+
+    let key = match std::env::var("CEREBRAS_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            eprintln!("[skipped] CEREBRAS_API_KEY is unset");
+            return None;
+        }
+    };
+    let client = crate::provider::create_client(
+        "cerebras",
+        Some(key.as_str()),
+        &std::collections::HashMap::new(),
+    )
+    .expect("Cerebras client should build from CEREBRAS_API_KEY");
+    Some(client.completion_model(model_name))
+}
+
+fn cerebras_spawn_config(
+    stream_fn: crate::agent::agent_loop::StreamFn,
+    system_prompt: &str,
+    initial_prompt: &str,
+    tools: Vec<Arc<dyn crate::agent::agent_loop::LoopTool>>,
+    model_name: &str,
+) -> LoopSpawnConfig {
+    LoopSpawnConfig {
+        stream_fn,
+        system_prompt: system_prompt.to_string(),
+        history: Vec::new(),
+        initial_prompt_images: Vec::new(),
+        initial_prompt: initial_prompt.to_string(),
+        tools,
+        #[cfg(feature = "plugin")]
+        plugin_mgr: None,
+        steering_queue: None,
+        tool_execution: crate::agent::agent_loop::types::ToolExecutionMode::Sequential,
+        event_channel_capacity: 256,
+        provider_name: Some("cerebras".to_string()),
+        model_name: Some(model_name.to_string()),
+        asset_dir: None,
+        summarize_fn: None,
+        tool_def_filter: None,
+        dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
+        verifier: None,
+        critic_fn: None,
+        code_review_fn: None,
+        code_review_mode: crate::agent::agent_loop::types::CodeReviewMode::default(),
+        open_issues_gate_mode: crate::agent::agent_loop::types::GateMode::Off,
+        session_id: None,
+        goal_fn: None,
+        goal: None,
+        max_turns: None,
+        bg_store: None,
+        memory_provider: None,
+    }
+}
+
+#[tokio::test]
+async fn h7_cerebras_streaming_returns_non_empty_assistant_text() {
+    let model_name = crate::provider::default_model_for("cerebras");
+    let Some(model) = cerebras_model(model_name) else {
+        return;
+    };
+    assert_eq!(model.provider_name(), "cerebras");
+    let inner = model.build_stream_fn(
+        Vec::new(),
+        std::time::Duration::from_secs(60),
+        Some("cerebras".to_string()),
+    );
+    let stream_fn = retrying_stream_fn(inner, RecoveryPolicy::default());
+    let runner = spawn_loop_runner(cerebras_spawn_config(
+        stream_fn,
+        "You are a concise assistant.",
+        "Reply with a short greeting.",
+        Vec::new(),
+        model_name,
+    ))
+    .into_agent_runner();
+    let (events, response) = drain_to_done(runner).await;
+    dump_events(&events);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error(_))),
+        "Cerebras streaming produced an error: {events:?}",
+    );
+    assert!(
+        !response.unwrap_or_default().trim().is_empty(),
+        "Cerebras should return non-empty assistant text",
+    );
+}
+
+#[derive(Debug)]
+struct CerebrasEchoTool;
+
+impl crate::agent::agent_loop::LoopTool for CerebrasEchoTool {
+    fn name(&self) -> &str {
+        "echo_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Echo the given text back. Always use this when asked to echo text."
+    }
+
+    fn label(&self) -> &str {
+        "Echo"
+    }
+
+    fn parameters(&self) -> &serde_json::Value {
+        static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARAMETERS.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "Text to echo" }
+                },
+                "required": ["text"]
+            })
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _id: &'a str,
+        args: serde_json::Value,
+        _signal: crate::agent::agent_loop::tool::AbortSignal,
+        _on_update: crate::agent::agent_loop::tool::LoopToolUpdate,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::agent::agent_loop::result::LoopToolResult, String>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let text = args
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(missing)");
+            Ok(crate::agent::agent_loop::result::LoopToolResult {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": format!("ECHO: {text}"),
+                })],
+                details: serde_json::Value::Null,
+                terminate: None,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn h7_cerebras_tool_dispatch_completes_round_trip() {
+    use crate::agent::agent_loop::loop_tool_to_rig_definition;
+
+    let model_name = "gpt-oss-120b";
+    let Some(model) = cerebras_model(model_name) else {
+        return;
+    };
+    assert_eq!(model.provider_name(), "cerebras");
+    let tool: Arc<dyn crate::agent::agent_loop::LoopTool> = Arc::new(CerebrasEchoTool);
+    let tool_definition = loop_tool_to_rig_definition(tool.as_ref());
+    let inner = model.build_stream_fn(
+        vec![tool_definition],
+        std::time::Duration::from_secs(60),
+        Some("cerebras".to_string()),
+    );
+    let stream_fn = retrying_stream_fn(inner, RecoveryPolicy::default());
+    let runner = spawn_loop_runner(cerebras_spawn_config(
+        stream_fn,
+        "You have an echo_tool. When asked to echo text, you must call the tool, then confirm its result.",
+        "Use echo_tool to echo the word pineapple.",
+        vec![tool],
+        model_name,
+    ))
+    .into_agent_runner();
+    let (events, response) = drain_to_done(runner).await;
+    dump_events(&events);
+
+    let tool_calls = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::ToolCall { .. }))
+        .count();
+    let tool_results = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::ToolResult { .. }))
+        .count();
+    assert!(tool_calls >= 1, "expected a Cerebras tool call");
+    assert_eq!(tool_calls, tool_results, "every tool call must complete");
+    let final_response = response.unwrap_or_default();
+    assert!(
+        final_response.to_ascii_lowercase().contains("pineapple"),
+        "expected final response to use the completed tool result: {final_response:?}",
     );
 }
 

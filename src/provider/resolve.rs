@@ -20,6 +20,7 @@ pub enum ProviderKind {
     Gemini,
     DeepSeek,
     Glm,
+    Cerebras,
     Ollama,
     OpenCode,
     Custom,
@@ -38,6 +39,7 @@ pub fn default_model_for(provider_name: &str) -> &'static str {
         Some(ProviderKind::Gemini) => "gemini-2.0-flash",
         Some(ProviderKind::DeepSeek) => "deepseek-v4-pro",
         Some(ProviderKind::Glm) => "glm-5.2",
+        Some(ProviderKind::Cerebras) => "gemma-4-31b",
         Some(ProviderKind::OpenCode) => "deepseek-v4-flash",
         Some(ProviderKind::Ollama) => "llama3",
         // OpenRouter + Custom + unknown — keep the historical default
@@ -80,6 +82,7 @@ pub fn parse_provider(name: &str) -> Option<ProviderKind> {
         "gemini" | "google" => Some(ProviderKind::Gemini),
         "deepseek" => Some(ProviderKind::DeepSeek),
         "glm" | "zhipu" => Some(ProviderKind::Glm),
+        "cerebras" => Some(ProviderKind::Cerebras),
         "opencode" => Some(ProviderKind::OpenCode),
         "ollama" => Some(ProviderKind::Ollama),
         "custom" => Some(ProviderKind::Custom),
@@ -153,9 +156,10 @@ pub enum ModelSwitch {
 /// the configured `providers`.
 ///
 /// Precedence:
-///   1. An EXACT pin on another provider's `model` → switch to it. Highest
-///      confidence: the user declared that id belongs to that provider.
-///   2. Otherwise infer the id's family ([`model_family`]):
+///   1. A model explicitly pinned on the active provider, or the active
+///      provider kind's built-in default, stays on the active client.
+///   2. An exact pin on another provider's `model` switches to it.
+///   3. Otherwise infer the id's family ([`model_family`]):
 ///      - unclassifiable, or same kind as the active provider → `Keep` (the
 ///        active client already speaks this family; just rename).
 ///      - a different kind with a configured provider of that kind → switch to
@@ -168,7 +172,18 @@ pub fn resolve_model_switch(
     active: &str,
     model: &str,
 ) -> ModelSwitch {
-    // 1. Exact pin on a different provider wins.
+    let active_entry = providers
+        .get(active)
+        .or_else(|| providers.get(&active.to_ascii_lowercase()));
+    if active_entry.and_then(|entry| entry.model.as_deref()) == Some(model) {
+        return ModelSwitch::Keep;
+    }
+
+    let active_kind = active_provider_kind(providers, active);
+    if active_kind.is_some_and(|kind| default_model_for(kind_label(kind)) == model) {
+        return ModelSwitch::Keep;
+    }
+
     if let Some(alias) = providers.iter().find_map(|(alias, entry)| {
         (entry.model.as_deref() == Some(model) && !alias.eq_ignore_ascii_case(active))
             .then(|| alias.clone())
@@ -176,18 +191,12 @@ pub fn resolve_model_switch(
         return ModelSwitch::Switch(alias);
     }
 
-    // 2. Family inference. Unclassifiable ids keep the current client — same
-    //    behavior as before this fix, so a local / same-provider alt id isn't
-    //    disturbed.
     let Some(family) = model_family(model) else {
         return ModelSwitch::Keep;
     };
-    // The id belongs to the active provider's own kind → keep + rename.
-    if active_provider_kind(providers, active) == Some(family) {
+    if active_kind == Some(family) {
         return ModelSwitch::Keep;
     }
-    // A different kind: route to a configured provider of that kind if one
-    // exists (deterministic pick — sorted alias), else flag the misconfig.
     match configured_alias_for_kind(providers, family) {
         Some(alias) => ModelSwitch::Switch(alias),
         None => ModelSwitch::NoProviderForFamily(kind_label(family).to_string()),
@@ -236,6 +245,7 @@ fn kind_label(kind: ProviderKind) -> &'static str {
         ProviderKind::Gemini => "gemini",
         ProviderKind::DeepSeek => "deepseek",
         ProviderKind::Glm => "glm",
+        ProviderKind::Cerebras => "cerebras",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenCode => "opencode",
         ProviderKind::Custom => "custom",
@@ -382,6 +392,8 @@ const BUILTIN_PROVIDER_NAMES: &[&str] = &[
     "deepseek",
     "glm",
     "zhipu",
+    "cerebras",
+    "opencode",
     "ollama",
     "openrouter",
     "custom",
@@ -526,6 +538,7 @@ fn provider_env_var(kind: ProviderKind) -> &'static str {
         ProviderKind::Gemini => "GEMINI_API_KEY",
         ProviderKind::DeepSeek => "DEEPSEEK_API_KEY",
         ProviderKind::Glm => "GLM_API_KEY",
+        ProviderKind::Cerebras => "CEREBRAS_API_KEY",
         ProviderKind::OpenCode => "OPENCODE_API_KEY",
         ProviderKind::Ollama => "OLLAMA_API_KEY",
         ProviderKind::OpenRouter => "OPENROUTER_API_KEY",
@@ -561,6 +574,7 @@ pub(crate) const PROVIDER_AUTODETECT_ORDER: &[(&str, &str)] = &[
     // primary one; users with only ZHIPU_API_KEY still get glm.
     ("ZHIPU_API_KEY", "glm"),
     ("OPENCODE_API_KEY", "opencode"),
+    ("CEREBRAS_API_KEY", "cerebras"),
     ("OLLAMA_API_KEY", "ollama"),
     ("OPENROUTER_API_KEY", "openrouter"),
 ];
@@ -775,6 +789,23 @@ mod model_family_tests {
 }
 
 #[cfg(test)]
+mod cerebras_identity_tests {
+    use super::*;
+
+    #[test]
+    fn cerebras_parses_case_insensitively_and_defaults_to_gemma_4_31b() {
+        for name in ["cerebras", "CEREBRAS", "CeReBrAs"] {
+            assert_eq!(
+                parse_provider(name).map(kind_label),
+                Some("cerebras"),
+                "provider name {name:?} should resolve canonically",
+            );
+        }
+        assert_eq!(default_model_for("cerebras"), "gemma-4-31b");
+    }
+}
+
+#[cfg(test)]
 mod resolve_model_switch_tests {
     use super::*;
 
@@ -894,6 +925,60 @@ mod resolve_model_switch_tests {
         assert_eq!(
             resolve_model_switch(&providers, "deepseek", "glm-4.6"),
             ModelSwitch::Switch("glm-a".to_string())
+        );
+    }
+
+    #[test]
+    fn cerebras_builtin_default_model_keeps_the_active_client() {
+        assert_eq!(default_model_for("cerebras"), "gemma-4-31b");
+        assert_eq!(
+            resolve_model_switch(&HashMap::new(), "cerebras", "gemma-4-31b"),
+            ModelSwitch::Keep,
+        );
+    }
+
+    #[test]
+    fn cerebras_configured_active_model_wins_before_family_inference() {
+        let providers = HashMap::from([(
+            "cerebras".to_string(),
+            typed_entry("cerebras", Some("gpt-oss-120b")),
+        )]);
+
+        assert_eq!(
+            resolve_model_switch(&providers, "cerebras", "gpt-oss-120b"),
+            ModelSwitch::Keep,
+        );
+    }
+
+    #[test]
+    fn cerebras_active_pin_wins_when_another_provider_pins_the_same_model() {
+        let providers = HashMap::from([
+            (
+                "cerebras".to_string(),
+                typed_entry("cerebras", Some("gpt-oss-120b")),
+            ),
+            (
+                "openai".to_string(),
+                typed_entry("openai", Some("gpt-oss-120b")),
+            ),
+        ]);
+
+        assert_eq!(
+            resolve_model_switch(&providers, "cerebras", "gpt-oss-120b"),
+            ModelSwitch::Keep,
+        );
+    }
+
+    #[test]
+    fn opencode_configured_active_gateway_model_also_keeps_its_client() {
+        let providers = HashMap::from([(
+            "opencode".to_string(),
+            typed_entry("opencode", Some("gpt-oss-120b")),
+        )]);
+
+        assert_eq!(
+            resolve_model_switch(&providers, "opencode", "gpt-oss-120b"),
+            ModelSwitch::Keep,
         );
     }
 }

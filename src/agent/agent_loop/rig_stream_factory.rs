@@ -707,10 +707,14 @@ pub fn loop_tool_to_rig_definition(tool: &dyn LoopTool) -> ToolDefinition {
 ///     "high" | "max" }` — top-level string, not nested inside
 ///     `reasoning`. DeepSeek's hosted API supports a "max" tier
 ///     above "high".
+///   - "cerebras": `{ "reasoning_effort": "low" | "medium" | "high" }`
+///     at the top level. `Minimal` clamps to `low`, `Xhigh` clamps to
+///     `high`, and `Off` omits the field.
 ///   - "openai" / "glm" / "custom" (all openai-shaped):
 ///     `{ "reasoning": { "effort": "low" | "medium" | "high" } }`
 ///     per OpenAI Responses spec. Maps ThinkingLevel:
-///       - Off / Minimal / Low → "low"
+///       - Off → omit reasoning
+///       - Minimal / Low → "low"
 ///       - Medium → "medium"
 ///       - High / Xhigh → "high"
 ///   - "openrouter": same as openai (openrouter forwards
@@ -1517,6 +1521,39 @@ mod tests {
                 "deepseek must not have nested reasoning key for level {level:?}"
             );
         }
+    }
+
+    #[test]
+    fn cerebras_reasoning_maps_to_supported_top_level_effort() {
+        for (level, expected) in [
+            (ThinkingLevel::Minimal, "low"),
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::Xhigh, "high"),
+        ] {
+            let opts = opts_with_reasoning(level);
+            let params = build_provider_additional_params(Some("cerebras"), &opts)
+                .expect("Cerebras reasoning should produce request params");
+
+            assert_eq!(
+                params,
+                serde_json::json!({ "reasoning_effort": expected }),
+                "unexpected Cerebras request params for {level:?}",
+            );
+            assert_ne!(params["reasoning_effort"], "max");
+            assert!(params.get("reasoning_level").is_none());
+            assert!(params.get("reasoning").is_none());
+        }
+    }
+
+    #[test]
+    fn cerebras_off_omits_all_reasoning_fields() {
+        let opts = opts_with_reasoning(ThinkingLevel::Off);
+        assert_eq!(
+            build_provider_additional_params(Some("cerebras"), &opts),
+            None,
+        );
     }
 
     /// GLM, Custom, OpenRouter share OpenAI's nested
